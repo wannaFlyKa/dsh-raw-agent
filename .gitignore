@@ -1,0 +1,25 @@
+# dependencies and build output
+node_modules/
+lib/
+dist/
+coverage/
+*.tsbuildinfo
+
+# local-only material (see CLAUDE.md)
+research/
+.dsh-dev/
+CLAUDE.local.md
+
+# live-test artifacts
+playwright-report/
+test-results/
+*.png.tmp
+
+# env and secrets
+.env
+.env.*
+!.env.example
+
+# logs and OS files
+*.log
+.DS_Store
