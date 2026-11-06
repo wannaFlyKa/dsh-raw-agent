@@ -108,6 +108,18 @@ export interface LiveChannel {
  */
 export type ToolResultBlock = { type: 'text'; text: string } | { type: 'image'; attachment: unknown };
 
+/**
+ * R8.4: a live delta stamped this long before its step opened means the step was opened late
+ * (a buffered wake turn, D26), so DSH's time to first token and speed would be wrong.
+ */
+export const UNTIMED_SKEW_MS = 250;
+/**
+ * R8.4: a step whose output over its decode window is above this speed is a burst (the API sent
+ * a short answer at once), not a real speed. Such a step keeps its usage but no timing. The
+ * ceiling is above any published Claude output speed (**unverified** for future fast modes).
+ */
+export const MAX_PLAUSIBLE_TOKENS_PER_SECOND = 500;
+
 export interface CommitInput {
   blocks: DshBlock[];
   usage?: DshUsage;
@@ -157,6 +169,14 @@ export class TurnLog {
   /** D44: audit ids asked in this turn without a decision yet. */
   readonly #approvals = new Set<string>();
   #triggered = false;
+  /** R8.4: when the open step started (its request), and its first token. */
+  #openedAt = 0;
+  #firstTokenAt: number | undefined;
+  #reasoningStreamed = false;
+  /** R8.4: this step's live timing is not real; its durable stream gets no deltas. */
+  #untimed = false;
+  /** Tool-call blocks that already have their first-token marker in this attempt. */
+  #toolMarked = new Set<number>();
 
   constructor(session: DshSession, live: LiveChannel, turn: number, opts: WriterOptions) {
     this.#session = session;
@@ -200,19 +220,33 @@ export class TurnLog {
     this.#append('user/message', message, { surfaceOp: 'append' });
   }
 
-  openStep(): void {
+  /**
+   * Open a step. `startedAt`: when the agent really began it (its request, or its response when
+   * no request was seen). A step opened well after that has no real timing (R8.4).
+   */
+  openStep(startedAt?: number): void {
     if (this.#stepOpen) throw new WriterAssertError('refused step/start: a step is already open');
     this.#step += 1;
     this.#append('step/start', { turn: this.#turn, step: this.#step });
     this.#stepOpen = true;
     this.#hasMessage = false;
     this.#calls = new Map();
+    this.#openedAt = this.#now();
+    this.#untimed = startedAt !== undefined && this.#openedAt - startedAt > UNTIMED_SKEW_MS;
     this.#beginAttempt();
+  }
+
+  /** R8.4: whether the open step's timing reaches DSH (tests and diagnostics). */
+  get stepTimed(): boolean {
+    return this.#stepOpen && !this.#untimed;
   }
 
   #beginAttempt(): void {
     this.#recorder = new StreamRecorder();
     this.#started = new Set();
+    this.#toolMarked = new Set();
+    this.#firstTokenAt = undefined;
+    this.#reasoningStreamed = false;
     this.#frameIndex = 0;
     this.#attemptId = this.#live.nextAttemptId();
     // D20: `start` right after step/start, before any other append.
@@ -246,12 +280,54 @@ export class TurnLog {
     }
   }
 
-  /** A live delta (D20), stamped with its real arrival time. Tool-input text is not streamed (D21). */
-  delta(kind: 'text' | 'reasoning' | 'tool-input', blockIndex: number, text: string, at: number): void {
-    if (!this.#stepOpen || this.#hasMessage || kind === 'tool-input' || text === '') return;
-    const time = Math.max(Math.trunc(at), 0);
+  /**
+   * A live delta (D20), stamped with its real arrival time. Tool-input text is not streamed (D21):
+   * a tool call gets one name-only `tool-call-delta` at its first input, as DSH's own providers
+   * send at a call's start, so a step with only a tool call still has a real first token (R8.4).
+   * The block-end of the call decides its content.
+   */
+  delta(
+    kind: 'text' | 'reasoning' | 'tool-input',
+    blockIndex: number,
+    text: string,
+    at: number,
+    tool?: { id: string; name: string },
+  ): void {
+    if (!this.#stepOpen || this.#hasMessage || text === '') return;
+    let time = Math.max(Math.trunc(at), 0);
+    if (this.#openedAt - time > UNTIMED_SKEW_MS) this.#untimed = true;
+    time = Math.max(time, this.#openedAt); // a small skew: never a token before its step
+    if (kind === 'tool-input') {
+      if (tool === undefined || tool.id === '' || tool.name === '' || this.#toolMarked.has(blockIndex)) return;
+      if (this.#started.has(blockIndex)) return; // the slot already holds another block type
+      this.#toolMarked.add(blockIndex);
+      this.#startUpTo(blockIndex, 'tool-call', time);
+      this.#firstTokenAt ??= time;
+      this.#push(
+        { type: 'tool-call-delta', index: blockIndex, id: tool.id, name: tool.name, argumentsDelta: '' },
+        time,
+      );
+      return;
+    }
     this.#startUpTo(blockIndex, kind, time);
+    this.#firstTokenAt ??= time;
+    if (kind === 'reasoning') this.#reasoningStreamed = true;
     this.#push({ type: kind === 'text' ? 'text-delta' : 'reasoning-delta', index: blockIndex, text }, time);
+  }
+
+  /**
+   * R8.4: may this step's live timing reach DSH's TTFT and speed figures? Not when the step was
+   * opened late, when its thinking was counted but never streamed (the speed would include the
+   * hidden thinking), or when its output came as a burst faster than any model writes.
+   */
+  #timingHonest(usage: DshUsage | undefined, at: number): boolean {
+    if (this.#untimed) return false;
+    if (usage === undefined || this.#firstTokenAt === undefined) return true;
+    if ((usage.reasoningTokens ?? 0) > 0 && !this.#reasoningStreamed) return false;
+    const decodeMs = at - this.#firstTokenAt;
+    if (usage.outputTokens <= 0) return true;
+    if (decodeMs <= 0) return false;
+    return (usage.outputTokens * 1000) / decodeMs <= MAX_PLAUSIBLE_TOKENS_PER_SECOND;
   }
 
   /**
@@ -290,7 +366,13 @@ export class TurnLog {
     const expected = interrupted
       ? input.blocks.filter((b) => (b.type === 'text' || b.type === 'reasoning') && b.text.trim() !== '')
       : input.blocks;
-    const at = this.#now();
+    const at = Math.max(this.#now(), this.#firstTokenAt ?? 0);
+    // R8.4: a step whose timing is not real keeps its content and usage but no deltas, so DSH
+    // counts no first token and no speed for it (its live view already streamed).
+    if (!this.#recorder.empty && !this.#timingHonest(interrupted ? undefined : input.usage, at)) {
+      this.#recorder = new StreamRecorder();
+      this.#started = new Set();
+    }
     encodeTail(at);
     let records = this.#recorder.snapshot();
     if (!this.#opts.skipStreamCheck && !deepEqual(this.#content(records, interrupted), expected)) {

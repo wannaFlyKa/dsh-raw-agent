@@ -52,6 +52,8 @@ describe('client bundle (module-loader format)', () => {
     expect(slots).toEqual([
       'conversation.session.header.actions',
       'register conversation.session.header.actions',
+      'conversation.composer.dock',
+      'register conversation.composer.dock',
       'conversation.input.left',
       'register conversation.input.left',
     ]);

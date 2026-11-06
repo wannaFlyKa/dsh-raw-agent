@@ -119,7 +119,22 @@ export {
   type TurnSink,
   type TurnInput,
   type TurnOutcome,
+  type UsageAnswer,
+  type ContextAnswer,
+  CONTEXT_REPORT_MIN_MS,
 } from './driver.js';
+export {
+  UsageBoard,
+  USAGE_TURNS_KEPT,
+  USAGE_EVENTS_KEPT,
+  type UsageView,
+  type UsageSummary,
+  type ContextView,
+  type TurnUsageRow,
+  type CompactionRow,
+  type RetryRow,
+  type ResetRow,
+} from './usage.js';
 
 export interface RawAgentHostOptions {
   /** Passed by the composition root (packages/plugin), one per backend kind (D80). */

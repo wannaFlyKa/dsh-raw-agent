@@ -8,10 +8,12 @@ import { wakeTriggerOf, type ChildAddress, type WakeTrigger } from '../agents-mo
 import { createApi, type FetchFn, type RawAgentApi } from '../api.js';
 import { ChildLinks } from '../child-links.js';
 import { SessionStores, type SessionControlStore } from '../session-store.js';
+import { UsageReaders } from '../usage-reader.js';
 import type { HostActions } from '../ui/actions.js';
 import { AgentsHeader } from '../ui/agents-panel.js';
 import { AskPanel } from '../ui/ask-cards.js';
 import { SessionControls } from '../ui/controls.js';
+import { ContextPill } from '../ui/usage-panel.js';
 import { WakeTriggerCard } from '../ui/wake-card.js';
 import { WorkflowNodeView } from '../ui/workflow-panel.js';
 
@@ -447,6 +449,18 @@ export function childChatAddress(address: ChildAddress): string {
   return `${CHILD_CHAT_ADDRESS}${encodeURIComponent(address.childSessionId)}?${query.toString()}`;
 }
 
+/**
+ * M5 (D59): the ambient row below the composer card (`P/dsh-client-ui-conversation`, slots.d.ts
+ * `conversation.composer.dock`). DSH renders this list and then its own context ring in the same
+ * dock (`P/dsh-client-ui-conversation/lib/client.js:22216-22223`); the ring draws nothing in our
+ * sessions because we never write `request/context`, so our pill takes its place. DSH's own stat
+ * pills are `activity` (order 0) and `usage` (order 1) (`P/dsh-client-ui-chat/lib/client.js:15561-15575`).
+ */
+export const CONTEXT_PILL_SLOT = 'conversation.composer.dock';
+export const CONTEXT_PILL_ENTRY_ID = 'raw-agent-context';
+/** After DSH's token pill, where the ring sat. */
+export const CONTEXT_PILL_ORDER = 2;
+
 /** Title-adjacent session actions of the session header (`P/dsh-client-ui-conversation` slots). */
 export const AGENTS_SLOT = 'conversation.session.header.actions';
 export const AGENTS_ENTRY_ID = 'raw-agent-agents';
@@ -714,9 +728,11 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
   const api = options.api ?? createApi(fetchFn);
   const stores = new SessionStores(api);
   const links = new ChildLinks(api);
+  const readers = new UsageReaders(stores, api);
   const actions = hostActions(ctx);
   ctx.effect?.(
     () => () => {
+      readers.dispose();
       stores.dispose();
       links.dispose();
     },
@@ -822,6 +838,18 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
         inject: (sessionId: string) => ({ sessionId, stores, links, actions }),
       },
       AgentsHeader as React.ComponentType<never>,
+    ),
+  );
+  // M5 (D59): the context pill and usage panel, in the dock where DSH's context ring would be.
+  ctx.slots.inject(CONTEXT_PILL_SLOT, () =>
+    ctx.slots.register(
+      {
+        name: CONTEXT_PILL_SLOT,
+        id: CONTEXT_PILL_ENTRY_ID,
+        order: CONTEXT_PILL_ORDER,
+        inject: (sessionId: string) => ({ store: stores.get(sessionId), reader: readers.get(sessionId), actions }),
+      },
+      ContextPill as React.ComponentType<never>,
     ),
   );
   ctx.slots.inject(CONTROLS_SLOT, () =>

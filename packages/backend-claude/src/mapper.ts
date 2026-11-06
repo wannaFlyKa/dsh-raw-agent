@@ -41,6 +41,8 @@ import {
 } from './wire.js';
 import { ChildAgents } from './children.js';
 import { WorkflowRuns, taskUsageOf, type WorkflowRunsOptions } from './workflows.js';
+import { canonicalModel } from './model-id.js';
+import { UsageLedger } from './usage.js';
 
 type ToolResultEvent = Extract<BackendEvent, { type: 'tool-result' }>;
 
@@ -56,6 +58,9 @@ interface Slot {
   uuid?: string;
   /** Removed by a tombstone before it was written (D84). */
   dropped?: boolean;
+  /** A tool_use slot's id and tool name, from content_block_start (R8.4 first-token marker). */
+  toolId?: string;
+  toolName?: string;
 }
 
 /** D86: a reasoning block with no text (a signed, empty `thinking`) is not written. */
@@ -93,18 +98,11 @@ export interface MapperOptions {
   debug?: (note: string, msg: unknown) => void;
   /** Workflow runs: the live transcript poll's sink, folder guard and test seams (D49). */
   workflows?: Omit<WorkflowRunsOptions, 'now' | 'debug'>;
+  /** Usage accounting (D57-D60). Default: a ledger for a new session. */
+  usage?: UsageLedger;
 }
 
-/** Shorten provider-specific model ids for display (D61). The inference-profile form is **unverified**. */
-export function canonicalModel(model: string | undefined): string | undefined {
-  if (model === undefined) return undefined;
-  let m = model;
-  const slash = m.lastIndexOf('/');
-  if (m.startsWith('arn:') && slash >= 0) m = m.slice(slash + 1);
-  m = m.replace(/^(?:[a-z]{2,4}\.)?anthropic\./, '');
-  m = m.replace(/-v\d+(?::\d+)?$/, '');
-  return m;
-}
+export { canonicalModel } from './model-id.js';
 
 function usageFromStart(u: WireMessage['usage'] | undefined): Usage | undefined {
   if (!isObject(u)) return undefined;
@@ -199,6 +197,13 @@ export class ClaudeMessageMapper {
   readonly #workflows: WorkflowRuns;
   /** Workflow launches whose call result is held (D18): emitted after that result. */
   #pendingLaunches = new Map<string, Record<string, unknown>>();
+  readonly #usage: UsageLedger;
+  /** The CLI session id of the frames (D70: it changes after a conversation reset). */
+  #sessionId: string | undefined;
+  /** A `conversation_reset` seen; its event waits for the first frame of the new conversation. */
+  #pendingReset: { from: string | undefined; hinted: string | undefined; trigger: string | undefined } | undefined;
+  /** A compaction is running (`status: compacting` seen, no end yet). */
+  #compacting = false;
 
   constructor(tracker: SentInputTracker, options: MapperOptions = {}) {
     this.#tracker = tracker;
@@ -206,6 +211,12 @@ export class ClaudeMessageMapper {
     this.#debug = options.debug ?? (() => {});
     this.#children = new ChildAgents({ debug: this.#debug });
     this.#workflows = new WorkflowRuns({ ...options.workflows, now: this.#now, debug: this.#debug });
+    this.#usage = options.usage ?? new UsageLedger({ now: this.#now });
+  }
+
+  /** Usage accounting of this stream (D57-D60). */
+  get usage(): UsageLedger {
+    return this.#usage;
   }
 
   /** Workflow runs seen on this stream (D48). */
@@ -231,6 +242,14 @@ export class ClaudeMessageMapper {
     if (!isObject(raw)) return [];
     const msg = raw as WireMessage;
     const out: BackendEvent[] = [];
+    const sid = str(msg.session_id);
+    if (msg.type !== 'conversation_reset') {
+      // D70: the reset frame names a conversation id, but the CLI goes on under the id its next
+      // frames carry (live M5 probe A: they differ). The first frame with a new id is the start.
+      if (this.#pendingReset !== undefined && sid !== undefined && sid !== this.#pendingReset.from)
+        this.#flushReset(sid, out);
+      if (sid !== undefined) this.#sessionId = sid;
+    }
     switch (msg.type) {
       case 'system':
         this.#system(msg, at, out);
@@ -254,6 +273,17 @@ export class ClaudeMessageMapper {
       case 'tombstone':
         this.#tombstone(msg, out);
         break;
+      case 'conversation_reset':
+        if (this.#pendingReset !== undefined) this.#flushReset(this.#pendingReset.hinted, out);
+        this.#pendingReset = {
+          from: this.#sessionId ?? sid,
+          hinted: str(msg.new_conversation_id),
+          trigger: str(msg.trigger),
+        };
+        break;
+      case 'rate_limit_event':
+        out.push(...this.#usage.rateLimit(msg.rate_limit_info)); // D60
+        break;
       default:
         this.#debug('ignored message type', msg);
     }
@@ -272,6 +302,20 @@ export class ClaudeMessageMapper {
     this.#pendingLaunches.clear();
     out.push(error === undefined ? { type: 'exit' } : { type: 'exit', error });
     return out;
+  }
+
+  /** D70: the conversation was reset; `newSessionId` is the id the CLI now runs under. */
+  #flushReset(newSessionId: string | undefined, out: BackendEvent[]): void {
+    const r = this.#pendingReset;
+    this.#pendingReset = undefined;
+    if (r === undefined) return;
+    const id = newSessionId ?? r.hinted;
+    if (id !== undefined) {
+      const e: Extract<BackendEvent, { type: 'conversation-reset' }> = { type: 'conversation-reset', newSessionId: id };
+      if (r.trigger !== undefined) e.trigger = r.trigger;
+      out.push(e);
+    }
+    out.push(...this.#usage.conversationReset(r.trigger));
   }
 
   // ---- consumption and turn start ----
@@ -321,13 +365,60 @@ export class ClaudeMessageMapper {
         const version = str(msg.claude_code_version);
         if (version !== undefined) e.version = version;
         out.push(e);
+        out.push(...this.#usage.apiKeySource(str(msg.apiKeySource))); // R8.3
         break;
       }
       case 'status': {
         const mode = str(msg.permissionMode);
         if (mode !== undefined) out.push({ type: 'mode', mode });
-        if (msg.status === 'requesting') this.#maybeTurnStart(msg, out);
-        else this.#consume(strArray(msg.user_message_uuids), out);
+        if (msg.status === 'requesting') {
+          this.#maybeTurnStart(msg, out);
+          // R8.4: the main thread's model request starts here (children have no stream, D68).
+          if (!msg.parent_tool_use_id) out.push({ type: 'request-start', agent: MAIN, at });
+        } else this.#consume(strArray(msg.user_message_uuids), out);
+        // D59: compaction start, and its failure (success ends at compact_boundary).
+        if (msg.status === 'compacting' && !this.#compacting) {
+          this.#compacting = true;
+          out.push({ type: 'compaction', phase: 'start' });
+        }
+        if (msg.compact_result === 'failed') {
+          this.#compacting = false;
+          const e: Extract<BackendEvent, { type: 'compaction' }> = { type: 'compaction', phase: 'end' };
+          e.error = str(msg.compact_error) ?? 'Compaction failed';
+          out.push(e);
+        }
+        // 'success' comes just before compact_boundary (CLI 2.1.318), which ends the compaction:
+        // keep the flag, or the boundary would announce a second start (M5 live).
+        break;
+      }
+      case 'compact_boundary': {
+        const meta = isObject(msg.compact_metadata) ? msg.compact_metadata : {};
+        if (!this.#compacting) out.push({ type: 'compaction', phase: 'start' });
+        this.#compacting = false;
+        const e: Extract<BackendEvent, { type: 'compaction' }> = { type: 'compaction', phase: 'end' };
+        if (meta.trigger === 'manual' || meta.trigger === 'auto') e.trigger = meta.trigger;
+        const pre = num(meta.pre_tokens);
+        if (pre !== undefined) e.preTokens = pre;
+        const post = num(meta.post_tokens);
+        if (post !== undefined) e.postTokens = post;
+        out.push(e);
+        out.push(...this.#usage.compacted(post));
+        break;
+      }
+      case 'api_retry': {
+        // D60: retries (throttling on every account type) show inline.
+        const e: Extract<BackendEvent, { type: 'retry' }> = {
+          type: 'retry',
+          attempt: num(msg.attempt) ?? 1,
+          error: str(msg.error) ?? 'unknown',
+        };
+        const max = num(msg.max_retries);
+        if (max !== undefined) e.maxRetries = max;
+        const delay = num(msg.retry_delay_ms);
+        if (delay !== undefined) e.delayMs = delay;
+        const status = num(msg.error_status);
+        if (status !== undefined) e.httpStatus = status;
+        out.push(e);
         break;
       }
       case 'task_started': {
@@ -447,7 +538,14 @@ export class ClaudeMessageMapper {
         const kind = slotKind(ev.content_block);
         if (step === undefined || index === undefined || kind === undefined) return;
         step.positions.set(index, step.slots.length);
-        step.slots.push({ kind, streamed: '' });
+        const slot: Slot = { kind, streamed: '' };
+        if (kind === 'tool-call') {
+          const b = ev.content_block as { id?: unknown; name?: unknown } | undefined;
+          const toolId = str(b?.id);
+          const toolName = str(b?.name);
+          if (toolId !== undefined && toolName !== undefined) [slot.toolId, slot.toolName] = [toolId, toolName];
+        }
+        step.slots.push(slot);
         return;
       }
       case 'content_block_delta': {
@@ -468,7 +566,20 @@ export class ClaudeMessageMapper {
         // The block's position among the blocks that will be written (D86: empty reasoning has none).
         let pos = 0;
         for (let i = 0; i < slotIndex; i++) if (slotKept(step.slots[i]!)) pos++;
-        out.push({ type: 'delta', agent: MAIN, stepId: step.id, kind, blockIndex: pos, text, at });
+        const delta: Extract<BackendEvent, { type: 'delta' }> = {
+          type: 'delta',
+          agent: MAIN,
+          stepId: step.id,
+          kind,
+          blockIndex: pos,
+          text,
+          at,
+        };
+        if (kind === 'tool-input' && slot.toolId !== undefined && slot.toolName !== undefined) {
+          delta.toolCallId = slot.toolId;
+          delta.toolName = slot.toolName;
+        }
+        out.push(delta);
         return;
       }
       case 'message_delta': {
@@ -601,6 +712,7 @@ export class ClaudeMessageMapper {
       }
       if (uuid !== undefined) e.lastChainId = uuid;
       out.push(e);
+      if (e.usage !== undefined) out.push(...this.#usage.mainCall(id, e.usage, e.model)); // D57
       for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
       this.#children.teamMessages(blocks, MAIN, out);
     }
@@ -670,6 +782,7 @@ export class ClaudeMessageMapper {
     const hasCall = blocks.some((b) => b.type === 'tool-call');
     if (step.aborted && !hasCall) e.interrupted = true;
     out.push(e);
+    if (step.usage !== undefined) out.push(...this.#usage.mainCall(step.id, step.usage, step.model)); // D57
     for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
     this.#flushResults(out);
     this.#children.teamMessages(blocks, MAIN, out);
@@ -732,7 +845,17 @@ export class ClaudeMessageMapper {
   #result(msg: WireResult, out: BackendEvent[]): void {
     const numTurns = num(msg.num_turns);
     const text = str(msg.result) ?? '';
-    if (!this.#turnOpen && numTurns === 0 && text === '') {
+    // D70: a reset whose new conversation sent no other frame first.
+    if (this.#pendingReset !== undefined) this.#flushReset(this.#pendingReset.hinted, out);
+    // D58: every result moves the usage baseline, a skipped one too (the /clear result, D70).
+    const usage = this.#usage.result(msg);
+    this.#compacting = false; // a compaction never outlives its command's result
+    // An empty result that answers one of our inputs (its `started` lifecycle frame came while no
+    // turn was open, e.g. `/compact` or `/clear`) ends that turn; only a stray one is skipped.
+    const answersOurs =
+      this.#consumedWhileIdle || strArray(msg.user_message_uuids).some((id) => this.#tracker.wasSent(id));
+    if (!this.#turnOpen && numTurns === 0 && text === '' && !answersOurs) {
+      out.push(...usage);
       this.#debug('empty result skipped', msg); // sdk-surface answer 17
       return;
     }
@@ -770,6 +893,7 @@ export class ClaudeMessageMapper {
     };
     if (reason !== undefined) e.reason = reason;
     if (error !== undefined) e.error = error;
+    out.push(...usage); // before the turn's end, so the turn carries its usage (D58)
     out.push(e);
     this.#children.mainTurnEnded(outcome, out);
     this.#turnOpen = false;

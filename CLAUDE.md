@@ -79,6 +79,10 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Stopped workflow agents** come as `error` with the CLI's text "Stopped because the workflow was stopped". Show them as stopped, not failed. On a crash (run stop reason `error`), running agents settle as `error`.
 - **Workflow controls:** the SDK can stop only the whole run (`stopTask(runTaskId)`). `stopTask(agentId)` is a silent no-op, and pause, skip and retry are TUI-only. Do not offer them (D48).
 - **Ultracode** is a session toggle, not an effort level: the TUI and our picker send `apply_flag_settings {ultracode: true}` only. A later effort pick (`{effortLevel}`) turns it off. The typed keyword works only on user frames with `origin: {kind: 'human'}`.
+- **Local command results** (`/compact`, `/clear`, `/context`) come with `num_turns: 0` and empty text. One that answers our input must still end the DSH turn, or every later message queues. They also say `duration_api_ms: 0`, but the next real result is the running total again: do not treat that 0 as a counter restart.
+- **`/clear` new id:** take the conversation id from the next frame's `session_id`, not from `conversation_reset.new_conversation_id`.
+- **Usage panel re-reads:** never key a re-read on a summary's `at` stamp; each route read re-stamps it, which loops the usage control.
+- **DSH's token meter** counts the main thread only and is not reset by `/clear`; our pill and panel include child tokens. The two totals differ by design (D68).
 
 ## 5. Development workflow
 
@@ -135,4 +139,5 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live team tests:** set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` on the test DSH process only (the plugin never sets it).
 - **Live ultracode frame checks:** point the dev profile's `raw-agent.config.executablePath` at a small wrapper that `tee`s stdin to a file and `exec`s the real `claude`. Restore `cordis.patch.yml` afterwards.
 - **Live workflow approval:** a Workflow launch asks permission only outside `auto`/bypass modes. Test it in `default` mode.
+- **Live usage checks:** a wrapper that `tee`s the CLI's stdout (same `executablePath` trick) captures its `result`, `rate_limit_event` and `compact_boundary` frames for comparison with our panel. This machine has only Bedrock auth; subscription limits are unit-tested only.
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

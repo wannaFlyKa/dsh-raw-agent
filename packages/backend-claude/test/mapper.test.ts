@@ -109,11 +109,14 @@ describe('mapper on a recorded foreground tool turn', () => {
         "input-consumed 003",
         "session-info",
         "turn-start user",
+        "request-start",
         "step-start msg_01",
         "step-message msg_01 [tool-call]",
         "tool-result toolu_01",
+        "request-start",
         "step-start msg_02",
         "step-message msg_02 [text]",
+        "usage",
         "turn-end completed completed pending=0",
       ]
     `);
@@ -350,6 +353,38 @@ describe('mapper edge cases', () => {
 
   it('skips an empty result outside a turn', () => {
     expect(run([{ type: 'result', subtype: 'success', num_turns: 0, result: '', terminal_reason: null }])).toEqual([]);
+  });
+
+  it('ends the turn of a local command with an empty result (/compact, M5 live)', () => {
+    // CLI 2.1.318 /compact: lifecycle started, status compacting, compact_boundary, then a result with
+    // num_turns 0 and result ''. Before the fix the result was skipped and the DSH turn never ended.
+    const ev = run(
+      [
+        { type: 'command_lifecycle', command_uuid: 'c', state: 'started' },
+        { type: 'system', subtype: 'status', status: 'compacting' },
+        { type: 'system', subtype: 'status', status: null, compact_result: 'success' },
+        {
+          type: 'system',
+          subtype: 'compact_boundary',
+          compact_metadata: { trigger: 'manual', pre_tokens: 9, post_tokens: 3 },
+        },
+        {
+          type: 'result',
+          subtype: 'success',
+          num_turns: 0,
+          result: '',
+          user_message_uuids: ['c'],
+          terminal_reason: null,
+        },
+        { type: 'command_lifecycle', command_uuid: 'c', state: 'completed' },
+      ],
+      (t) => t.sent('c'),
+    );
+    const types = ev.map((e) => e.type);
+    expect(types.filter((x) => x === 'compaction')).toHaveLength(2); // one start, one end
+    expect(types).toContain('input-consumed');
+    expect(types.indexOf('turn-start')).toBeLessThan(types.indexOf('turn-end'));
+    expect(ev.at(-1)).toMatchObject({ type: 'turn-end', outcome: 'completed', pendingInputs: 0 });
   });
 
   it('error results carry the CLI text; interrupted only after Stop (D71)', () => {

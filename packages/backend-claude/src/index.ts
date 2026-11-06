@@ -93,3 +93,15 @@ export {
   type TailFs,
 } from './workflow-tail.js';
 export { effortFlags } from './session.js';
+export {
+  UsageLedger,
+  authFromAccount,
+  costLabelFor,
+  parseModelUsage,
+  parseModelEntry,
+  parseRateLimitInfo,
+  parseUsageLimits,
+  parseContextUsage,
+  type RateLimitReport,
+  type UsageLedgerOptions,
+} from './usage.js';

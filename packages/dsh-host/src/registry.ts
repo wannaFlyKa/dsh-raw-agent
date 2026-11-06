@@ -60,7 +60,9 @@ export type RegisteredRuntime = Pick<
   | 'stopWorkflow'
   | 'stopWorkflowAgent'
   | 'taskOutput'
->;
+> &
+  // M5: optional, so a runtime from an older agent bundle still registers (D87).
+  Partial<Pick<SessionRuntime, 'usage' | 'contextUsage'>>;
 
 export class SessionRegistry {
   readonly apiVersion = 1;

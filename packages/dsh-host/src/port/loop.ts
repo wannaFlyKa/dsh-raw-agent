@@ -169,8 +169,11 @@ function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext): TurnSink {
       return log.openCallIds;
     },
     hasCall: (id) => log.hasCall(id),
-    openStep: () => log.openStep(),
-    delta: (k, i, t, at) => log.delta(k, i, t, at),
+    get turn() {
+      return log.turn;
+    },
+    openStep: (startedAt) => log.openStep(startedAt),
+    delta: (k, i, t, at, tool) => log.delta(k, i, t, at, tool),
     commit: (m) => {
       const input: Parameters<TurnLog['commit']>[0] = {
         blocks: m.blocks.map((b: ContentBlock) => (b.type === 'reasoning' ? { type: 'reasoning', text: b.text } : b)),

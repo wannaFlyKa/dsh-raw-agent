@@ -4,6 +4,7 @@
 // the spike does not emit yet are listed at the end as a comment and are added in place later.
 
 import type { AgentRef } from './backend.js';
+import type { AuthInfo, CostLabel, PlanLimits, TurnUsage, UsageTotals } from './usage.js';
 
 /** A content block as the DSH writer stores it. `arguments` is the exact JSON string (D21). */
 export type ContentBlock =
@@ -83,6 +84,13 @@ export interface TaskUsage {
 export type BackendEvent =
   | { type: 'session-info'; model?: string; mode?: string; version?: string }
   | { type: 'turn-start'; origin: 'user' | 'self' }
+  /**
+   * R8.4 (M5): the agent sent a main-thread model request (Claude: `system/status requesting`).
+   * The DSH layer opens the step here, so the step starts at the request and DSH's
+   * time-to-first-token is the real one. The `step-start` of the response then joins that step.
+   * `at`: when the frame arrived.
+   */
+  | { type: 'request-start'; agent: AgentRef; at: number }
   | { type: 'step-start'; agent: AgentRef; stepId: string; at: number; synthetic?: boolean }
   | {
       type: 'delta';
@@ -92,6 +100,9 @@ export type BackendEvent =
       blockIndex: number;
       text: string;
       at: number;
+      /** 'tool-input' only (R8.4): the call's id and tool name, so DSH sees when the call began. */
+      toolCallId?: string;
+      toolName?: string;
     }
   | {
       type: 'step-message';
@@ -235,10 +246,43 @@ export type BackendEvent =
   | { type: 'interaction-done'; id: string }
   /** The agent withdrew an interaction (its abort signal also fires). */
   | { type: 'interaction-cancel'; id: string }
+  /**
+   * D58: the conversation's running totals, after a turn (`turn` set) or when they change
+   * between turns (a background agent's calls, a baseline read, a reset to zero after D70).
+   * Never sent for a synthetic or local-command step that counted nothing.
+   */
+  | { type: 'usage'; cumulative: UsageTotals; turn?: TurnUsage; costLabel: CostLabel }
+  /**
+   * D59: the context the main thread sent on its last model call (`used`), against the model's
+   * window. Sent after each main-thread call with usage, after a compaction and after a reset.
+   */
+  | { type: 'context'; used: number; window: number; autoCompactAt?: number }
+  /** D59: the agent compacts its conversation (start), or finished or failed doing so (end). */
+  | {
+      type: 'compaction';
+      phase: 'start' | 'end';
+      trigger?: 'manual' | 'auto';
+      preTokens?: number;
+      postTokens?: number;
+      error?: string;
+    }
+  /** D60: plan limits changed (a live rate-limit report, or a read of the usage control). */
+  | { type: 'limits'; limits: PlanLimits }
+  /** D60: a model call failed and the agent retries it (throttling shows here, for every account). */
+  | {
+      type: 'retry';
+      attempt: number;
+      maxRetries?: number;
+      delayMs?: number;
+      /** The agent's error kind ('rate_limit', 'overloaded', …). */
+      error: string;
+      httpStatus?: number;
+    }
+  /** R8.3: how this session is billed (read from the live process, never from an extra one). */
+  | { type: 'auth'; auth: AuthInfo; costLabel: CostLabel }
   | { type: 'exit'; error?: string };
 
-// Not in the spike yet (added in place later, §7.2): title,
-// usage, context, compaction, limits, retry, commands.
+// Not in the spike yet (added in place later, §7.2): title, commands.
 
 export type BackendEventType = BackendEvent['type'];
 export type BackendEventOf<T extends BackendEventType> = Extract<BackendEvent, { type: T }>;

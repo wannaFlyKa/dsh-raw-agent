@@ -4,6 +4,7 @@
 // spike does not need yet are left out and will be added in place, not renamed.
 
 import type { BackendEvent } from './events.js';
+import type { ContextCategory, UsageSnapshot } from './usage.js';
 
 /** A backend kind the DSH layer can mount (D80). One preset and one catalog provider per factory. */
 export interface AgentBackendFactory {
@@ -160,6 +161,11 @@ export interface BackendControls {
   agents?(): Promise<AgentInfo[]>;
   commands?(): Promise<CommandInfo[]>;
   contextUsage?(detail: 'summary' | 'full'): Promise<ContextUsage>;
+  /**
+   * D58, D60: the conversation's totals, the cost label, the auth type and the plan limits, read
+   * from the live process (Claude: its usage control). Never starts a model call.
+   */
+  usageSnapshot?(): Promise<UsageSnapshot>;
   /** The end of a background shell or monitor task's output (Claude: `getTaskOutput`). */
   taskOutput?(taskId: string): Promise<TaskOutput>;
   /** Send a message to a running teammate (D50). Absent when the agent has no such control. */
@@ -441,11 +447,19 @@ export interface TrustState {
   question?: TrustQuestion;
 }
 
+/** D59: the agent's own context report (Claude: `getContextUsage`, the data behind `/context`). */
 export interface ContextUsage {
   used: number;
   window: number;
   autoCompactAt?: number;
-  categories?: Array<{ name: string; tokens: number }>;
+  /** false: the agent does not compact by itself. */
+  autoCompactEnabled?: boolean;
+  /** The agent's own percentage, when it reports one. */
+  percent?: number;
+  /** The agent's categories, in its order (classify on `id` and `kind`, never on `name`). */
+  categories?: ContextCategory[];
+  /** The model the report is for (display id, D61). */
+  model?: string;
 }
 
 /** What the user's own settings choose (R1.4). Display only; read without a process (D83). */

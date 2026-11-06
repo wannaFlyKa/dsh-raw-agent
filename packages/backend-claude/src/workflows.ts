@@ -182,6 +182,12 @@ interface AgentState {
   framing: string[];
   framingDone: boolean;
   usageKey?: string;
+  /**
+   * Live tokens from the agent's transcript (M5): its last model call's input + cache + output,
+   * the same sum the CLI puts in the row's `tokens` when the agent ends (live M4 run W: 17,348,
+   * 14,976 and 18,338 matched). Used only while the row is not settled.
+   */
+  liveTokens?: number;
   /** The row settled while the live poll runs: the agent ends after SETTLE_GRACE_MS. */
   settledAt?: number;
 }
@@ -413,6 +419,14 @@ export class WorkflowRuns {
         this.#readAgent(run, a, at, out, late);
         if (late && a.announced) this.#endAgent(run, a, undefined, out);
       }
+      // Live tokens read in this poll (M5): the row and the child's job line follow them.
+      const e = this.#snapshotEvent(run, at);
+      if (e !== undefined) out.push(e);
+      for (const a of run.agents.values()) {
+        if (!a.announced || a.ended) continue;
+        const row = this.#row(run, a);
+        if (row !== undefined) this.#usage(a, this.#liveRow(a, row), out);
+      }
     }
     return out;
   }
@@ -463,19 +477,9 @@ export class WorkflowRuns {
   #publish(run: Run, at: number, out: BackendEvent[], stopReason?: 'completed' | 'cancelled' | 'error'): void {
     const snap = run.snap;
     if (snap === undefined) return;
-    const key = JSON.stringify(snap);
-    if (key !== run.lastSent) {
-      run.lastSent = key;
-      const e: Extract<BackendEvent, { type: 'workflow-snapshot' }> = {
-        type: 'workflow-snapshot',
-        taskId: run.taskId,
-        phases: snap.phases,
-        agents: snap.agents,
-        at,
-      };
-      if (run.usage !== undefined) e.usage = run.usage;
-      out.push(e);
-    }
+    // The snapshot goes before the agents' events (their agent-start follows the first snapshot
+    // that names them), but it is built after their reads, so it carries their live tokens.
+    const pos = out.length;
     this.#syncAgents(run, at);
     for (const row of snap.agents) {
       if (row.agentId === undefined) continue;
@@ -484,11 +488,42 @@ export class WorkflowRuns {
       const settled = row.state === 'done' || row.state === 'error' || row.state === 'stopped';
       this.#readAgent(run, a, at, out, settled);
       if (!a.announced) continue;
-      this.#usage(a, row, out);
+      this.#usage(a, this.#liveRow(a, row), out);
       if (!settled) continue;
       if (stopReason === undefined && this.#timer !== undefined) a.settledAt ??= at;
       else this.#endAgent(run, a, stopReason, out);
     }
+    const e = this.#snapshotEvent(run, at);
+    if (e !== undefined) out.splice(pos, 0, e);
+  }
+
+  /** The run's snapshot with live tokens, if it changed since the last one sent. */
+  #snapshotEvent(run: Run, at: number): Extract<BackendEvent, { type: 'workflow-snapshot' }> | undefined {
+    const snap = run.snap;
+    if (snap === undefined) return undefined;
+    const agents = snap.agents.map((row) => {
+      const a = row.agentId === undefined ? undefined : run.agents.get(row.agentId);
+      return a === undefined ? row : this.#liveRow(a, row);
+    });
+    const key = JSON.stringify({ phases: snap.phases, agents });
+    if (key === run.lastSent) return undefined;
+    run.lastSent = key;
+    const e: Extract<BackendEvent, { type: 'workflow-snapshot' }> = {
+      type: 'workflow-snapshot',
+      taskId: run.taskId,
+      phases: snap.phases,
+      agents,
+      at,
+    };
+    if (run.usage !== undefined) e.usage = run.usage;
+    return e;
+  }
+
+  /** A running row with the agent's live tokens (M5). A settled row keeps the CLI's own count. */
+  #liveRow(a: AgentState, row: WorkflowAgent): WorkflowAgent {
+    if (a.liveTokens === undefined || row.state === 'done' || row.state === 'error' || row.state === 'stopped')
+      return row;
+    return { ...row, tokens: a.liveTokens };
   }
 
   /** Register the agents a snapshot names for the first time. */
@@ -575,6 +610,17 @@ export class WorkflowRuns {
     };
     const uuid = str(raw.uuid);
     if (uuid !== undefined) wire.uuid = uuid;
+    if (raw.type === 'assistant') {
+      const usage = isObject(raw.message) && isObject(raw.message.usage) ? raw.message.usage : undefined;
+      if (usage !== undefined) {
+        const t =
+          (num(usage.input_tokens) ?? 0) +
+          (num(usage.cache_creation_input_tokens) ?? 0) +
+          (num(usage.cache_read_input_tokens) ?? 0) +
+          (num(usage.output_tokens) ?? 0);
+        if (t > 0) a.liveTokens = t;
+      }
+    }
     const evs: BackendEvent[] = [];
     if (raw.type === 'assistant') this.#kids.assistant(wire, at, evs);
     else this.#kids.user(wire, at, evs);

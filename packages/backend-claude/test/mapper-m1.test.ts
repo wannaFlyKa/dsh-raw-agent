@@ -29,7 +29,10 @@ function run(name: string): BackendEvent[] {
 
 const summary = (events: BackendEvent[]) =>
   events
-    .filter((e) => !['delta', 'session-info', 'mode', 'input-consumed'].includes(e.type))
+    .filter(
+      (e) =>
+        !['delta', 'session-info', 'mode', 'input-consumed', 'usage', 'context', 'auth', 'limits'].includes(e.type),
+    )
     .map((e) => {
       if (e.type === 'step-start') return `step-start ${e.stepId}${e.synthetic ? ' synthetic' : ''}`;
       if (e.type === 'step-message')
@@ -54,6 +57,7 @@ describe('W1: re-sent frames (hand-built fixture)', () => {
   it('writes the re-sent tool_use once and skips a cumulative frame', () => {
     expect(summary(events)).toEqual([
       'turn-start',
+      'request-start',
       'step-start msg_01',
       'step-message msg_01 [toolu_01] usage',
       'tool-result toolu_01',
@@ -136,6 +140,7 @@ describe('D84 (1): stream failure, then the non-streaming fallback (hand-built)'
   it('opens one step for the whole response; its frames continue it; usage once', () => {
     expect(summary(events)).toEqual([
       'turn-start',
+      'request-start',
       'step-start msg_01',
       'step-start msg_02',
       'step-message msg_02 [text] cont usage',
@@ -153,6 +158,7 @@ describe('D84 (2): tombstones (hand-built)', () => {
   it('drops the tombstoned tool use and its buffered result, and reports the uuids', () => {
     expect(summary(events)).toEqual([
       'turn-start',
+      'request-start',
       'step-start msg_01',
       'superseded 00000000-0000-4000-9000-000000000001',
       'superseded 00000000-0000-4000-9000-000000000002',

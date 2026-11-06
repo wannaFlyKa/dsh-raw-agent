@@ -10,6 +10,7 @@ import type {
   BackendEvent,
   BackendEventOf,
   BackendUserConfig,
+  ContextUsage,
   ModelInfo,
   SessionChoiceRequest,
   TaskKind,
@@ -30,17 +31,27 @@ import {
   type ChildView,
   type TeamView,
 } from './children.js';
+import { UsageBoard, type ContextView, type UsageSummary, type UsageView } from './usage.js';
 import { WorkflowRecorder, type OpenWorkflowRun, type WorkflowRecord, type WorkflowView } from './workflows.js';
 
 /** What the driver writes into one open host turn. Implemented by the port writer. */
 export interface TurnSink {
+  /** The host turn this sink writes (absent in older sinks). */
+  readonly turn?: number;
   readonly stepOpen: boolean;
   /** The open step already has an assistant message (a further one is a D84 continuation). */
   readonly hasMessage: boolean;
   readonly openCallIds: string[];
   hasCall(callId: string): boolean;
-  openStep(): void;
-  delta(kind: 'text' | 'reasoning' | 'tool-input', blockIndex: number, text: string, at: number): void;
+  /** `startedAt`: when the agent began the step (its request, R8.4). */
+  openStep(startedAt?: number): void;
+  delta(
+    kind: 'text' | 'reasoning' | 'tool-input',
+    blockIndex: number,
+    text: string,
+    at: number,
+    tool?: { id: string; name: string },
+  ): void;
   commit(m: {
     blocks: ContentBlock[];
     usage?: Usage;
@@ -257,7 +268,29 @@ export interface SessionView {
   workflows?: WorkflowView[];
   /** D48: the backend can stop one workflow agent on its own (else only the whole run). */
   workflowAgentStop?: boolean;
+  /** M5: the context pill's data and short usage totals (the panel reads the usage route). */
+  usage?: UsageSummary;
 }
+
+/** The usage route's answer (D58-D60). Never starts a process. */
+export interface UsageAnswer {
+  running: boolean;
+  usage: UsageView;
+  /** The live process's usage control could not be read (the board is shown as it was). */
+  error?: string;
+}
+
+/** The context route's answer (D59). Never starts a process. */
+export interface ContextAnswer {
+  running: boolean;
+  /** The agent's report (live), else the last known figure. Absent: nothing known yet. */
+  context?: ContextView;
+  /** 'not-running', 'unsupported' or the agent's error, when no live report was read. */
+  reason?: string;
+}
+
+/** Context reports closer together than this are answered from the last one (D59). */
+export const CONTEXT_REPORT_MIN_MS = 1000;
 
 /** How long "Stop entire workflow" waits for the run's own end before it reports "stopping". */
 export const WORKFLOW_STOP_WAIT_MS = 2000;
@@ -313,7 +346,7 @@ class EventBox {
   }
 }
 
-const TURN_EVENTS = new Set(['turn-start', 'step-start', 'delta', 'step-message', 'tool-result']);
+const TURN_EVENTS = new Set(['turn-start', 'request-start', 'step-start', 'delta', 'step-message', 'tool-result']);
 
 /** An event that belongs to a child agent, not to this session's own turn (D45, D50). */
 export function isChildEvent(e: BackendEvent): boolean {
@@ -447,6 +480,11 @@ export class SessionRuntime {
   /** The mode choice was read back from the host log once (D24). */
   #modeRestored = false;
   readonly #listeners = new Set<(view: SessionView) => void>();
+  /** M5: what the agent reported about usage, context, limits and auth (never written to the log). */
+  readonly #usage: UsageBoard;
+  /** The open step was opened by a request and no response has joined it yet (R8.4). */
+  #requestStep = false;
+  #contextRead: { at: number; detail: string; promise: Promise<ContextAnswer> } | undefined;
   /** Told once when the runtime is disposed, so open channels close (D39). */
   readonly #endListeners = new Set<() => void>();
 
@@ -455,6 +493,7 @@ export class SessionRuntime {
     this.#port = port;
     this.#opts = opts;
     this.#now = opts.now ?? Date.now;
+    this.#usage = new UsageBoard(this.#now);
     this.#desk = new AskDesk(() => this.#notify(), this.#now, {
       opened: (view, info) => this.#auditOpened(view, info),
       closed: (id, outcome) => this.#auditClosed(id, outcome),
@@ -739,7 +778,67 @@ export class SessionRuntime {
       v.workflows = this.#workflows.views();
       v.workflowAgentStop = this.#backend?.capabilities.workflowAgentStop === true;
     }
+    const usage = this.#usage.summary();
+    if (usage) v.usage = usage;
     return v;
+  }
+
+  /**
+   * M5 usage panel (D58-D60): the board, refreshed from the live process's usage control when one
+   * runs. Never starts a process (rule 9) and never makes a model call.
+   */
+  async usage(): Promise<UsageAnswer> {
+    const backend = this.#backend;
+    const read = backend?.controls.usageSnapshot;
+    let error: string | undefined;
+    if (backend && read) {
+      try {
+        const snap = await read.call(backend.controls);
+        if (backend === this.#backend) this.#usage.snapshot(snap);
+      } catch (e) {
+        error = String((e as Error)?.message ?? e);
+      }
+    }
+    const answer: UsageAnswer = { running: backend !== undefined, usage: this.#usage.view() };
+    if (error !== undefined) answer.error = error;
+    return answer;
+  }
+
+  /**
+   * M5 context pill and panel (D59): the agent's own report, read from the live process only
+   * (Claude: `getContextUsage`). No process: the last known figure and `not-running`; the pill
+   * offers "Start" (D4). Reports closer than CONTEXT_REPORT_MIN_MS share one read.
+   */
+  contextUsage(detail: 'summary' | 'full' = 'summary'): Promise<ContextAnswer> {
+    const backend = this.#backend;
+    const last = (reason: string): ContextAnswer => {
+      const a: ContextAnswer = { running: backend !== undefined, reason };
+      const c = this.#usage.context;
+      if (c) a.context = c;
+      return a;
+    };
+    if (!backend) return Promise.resolve(last('not-running'));
+    const read = backend.controls.contextUsage;
+    if (!read) return Promise.resolve(last('unsupported'));
+    const now = this.#now();
+    const prior = this.#contextRead;
+    if (prior && now - prior.at < CONTEXT_REPORT_MIN_MS && (prior.detail === detail || detail === 'summary'))
+      return prior.promise;
+    const promise = (async (): Promise<ContextAnswer> => {
+      try {
+        const r: ContextUsage = await read.call(backend.controls, detail);
+        if (backend !== this.#backend) return last('not-running');
+        const c = this.#usage.report(r);
+        this.#notify();
+        const a: ContextAnswer = { running: true };
+        if (c) a.context = c;
+        return a;
+      } catch (e) {
+        return last(String((e as Error)?.message ?? e));
+      }
+    })();
+    this.#contextRead = { at: now, detail, promise };
+    return promise;
   }
 
   /**
@@ -1248,6 +1347,21 @@ export class SessionRuntime {
         }
         return;
       case 'conversation-reset':
+      case 'context':
+      case 'compaction':
+      case 'limits':
+      case 'auth':
+        // M5: state for the usage panel and the context pill; never a log event (D59).
+        if (this.#usage.apply(e, this.#box ? this.#sink?.turn : undefined)) this.#notify();
+        return;
+      case 'retry':
+        if (this.#usage.apply(e, this.#box ? this.#sink?.turn : undefined)) this.#notify();
+        return;
+      case 'usage':
+        // A turn's figure belongs to the host turn it ran in: inside a turn (or a wake turn
+        // still opening) it goes through the turn's queue, so it is bound when it is handled.
+        if (e.turn !== undefined && (this.#box || this.#wakeBuffer)) break;
+        if (this.#usage.apply(e)) this.#notify();
         return;
       case 'interaction-done':
         // D43: a URL elicitation completed; its waiting card closes.
@@ -1550,6 +1664,7 @@ export class SessionRuntime {
     const box = new EventBox();
     this.#box = box;
     this.#sink = sink;
+    this.#requestStep = false;
     this.#lateStopped = false; // a new turn takes what comes; a late turn end has pendingInputs > 0
     for (const e of this.#wakeBuffer ?? []) box.push(e);
     this.#wakeBuffer = undefined;
@@ -1630,6 +1745,8 @@ export class SessionRuntime {
         this.#warn('closing the step failed', String(error));
       }
       this.#turnActive = false;
+      this.#requestStep = false;
+      this.#usage.turnEnded();
       this.#touchIdle();
       // Events that arrived after the turn end belong to the agent's next, self-started turn.
       const rest = box.drain().filter((i): i is BackendEvent => i.type !== 'stop-timeout' && i.type !== 'ended');
@@ -1679,8 +1796,10 @@ export class SessionRuntime {
   }
 
   /** Open a step; the first step of a wake turn carries the turn's visible trigger (D26). */
-  #openStep(sink: TurnSink): void {
-    sink.openStep();
+  #openStep(sink: TurnSink, startedAt?: number): void {
+    this.#requestStep = false;
+    if (startedAt === undefined) sink.openStep();
+    else sink.openStep(startedAt);
     const text = this.#triggerPending;
     if (text === undefined) return;
     this.#triggerPending = undefined;
@@ -1696,17 +1815,43 @@ export class SessionRuntime {
   #handle(sink: TurnSink, e: Item, prepared?: SinkResultContent[]): TurnOutcome | undefined {
     try {
       switch (e.type) {
+        case 'request-start':
+          // R8.4: the step starts at the request, so DSH's first-token time is the real one. A
+          // retried request with nothing shown yet keeps its step (as DSH's own in-step retry).
+          if (sink.stepOpen) {
+            if (!sink.hasMessage && this.#requestStep) return undefined;
+            if (sink.hasMessage && sink.openCallIds.length > 0) return undefined; // results still due
+            sink.closeStep(); // a stale response, or a finished whole response (D18, D84)
+          }
+          this.#claimConsumed(sink);
+          this.#openStep(sink, e.at);
+          this.#requestStep = true;
+          return undefined;
         case 'step-start':
+          if (sink.stepOpen && !sink.hasMessage && this.#requestStep) {
+            this.#requestStep = false; // the response joins the step its request opened
+            return undefined;
+          }
           if (sink.stepOpen) sink.closeStep(); // stale step: attempt or repairs, then step/end (D18)
           this.#claimConsumed(sink);
-          this.#openStep(sink);
+          this.#openStep(sink, e.at);
           return undefined;
-        case 'delta':
-          sink.delta(e.kind, e.blockIndex, e.text, e.at);
+        case 'delta': {
+          const tool =
+            e.kind === 'tool-input' && e.toolCallId !== undefined && e.toolName !== undefined
+              ? { id: e.toolCallId, name: e.toolName }
+              : undefined;
+          if (tool) sink.delta(e.kind, e.blockIndex, e.text, e.at, tool);
+          else sink.delta(e.kind, e.blockIndex, e.text, e.at);
+          return undefined;
+        }
+        case 'usage':
+          if (this.#usage.apply(e, sink.turn)) this.#notify();
           return undefined;
         case 'step-message': {
           this.#noteChain(e.lastChainId);
           const continued = sink.stepOpen && sink.hasMessage;
+          this.#requestStep = false;
           if (!sink.stepOpen) {
             this.#claimConsumed(sink);
             this.#openStep(sink);

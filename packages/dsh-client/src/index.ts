@@ -8,6 +8,16 @@ export * from './view-model.js';
 export * from './asks-model.js';
 export * from './agents-model.js';
 export * from './workflow-model.js';
+export * from './usage-model.js';
+export { UsageReader, UsageReaders, type UsageReadSnapshot } from './usage-reader.js';
+export {
+  ContextPill,
+  ContextPillView,
+  ContextSection,
+  UsagePanel,
+  type ContextPillProps,
+  type UsagePanelProps,
+} from './ui/usage-panel.js';
 export { TaskOutputReader, type TaskOutputSnapshot } from './task-output.js';
 export { ChildLinks, ChildLinkStore, CHILD_LINK_RETRY_MS, type ChildLinkSnapshot } from './child-links.js';
 export {
@@ -53,6 +63,9 @@ export {
   fileResourceAddress,
   CONTROLS_SLOT,
   CONTROLS_ENTRY_ID,
+  CONTEXT_PILL_SLOT,
+  CONTEXT_PILL_ENTRY_ID,
+  CONTEXT_PILL_ORDER,
   TERMINAL_TAB_KIND,
   TESTED_DSH_VERSIONS,
   NATIVE_PERMISSION_SLOT,

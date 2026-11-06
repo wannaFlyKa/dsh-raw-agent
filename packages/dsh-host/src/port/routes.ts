@@ -110,6 +110,11 @@ export const WORKFLOW_AGENT_STOP_ROUTE = '/api/raw-agent/workflow-agent-stop';
 /** R6.2: the output of one of the session's own background shells or monitors (`?session=…&task=…`). */
 export const TASK_OUTPUT_ROUTE = '/api/raw-agent/task-output';
 
+/** M5 (D58-D60): the usage panel's data (`?session=…`). Reads the live process only. */
+export const USAGE_ROUTE = '/api/raw-agent/usage';
+/** M5 (D59): the context pill and breakdown (`?session=…&detail=summary|full`). Never spawns. */
+export const CONTEXT_ROUTE = '/api/raw-agent/context';
+
 /**
  * The lifecycle routes over the Host registry (D87). A session id names only a runtime the
  * registry already holds, so no route can reach a session outside our presets (D62).
@@ -274,7 +279,56 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
         return { status: 200, body: found };
       }),
     },
+    ...usageRoutes(registry),
     ...(controls ? sessionControlRoutes(registry, controls) : []),
+  ];
+}
+
+/**
+ * M5 usage routes. GET only, no body; a session id names only a runtime the registry holds
+ * (D62). Neither route starts a process (rule 9, D4): with no process they answer what is
+ * known, and the client offers "Start". Neither writes the DSH log (no `request/context`, D59).
+ */
+export function usageRoutes(registry: SessionRegistry): FetchRoute[] {
+  const missing = json(404, { error: 'not a session of this plugin' });
+  return [
+    {
+      path: USAGE_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const id = new URL(request.url).searchParams.get('session');
+        if (!id) return json(400, { error: 'missing session' });
+        const r = registry.get(id);
+        if (!r) return missing;
+        if (typeof r.usage !== 'function') return json(409, { error: 'this runtime has no usage data' });
+        try {
+          return json(200, await r.usage());
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: CONTEXT_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        if (!id) return json(400, { error: 'missing session' });
+        const detail = url.searchParams.get('detail') ?? 'summary';
+        if (detail !== 'summary' && detail !== 'full') return json(400, { error: 'detail must be summary or full' });
+        const r = registry.get(id);
+        if (!r) return missing;
+        if (typeof r.contextUsage !== 'function') return json(409, { error: 'this runtime has no context data' });
+        try {
+          return json(200, await r.contextUsage(detail));
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
   ];
 }
 
@@ -380,6 +434,8 @@ export function channelLine(view: SessionView): string {
     team: view.team ?? null,
     tasks: view.tasks ?? [],
     workflows: view.workflows ?? [],
+    // M5: the pill's small usage summary, so context and totals update without a poll (D59).
+    usage: view.usage ?? null,
   };
   return `${JSON.stringify(line)}\n`;
 }

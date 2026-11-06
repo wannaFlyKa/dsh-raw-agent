@@ -527,6 +527,54 @@ describe('live poll (D49)', () => {
     expect([...of(r.out, 'agent-end'), ...of(r.emitted, 'agent-end')]).toHaveLength(1);
   });
 
+  it('running agents show live tokens from their transcript; the CLI count wins once settled (M5)', () => {
+    const r = liveRun();
+    r.runs.progress(r.frame('start'), 0, r.out);
+    r.line({ type: 'user', uuid: 'u1', message: { role: 'user', content: `${FRAME_USER_REQUEST} hi` } });
+    r.line({ type: 'user', uuid: 'u2', message: { role: 'user', content: `${FRAME_COMPUTED_TASK}\n  Do it` } });
+    // Live M4 run W shape: the CLI's done row said 17,348 = 2 + 2,368 + 14,975 + 3 (last call).
+    const usage = (input: number, write: number, read: number, output: number) => ({
+      input_tokens: input,
+      cache_creation_input_tokens: write,
+      cache_read_input_tokens: read,
+      output_tokens: output,
+    });
+    r.line({
+      type: 'assistant',
+      uuid: 'a1',
+      message: {
+        id: 'm1',
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }],
+        usage: usage(2, 14975, 0, 49),
+      },
+    });
+    r.tick();
+    const rows = () => of(r.emitted, 'workflow-snapshot').map((e) => e.agents[0]?.tokens);
+    expect(rows().at(-1)).toBe(15026);
+    expect(of(r.emitted, 'task-progress').at(-1)).toMatchObject({ taskId: 'ag1', usage: { tokens: 15026 } });
+    // The snapshot comes before the agent's own events (agent-start follows the first snapshot).
+    const types = r.emitted.map((e) => e.type);
+    expect(types.indexOf('agent-start')).toBeLessThan(types.indexOf('step-message'));
+    r.line({
+      type: 'assistant',
+      uuid: 'a2',
+      message: {
+        id: 'm2',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'one' }],
+        usage: usage(2, 2368, 14975, 3),
+      },
+    });
+    r.tick();
+    expect(rows().at(-1)).toBe(17348);
+    const before = of(r.emitted, 'workflow-snapshot').length;
+    r.tick(); // nothing new: no new snapshot
+    expect(of(r.emitted, 'workflow-snapshot')).toHaveLength(before);
+    r.runs.progress(r.frame('done', { resultPreview: 'one', tokens: 17350 }), 0, r.out);
+    expect(of(r.out, 'workflow-snapshot').at(-1)?.agents[0]?.tokens).toBe(17350);
+  });
+
   it('falls back to the prompt preview when no framing shows in time', () => {
     const r = liveRun();
     r.runs.progress(r.frame('start'), 0, r.out);

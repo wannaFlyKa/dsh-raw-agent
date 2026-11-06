@@ -10,13 +10,13 @@ import {
   type BackendControls,
   type BackendEvent,
   type AgentInfo,
-  type ContextUsage,
   type EffortState,
   type ModelInfo,
   type TaskOutput,
   type UserInput,
 } from '@dsh-raw-agent/core';
 import { ClaudeMessageMapper } from './mapper.js';
+import { UsageLedger, parseContextUsage } from './usage.js';
 import type { Options, Query, SDKUserMessage } from './sdk.js';
 import { planChoices } from './interactions.js';
 import { AskContext } from './ask-context.js';
@@ -123,6 +123,9 @@ export function toSdkUserMessage(input: UserInput, mode: 'next' | 'queue'): SDKU
 
 type Loose = Record<string, unknown>;
 
+/** The SDK's usage control (SDK/sdk.d.ts:3155-3172). Experimental: called only through `optionalControl`. */
+const USAGE_CONTROL = 'usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET';
+
 /** Call an optional control; `undefined` when this CLI or SDK lacks it (D9). */
 async function optionalControl<T>(q: Query, name: string, ...args: unknown[]): Promise<T | undefined> {
   const fn = (q as unknown as Loose)[name];
@@ -173,6 +176,9 @@ export class ClaudeBackendSession implements AgentBackendSession {
     if (init.workflowFs) workflows.fs = init.workflowFs;
     if (init.workflowTimers) workflows.timers = init.workflowTimers;
     mapperOpts.workflows = workflows;
+    const ledgerOpts: ConstructorParameters<typeof UsageLedger>[0] = { startedAs: init.startedAs };
+    if (init.now) ledgerOpts.now = init.now;
+    mapperOpts.usage = new UsageLedger(ledgerOpts);
     this.#mapper = new ClaudeMessageMapper(this.#tracker, mapperOpts);
     this.capabilities = {
       perTaskStop: true,
@@ -188,6 +194,37 @@ export class ClaudeBackendSession implements AgentBackendSession {
     this.#query = withSdkVersionEnvRestored(() => init.queryFn({ prompt: this.#input, options: init.options }));
     this.controls = this.#makeControls();
     this.#pump = this.#run();
+    void this.#prime();
+  }
+
+  /**
+   * D58-D60, rule 9: read the auth type, the usage baseline (resumed totals) and the context
+   * window from the live process right after spawn. Controls only: no model call, no extra
+   * process. Each read is optional (D9); a failure only leaves that part unknown.
+   */
+  async #prime(): Promise<void> {
+    const q = this.#query;
+    const usage = this.#mapper.usage;
+    const step = async (name: string, run: () => Promise<BackendEvent[] | void>) => {
+      try {
+        const evs = await run();
+        if (evs && !this.#exited) for (const e of evs) this.#events.push(e);
+      } catch (e) {
+        this.#init.debug?.(`usage prime: ${name} failed`, String((e as Error)?.message ?? e));
+      }
+    };
+    await step('initializationResult', async () => {
+      const r = await optionalControl<Loose>(q, 'initializationResult');
+      return r !== undefined && r.account !== undefined ? usage.account(r.account) : undefined;
+    });
+    await step('usage', async () => {
+      const r = await optionalControl<Loose>(q, USAGE_CONTROL, { skipBehaviors: true });
+      return r === undefined ? undefined : usage.usageControl(r);
+    });
+    await step('getContextUsage', async () => {
+      const r = await optionalControl<Loose>(q, 'getContextUsage', { detail: 'summary' });
+      if (r !== undefined) usage.contextReport(parseContextUsage(r));
+    });
   }
 
   get sessionId(): string {
@@ -234,11 +271,12 @@ export class ClaudeBackendSession implements AgentBackendSession {
           this.#cliVersion = m.claude_code_version;
           this.capabilities.backendVersion = m.claude_code_version;
         }
-        if (m.type === 'system' && m.subtype === 'conversation_reset' && typeof m.new_conversation_id === 'string') {
-          this.#sessionId = m.new_conversation_id; // D70; the event itself is mapped in a later milestone
-        }
         const closed = this.#asks.observe(msg);
-        for (const e of this.#mapper.map(msg)) this.#events.push(e);
+        for (const e of this.#mapper.map(msg)) {
+          // D70: the id the CLI now runs under (the mapper reads it from the frames, not the reset's).
+          if (e.type === 'conversation-reset') this.#sessionId = e.newSessionId;
+          this.#events.push(e);
+        }
         for (const e of closed) this.#events.push(e);
       }
     } catch (e) {
@@ -386,13 +424,21 @@ export class ClaudeBackendSession implements AgentBackendSession {
         };
         return out;
       },
+      // D59: Claude's own breakdown (`/context`). 'summary' makes no token-count calls.
       contextUsage: async (detail) => {
-        const r = (await optionalControl<Loose>(q, 'getContextUsage', { detail })) ?? {};
-        const used = typeof r.totalTokens === 'number' ? r.totalTokens : 0;
-        const window = typeof r.maxTokens === 'number' ? r.maxTokens : 0;
-        const out: ContextUsage = { used, window };
-        if (typeof r.autoCompactThreshold === 'number') out.autoCompactAt = r.autoCompactThreshold;
+        const r = await optionalControl<Loose>(q, 'getContextUsage', { detail });
+        if (r === undefined) throw new Error('this Claude Code version cannot report its context usage');
+        const out = parseContextUsage(r);
+        this.#mapper.usage.contextReport(out);
         return out;
+      },
+      // D58, D60: totals, cost label, auth and plan limits. The usage control is experimental
+      // (its name says so); without it the snapshot holds what the stream reported.
+      usageSnapshot: async () => {
+        const usage = this.#mapper.usage;
+        const r = await optionalControl<Loose>(q, USAGE_CONTROL, { skipBehaviors: true });
+        if (r !== undefined && !this.#exited) for (const e of usage.usageControl(r)) this.#events.push(e);
+        return usage.snapshot();
       },
     };
   }

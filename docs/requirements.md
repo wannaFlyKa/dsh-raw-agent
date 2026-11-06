@@ -78,10 +78,10 @@ Definitions:
 
 | Id | Requirement | Check | Status |
 |---|---|---|---|
-| R8.1 | Per-turn tokens (input, output, cache read, cache write), cost, per-model `modelUsage`, and subagent/other tokens. | The numbers match the transcript and the `result` message. | open |
-| R8.2 | The context ring is correct from turn 1 (`getContextUsage()` / `modelUsage[*].contextWindow`), with Claude's categories, the auto-compact point, and compaction shown. | Turn 1 shows the ring. The breakdown matches `/context`. | open |
-| R8.3 | Subscription accounts: live 5-hour and weekly limits (`rate_limit_event` + the usage API). API key, Bedrock and Vertex: cost (list price noted) and no fake limits. | Test with each auth type available. | open |
-| R8.4 | DSH's own token meter, cache-hit % and speed stats are fed correct numbers, or are hidden for these sessions. | No impossible values (for example tok/s above model speed). | open |
+| R8.1 | Per-turn tokens (input, output, cache read, cache write), cost, per-model `modelUsage`, and subagent/other tokens. | The numbers match the transcript and the `result` message. | done (model time after a local command fixed after verify) |
+| R8.2 | The context ring is correct from turn 1 (`getContextUsage()` / `modelUsage[*].contextWindow`), with Claude's categories, the auto-compact point, and compaction shown. | Turn 1 shows the ring. The breakdown matches `/context`. | done |
+| R8.3 | Subscription accounts: live 5-hour and weekly limits (`rate_limit_event` + the usage API). API key, Bedrock and Vertex: cost (list price noted) and no fake limits. | Test with each auth type available. | done (Bedrock checked live; subscription plan limits only by unit tests on SDK-shaped `rate_limit_event` and usage-control frames, live **unverified**: no subscription account; API key and Vertex not tested) |
+| R8.4 | DSH's own token meter, cache-hit % and speed stats are fed correct numbers, or are hidden for these sessions. | No impossible values (for example tok/s above model speed). | done (token meter and cache-hit % fed; TTFT and tok/s fed with guards, steps without a real timing stay untimed; native context ring hidden) |
 
 ## R9. Built for DSH plugins
 

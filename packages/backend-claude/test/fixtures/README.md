@@ -54,3 +54,10 @@ is a stub of the same type. `_t` is the probe's receive time in ms.
   effect); an interrupt during a main foreground tool while the run goes on; the run completes.
 - `workflow-stop-run.jsonl`: `stopTask(<run>)` while the only agent runs a long shell: the agent
   row turns `error` ("Stopped because the workflow was stopped"), `task_notification stopped`.
+
+Recorded in M5 (CLI 2.1.318, `claude-sonnet-5-5`, Bedrock; probe `backend-usage`):
+
+- `usage-clear.jsonl`: a one-word turn, then `/clear` (a top-level `conversation_reset` whose
+  `new_conversation_id` is NOT the id the next frames carry; the clear's own result with
+  `local_command: clear`, `modelUsage: {}` and `total_cost_usd: 0`), then a second turn whose
+  totals restart at 0. Results carry the undeclared `model_usage_since_last_result`.

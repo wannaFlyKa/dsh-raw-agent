@@ -98,6 +98,7 @@ describe('native writer asserts (D17)', () => {
     const s = fakeSession();
     const log = new TurnLog(s.session, { emit() {}, nextRevision: () => 1, nextAttemptId: () => 'a' }, 1, {
       provider: 'p',
+      now: () => 0,
       warn: (n) => warns.push(n),
     });
     log.openStep();

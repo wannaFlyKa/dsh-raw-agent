@@ -4,7 +4,14 @@
 
 import type {
   AgentInfo,
+  AuthInfo,
   ConfigFileInfo,
+  ContextCategory,
+  CostLabel,
+  PlanLimit,
+  PlanLimits,
+  TurnUsage,
+  UsageTotals,
   EffortInfo,
   ModelInfo,
   PermissionModeInfo,
@@ -70,6 +77,91 @@ export interface SessionViewWire {
   workflows?: WorkflowWire[];
   /** D48: the agent can stop one workflow agent on its own (else only the whole run). */
   workflowAgentStop?: boolean;
+  /** M5: the context pill's data and short usage totals (mirrors dsh-host `UsageSummary`). */
+  usage?: UsageSummaryWire;
+}
+
+/** The agent's context figure (mirrors dsh-host `ContextView`, D59). */
+export interface ContextViewWire {
+  used: number;
+  window: number;
+  autoCompactAt?: number;
+  autoCompactEnabled?: boolean;
+  percent: number;
+  categories?: ContextCategory[];
+  model?: string;
+  /** 'call': the last model call's usage; 'report': the agent's own report; 'compaction': after one. */
+  source: 'call' | 'report' | 'compaction';
+  at: number;
+}
+
+/** The small usage part of the session view (mirrors dsh-host `UsageSummary`). */
+export interface UsageSummaryWire {
+  context?: Pick<ContextViewWire, 'used' | 'window' | 'percent' | 'autoCompactAt' | 'source' | 'at'>;
+  compacting: boolean;
+  tokens?: number;
+  costUsd?: number;
+  costLabel?: CostLabel;
+  limitsAvailable?: boolean;
+  blocked?: boolean;
+  limit?: Pick<PlanLimit, 'id' | 'label' | 'percent' | 'resetsAt' | 'status'>;
+  auth?: Pick<AuthInfo, 'kind' | 'label'>;
+  retry?: { attempt: number; maxRetries?: number; error: string; at: number };
+  at?: number;
+}
+
+/** One per-turn row (mirrors dsh-host `TurnUsageRow`). No `hostTurn`: it ran outside a turn. */
+export interface TurnUsageRowWire {
+  hostTurn?: number;
+  usage: TurnUsage;
+  at: number;
+}
+
+/** Everything the usage panel shows (mirrors dsh-host `UsageView`). Absent: not known yet. */
+export interface UsageViewWire {
+  totals?: UsageTotals;
+  costLabel?: CostLabel;
+  auth?: AuthInfo;
+  limits?: PlanLimits;
+  lastTurn?: TurnUsageRowWire;
+  turns: TurnUsageRowWire[];
+  context?: ContextViewWire;
+  compacting: boolean;
+  compactions: Array<{
+    phase: 'start' | 'end';
+    trigger?: 'manual' | 'auto';
+    preTokens?: number;
+    postTokens?: number;
+    error?: string;
+    at: number;
+  }>;
+  retries: Array<{
+    attempt: number;
+    maxRetries?: number;
+    delayMs?: number;
+    error: string;
+    httpStatus?: number;
+    hostTurn?: number;
+    at: number;
+  }>;
+  resets: Array<{ trigger?: string; hostTurn?: number; at: number }>;
+  at?: number;
+}
+
+/** `GET api/raw-agent/usage` (D58-D60). Never starts a process. */
+export interface UsageAnswerWire {
+  running: boolean;
+  usage: UsageViewWire;
+  /** The live process's usage control could not be read. */
+  error?: string;
+}
+
+/** `GET api/raw-agent/context` (D59). Never starts a process. */
+export interface ContextAnswerWire {
+  running: boolean;
+  context?: ContextViewWire;
+  /** 'not-running', 'unsupported' or the agent's error, when no live report was read. */
+  reason?: string;
 }
 
 /** One workflow agent row (mirrors core `WorkflowAgent` plus the host's child session). */
@@ -305,6 +397,8 @@ export type ChannelLine =
       agents?: { children: ChildWire[]; team?: TeamWire; tasks: TaskWire[] };
       /** Present when the Host sends the workflow runs on the channel (D48). */
       workflows?: WorkflowWire[];
+      /** M5: the usage summary; `null` = nothing known yet, absent = an older Host line. */
+      usage?: UsageSummaryWire | null;
     }
   | { type: 'ping' };
 
@@ -422,6 +516,10 @@ export interface RawAgentApi {
   taskOutput(sessionId: string, taskId: string): Promise<TaskOutputWire>;
   /** D45: which of our sessions holds this host child session; undefined when none does. */
   childOf(childSessionId: string): Promise<ChildLinkWire | undefined>;
+  /** M5: the usage panel's data (D58-D60). Reads only; never starts a process. */
+  usage(sessionId: string): Promise<UsageAnswerWire>;
+  /** M5: the agent's context report (D59); `full` adds the agent's whole breakdown. Never spawns. */
+  context(sessionId: string, detail?: 'summary' | 'full'): Promise<ContextAnswerWire>;
   configFiles(sessionId: string): Promise<{ backend: string; files: ConfigFileItem[] }>;
   configFile(sessionId: string, scope: string): Promise<ConfigFilePreviewWire>;
   reveal(sessionId: string, scope: string, index: number): Promise<{ index: number; key?: string; value: string }>;
@@ -552,11 +650,67 @@ export function createApi(fetchFn: FetchFn): RawAgentApi {
         throw new RouteError(r.status, 'the answer names no parent session');
       return { parentSession: body.parentSession, childId: body.childId };
     },
+    async usage(id) {
+      const body = await read<Partial<UsageAnswerWire>>(fetchFn, `${BASE}/usage?${q(id)}`);
+      return parseUsageAnswer(body);
+    },
+    async context(id, detail = 'summary') {
+      const body = await read<Partial<ContextAnswerWire>>(fetchFn, `${BASE}/context?${q(id)}&detail=${detail}`);
+      const out: ContextAnswerWire = { running: body?.running === true };
+      const c = parseContextView(body?.context);
+      if (c) out.context = c;
+      if (typeof body?.reason === 'string') out.reason = body.reason;
+      return out;
+    },
     configFiles: (id) => read(fetchFn, `${BASE}/config-files?${q(id)}`),
     configFile: (id, scope) => read(fetchFn, `${BASE}/config-file?${q(id)}&scope=${encodeURIComponent(scope)}`),
     reveal: (id, scope, index) =>
       read(fetchFn, `${BASE}/config-file?${q(id)}&scope=${encodeURIComponent(scope)}&reveal=${index}`),
   };
+}
+
+const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const finite = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** A context figure from the wire, or undefined when it is not a usable one (never a made-up 0). */
+export function parseContextView(v: unknown): ContextViewWire | undefined {
+  if (!isObj(v) || !finite(v.used) || !finite(v.window) || v.window <= 0 || v.used < 0) return undefined;
+  const source = v.source === 'report' || v.source === 'compaction' ? v.source : 'call';
+  const out: ContextViewWire = {
+    used: v.used,
+    window: v.window,
+    percent: finite(v.percent) ? v.percent : Math.round((v.used / v.window) * 1000) / 10,
+    source,
+    at: finite(v.at) ? v.at : 0,
+  };
+  if (finite(v.autoCompactAt)) out.autoCompactAt = v.autoCompactAt;
+  if (typeof v.autoCompactEnabled === 'boolean') out.autoCompactEnabled = v.autoCompactEnabled;
+  if (typeof v.model === 'string') out.model = v.model;
+  if (Array.isArray(v.categories))
+    out.categories = v.categories.filter(
+      (c): c is ContextCategory => isObj(c) && typeof c.name === 'string' && finite(c.tokens),
+    );
+  return out;
+}
+
+/** The usage route's answer, with every list present (an older or partial answer stays usable). */
+export function parseUsageAnswer(body: Partial<UsageAnswerWire> | undefined): UsageAnswerWire {
+  const u: Partial<UsageViewWire> = isObj(body?.usage) ? (body.usage as Partial<UsageViewWire>) : {};
+  const list = <T>(x: T[] | undefined): T[] => (Array.isArray(x) ? x : []);
+  const usage: UsageViewWire = {
+    ...u,
+    turns: list(u.turns).filter((t) => isObj(t) && isObj(t.usage)),
+    compacting: u.compacting === true,
+    compactions: list(u.compactions),
+    retries: list(u.retries),
+    resets: list(u.resets),
+  };
+  const ctx = parseContextView(u.context);
+  if (ctx) usage.context = ctx;
+  else delete usage.context;
+  const out: UsageAnswerWire = { running: body?.running === true, usage };
+  if (typeof body?.error === 'string') out.error = body.error;
+  return out;
 }
 
 /** Parse one NDJSON line of the interaction channel; anything else is ignored. */
@@ -617,6 +771,10 @@ export function parseChannelLine(text: string): ChannelLine | undefined {
         Array.isArray((w as WorkflowWire).agents) &&
         Array.isArray((w as WorkflowWire).phases),
     );
+  // M5: the usage summary (`null`: nothing known yet). An older Host line has no key at all.
+  const usage = (v as { usage?: unknown }).usage;
+  if (usage === null) line.usage = null;
+  else if (isObj(usage)) line.usage = usage as unknown as UsageSummaryWire;
   return line;
 }
 

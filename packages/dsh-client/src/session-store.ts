@@ -174,6 +174,11 @@ export class SessionControlStore {
           if (line.workflows.length > 0) view.workflows = line.workflows;
           else delete view.workflows;
         }
+        if (line.usage !== undefined) {
+          // M5: the pill's summary rides the channel, so the context reading follows each call.
+          if (line.usage) view.usage = line.usage;
+          else delete view.usage;
+        }
         next.info = { ...info, view };
         ++this.#generation; // a poll that started before this line is older
       }
