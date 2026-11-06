@@ -6,8 +6,8 @@ coverage/
 *.tsbuildinfo
 
 # local-only material (see CLAUDE.md)
-research/
-.dsh-dev/
+/research/
+/.dsh-dev/
 CLAUDE.local.md
 
 # live-test artifacts
