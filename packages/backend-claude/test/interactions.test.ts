@@ -89,3 +89,74 @@ describe('permission mapping (D40)', () => {
     });
   });
 });
+
+describe('interrupting reject (M1 live: a Reject ended the turn as an error)', () => {
+  it('tells the session before a main-agent reject that interrupts, and only then', async () => {
+    let noted = 0;
+    const mk = (answer: { optionId: string; feedback?: string }) =>
+      createCanUseTool({
+        handler: handler(answer),
+        cliVersion: () => '2.1.318',
+        canBypass: () => false,
+        newId: () => 'id',
+        onInterruptingDeny: () => noted++,
+      });
+    const r = await mk({ optionId: 'reject' })('Bash', { command: 'ln -s a b' }, opts());
+    expect(r).toMatchObject({ behavior: 'deny', interrupt: true });
+    expect(noted).toBe(1);
+    await mk({ optionId: 'reject', feedback: 'use cp' })('Bash', {}, opts());
+    await mk({ optionId: 'reject' })('Bash', {}, opts({ agentID: 'child-1' }));
+    await mk({ optionId: 'allow-once' })('Bash', {}, opts());
+    expect(noted).toBe(1);
+  });
+});
+
+describe('decline and "keep planning" use the same deny rule as Reject (M1 verify 2)', () => {
+  const declining: InteractionHandler = {
+    permission: async () => ({ optionId: 'reject' }),
+    question: async () => null,
+    plan: async () => ({ kind: 'keep-planning' }),
+    elicitation: async () => ({ action: 'decline' }),
+  };
+  const mk = (h: InteractionHandler, noted: { n: number }) =>
+    createCanUseTool({
+      handler: h,
+      cliVersion: () => '2.1.318',
+      canBypass: () => false,
+      newId: () => 'id',
+      onInterruptingDeny: () => noted.n++,
+    });
+
+  it('main thread: the STOP text also interrupts the turn, so the turn does not go on', async () => {
+    const noted = { n: 0 };
+    const q = { questions: [{ question: 'Color?', options: [{ label: 'Blue' }] }] };
+    expect(await mk(declining, noted)('AskUserQuestion', q, opts())).toEqual({
+      behavior: 'deny',
+      message: C.mainNoFeedback,
+      interrupt: true,
+    });
+    expect(await mk(declining, noted)('ExitPlanMode', { plan: 'p' }, opts())).toEqual({
+      behavior: 'deny',
+      message: C.mainNoFeedback,
+      interrupt: true,
+    });
+    expect(noted.n).toBe(2);
+  });
+
+  it('a subagent decline, or keep planning with feedback, does not interrupt', async () => {
+    const noted = { n: 0 };
+    expect(await mk(declining, noted)('AskUserQuestion', { questions: [] }, opts({ agentID: 'a1' }))).toEqual({
+      behavior: 'deny',
+      message: C.subagentNoFeedback,
+    });
+    const withFeedback: InteractionHandler = {
+      ...declining,
+      plan: async () => ({ kind: 'keep-planning', feedback: 'add tests' }),
+    };
+    expect(await mk(withFeedback, noted)('ExitPlanMode', { plan: 'p' }, opts())).toEqual({
+      behavior: 'deny',
+      message: C.mainFeedbackPrefix + 'add tests',
+    });
+    expect(noted.n).toBe(0);
+  });
+});

@@ -10,12 +10,14 @@
 //   (c) every advertised call has a tool/result before step/end;
 //   (d, f) every assistant/message has a stream that alone reproduces content, usage and
 //       replayState (the generation check, `P/dsh-session-persistence-jsonl/lib/index.js:1838`);
-//   (e) known event types only; never a `plugin:` type (D17 e).
+//   (e) known event types only; never a `plugin:` type (D17 e);
+//   (h) every driver-written agent/inbox/spliced is valid against the current inbox projection
+//       (`start`/`removedCount` in range, no duplicate pending id; `P/dsh-agent-loop/lib/index.js:33-58`).
 // Steps are numbered by the writer; the loop opened the turn and writes turn/end itself.
 
 import { randomUUID } from 'node:crypto';
 import { StreamRecorder, deepEqual, replayStream } from './stream.js';
-import type { DshBlock, DshChunk, DshSession, DshStreamRecord, DshUsage, DshUserMessage } from './types.js';
+import type { DshBlock, DshChunk, DshInbox, DshSession, DshStreamRecord, DshUsage, DshUserMessage } from './types.js';
 
 export class WriterAssertError extends Error {
   override readonly name = 'WriterAssertError';
@@ -34,7 +36,43 @@ export const WRITER_EVENT_TYPES: readonly string[] = Object.freeze([
   'tool/call',
   'tool/result',
   'step/end',
+  'agent/inbox/spliced',
 ]);
+
+/** One driver-written inbox splice (D3, D25, D27). Never carries an `outcome`. */
+export interface InboxSplice {
+  target: 'next-turn' | 'next-step';
+  start: number;
+  removedCount?: number;
+  inserted: DshUserMessage[];
+}
+
+/**
+ * Append a driver-owned `agent/inbox/spliced` after asserting D17 (h) against the live inbox
+ * projection. DSH folds the event into `nextTurn`/`nextStep` itself; an invalid splice would make
+ * the log unloadable (`invalid persisted inbox splice`), so it is refused before the append.
+ */
+export function spliceInbox(session: DshSession, inbox: DshInbox, splice: InboxSplice): number {
+  const list =
+    splice.target === 'next-turn' ? inbox.nextTurn : splice.target === 'next-step' ? inbox.nextStep : undefined;
+  if (list === undefined)
+    throw new WriterAssertError(`refused inbox splice: unknown target ${String(splice.target)} (rule h)`);
+  const removed = splice.removedCount ?? 0;
+  if (!Number.isSafeInteger(splice.start) || splice.start < 0 || splice.start > list.length)
+    throw new WriterAssertError(`refused inbox splice: start ${splice.start} out of range (rule h)`);
+  if (!Number.isSafeInteger(removed) || removed < 0 || splice.start + removed > list.length)
+    throw new WriterAssertError(`refused inbox splice: removedCount ${removed} out of range (rule h)`);
+  const next = list.toSpliced(splice.start, removed, ...splice.inserted);
+  const other = splice.target === 'next-turn' ? inbox.nextStep : inbox.nextTurn;
+  const ids = new Set<string>();
+  for (const m of [...next, ...other]) {
+    if (ids.has(m.id)) throw new WriterAssertError(`refused inbox splice: message ${m.id} is already pending (rule h)`);
+    ids.add(m.id);
+  }
+  const data: Record<string, unknown> = { target: splice.target, start: splice.start, inserted: splice.inserted };
+  if (removed > 0) data.removedCount = removed;
+  return session.append('agent/inbox/spliced', data).seq;
+}
 
 export type LiveFrame =
   | { type: 'start'; attemptId: string; revision: number; turn: number; step: number }
@@ -56,13 +94,22 @@ export interface LiveChannel {
   nextAttemptId(): string;
 }
 
-export type ToolResultBlock = { type: 'text'; text: string };
+/**
+ * One `tool/result` content block: text, or DSH's native image block with an attachment ref from
+ * `ctx.attachments.saveImages()` (D85, `P/dsh-llm/lib/types/types.d.ts:66-77`). Never base64.
+ */
+export type ToolResultBlock = { type: 'text'; text: string } | { type: 'image'; attachment: unknown };
 
 export interface CommitInput {
   blocks: DshBlock[];
   usage?: DshUsage;
   model?: string;
   interrupted?: boolean;
+  /**
+   * A further CLI message of the same step (D84 whole responses arrive one block per frame,
+   * D68). Several assistant/message events per step are legal; each has its own stream.
+   */
+  continued?: boolean;
   /** Native-field binding (D21); also the finish chunk's replayState. */
   binding: Record<string, unknown>;
 }
@@ -203,10 +250,19 @@ export class TurnLog {
    */
   commit(input: CommitInput): { calls: string[] } {
     if (!this.#stepOpen) throw new WriterAssertError('refused assistant/message outside an open step (rule a)');
-    if (this.#hasMessage) throw new WriterAssertError('refused a second main-thread assistant/message in one step');
+    if (this.#hasMessage && input.continued !== true)
+      throw new WriterAssertError('refused a second main-thread assistant/message in one step');
     const interrupted = input.interrupted === true;
     if (interrupted && input.blocks.some((b) => b.type === 'tool-call'))
       throw new WriterAssertError('refused interrupted assistant/message that keeps a tool call (D17 f)');
+    // W1: every tool-call id is checked BEFORE anything is appended. The checker refuses a message
+    // that repeats an advertised id (`P/dsh-session-format-v3-to-v4/lib/index.js:630`), so an exact
+    // repeat (a re-sent frame) is dropped and a conflicting one refuses the whole message.
+    input = { ...input, blocks: this.#uniqueCalls(input.blocks) };
+    if (this.#hasMessage) {
+      if (input.blocks.length === 0) return { calls: [] };
+      this.#beginAttempt(); // a further message of this step gets its own live attempt
+    }
     const replayState = { response: input.binding };
     const hasCall = input.blocks.some((b) => b.type === 'tool-call');
 
@@ -264,7 +320,6 @@ export class TurnLog {
     const calls: string[] = [];
     for (const b of content) {
       if (b.type !== 'tool-call') continue;
-      if (this.#calls.has(b.id)) throw new WriterAssertError(`refused duplicate tool call id ${b.id}`);
       const callSeq = this.#append('tool/call', {
         turn: this.#turn,
         step: this.#step,
@@ -276,6 +331,29 @@ export class TurnLog {
       calls.push(b.id);
     }
     return { calls };
+  }
+
+  /** Drop exact repeats of a tool call (in this message or written earlier in the step); refuse a conflict. */
+  #uniqueCalls(blocks: DshBlock[]): DshBlock[] {
+    const seen = new Map<string, { name: string; arguments: string }>();
+    for (const [id, c] of this.#calls) seen.set(id, c);
+    const out: DshBlock[] = [];
+    for (const b of blocks) {
+      if (b.type !== 'tool-call') {
+        out.push(b);
+        continue;
+      }
+      const prior = seen.get(b.id);
+      if (prior === undefined) {
+        seen.set(b.id, { name: b.name, arguments: b.arguments });
+        out.push(b);
+        continue;
+      }
+      if (prior.name !== b.name || prior.arguments !== b.arguments)
+        throw new WriterAssertError(`refused duplicate tool call id ${b.id} with different content (W1)`);
+      this.#opts.warn?.('dropped a repeated tool call block (W1)', { callId: b.id, step: this.#step });
+    }
+    return out;
   }
 
   #content(records: DshStreamRecord[], interrupted: boolean): DshBlock[] {
@@ -323,6 +401,22 @@ export class TurnLog {
     if (meta !== undefined) data.meta = meta;
     this.#append('tool/result', data, { surfaceOp: 'append', sourceEventSeqs: [call.seq] });
     call.resolved = true;
+  }
+
+  /**
+   * Claim one pending steer at a step boundary (D27): a driver-owned `agent/inbox/spliced` that
+   * removes it from `nextStep` with no `outcome`, then the unchanged `user/message`. Returns false
+   * when the message is no longer pending (the user removed it, or DSH already claimed it).
+   */
+  claim(messageId: string, inbox: DshInbox): boolean {
+    if (this.#stepOpen) throw new WriterAssertError('refused a claim inside an open step');
+    if (this.#closed) throw new WriterAssertError('refused a claim: the turn is closed');
+    const index = inbox.nextStep.findIndex((m) => m.id === messageId);
+    if (index < 0) return false;
+    const pending = inbox.nextStep[index]!;
+    spliceInbox(this.#session, inbox, { target: 'next-step', start: index, removedCount: 1, inserted: [] });
+    this.writeUser(pending);
+    return true;
   }
 
   /**

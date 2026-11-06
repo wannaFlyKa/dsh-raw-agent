@@ -379,6 +379,32 @@ describe.skipIf(dsh === undefined)(`DSH round trip (installed DSH ${dsh?.version
     expect(s.record.sent.map((i) => i.parts)).toHaveLength(2);
   });
 
+  it('D3: a failed re-wake send puts the queued message back; it is never lost (M1 verify 2)', async () => {
+    const s = await session({ onSend: [[{ type: 'wait', ms: 80 }, ...textTurn('first')], textTurn('second')] });
+    s.agent.followup(user('one'));
+    await new Promise((r) => setTimeout(r, 20));
+    const two = user('two');
+    s.agent.followup(two);
+    const orig = s.agent.send.bind(s.agent);
+    let failed = 0;
+    s.agent.send = (m: unknown, lane: string, wake?: boolean) => {
+      if (lane === 'next-turn' && wake === true && failed === 0) {
+        failed++;
+        throw new Error('send refused');
+      }
+      return orig(m, lane, wake);
+    };
+    await until(() => failed === 1);
+    await idle(s.agent);
+    expect(s.agent.inbox.nextTurn.map((m: any) => m.id)).toEqual([two.id]);
+    const c = await checkSession(dsh!, rt!, s.handle, s.sessionId);
+    expect(c.relationships).toBe('ok');
+    expect(c.streamCheck).toBe('ok');
+    expect(c.reload).toBe('ok');
+    // DSH's reload takes the still-queued message up itself (a splice); nothing is repaired.
+    expect(c.reloadAddedTail.filter((t) => t !== 'session/end-seed' && t !== 'agent/inbox/spliced')).toEqual([]);
+  });
+
   it('a non-human claimed message is dropped, never sent (D22)', async () => {
     const s = await session({ onSend: [] });
     s.agent.followup({ ...user('notice'), source: { kind: 'schedule', form: 'notice', summary: 'x' } } as any);

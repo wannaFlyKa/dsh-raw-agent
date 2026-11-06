@@ -194,11 +194,13 @@ describe('mapper on a recorded background task, interrupt and wake turn', () => 
     expect(JSON.stringify(events)).not.toContain('[Request interrupted by user]');
   });
 
-  it('writes thinking as a plain reasoning block with no signature (D86)', () => {
+  it('drops the signed, empty thinking blocks of this recording and copies no signature (D86)', () => {
     const blocks = events.filter((e): e is Ev<'step-message'> => e.type === 'step-message').flatMap((e) => e.blocks);
     const r = blocks.filter((b) => b.type === 'reasoning');
-    expect(r.length).toBeGreaterThan(0);
-    for (const b of r) expect(Object.keys(b).sort()).toEqual(['text', 'type']);
+    for (const b of r) {
+      expect(Object.keys(b).sort()).toEqual(['text', 'type']);
+      expect((b as { text: string }).text).not.toBe('');
+    }
   });
 });
 
@@ -376,6 +378,30 @@ describe('mapper edge cases', () => {
     );
     expect(ev.at(-1)).toMatchObject({ type: 'turn-end', pendingInputs: 1 });
     expect(ev.filter((e) => e.type === 'input-consumed')).toEqual([{ type: 'input-consumed', inputId: 'a' }]);
+  });
+
+  it('reports a pending input the CLI cancelled (Stop with a queued steer, D25)', () => {
+    const ev = run(
+      [
+        { type: 'system', subtype: 'status', status: 'requesting', user_message_uuids: ['a'] },
+        { type: 'command_lifecycle', command_uuid: 'b', state: 'cancelled' },
+        { type: 'command_lifecycle', command_uuid: 'b', state: 'cancelled' }, // a repeat says nothing
+      ],
+      (t) => {
+        t.sent('a');
+        t.sent('b');
+      },
+    );
+    expect(ev.filter((e) => e.type === 'input-cancelled')).toEqual([{ type: 'input-cancelled', inputId: 'b' }]);
+  });
+
+  it('maps the CLI informational line to a notice (model restricted by settings, M1 live)', () => {
+    const text =
+      'Model "claude-bogus-0-0" is restricted by your organization\'s settings. Using claude-opus-5-5 instead.';
+    expect(run([{ type: 'system', subtype: 'informational', content: text, level: 'notice' }])).toEqual([
+      { type: 'notice', level: 'notice', text },
+    ]);
+    expect(run([{ type: 'system', subtype: 'informational', content: '  ' }])).toEqual([]);
   });
 
   it('ignores child messages and foreground tasks in the spike', () => {

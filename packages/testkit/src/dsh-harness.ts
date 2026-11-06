@@ -47,12 +47,16 @@ export interface Dsh {
   BlockAssembler: Any;
   expandAssistantStream: Any;
   formatSessionMarkdown: Any;
+  /** The real `llm` runtime (model directory and `resolveModelInfo`). */
+  LlmRuntime: Any;
+  /** The real content-addressed local attachment store (`ctx.attachments`). */
+  LocalAttachmentStore: Any;
 }
 
 export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined> {
   if (dir === undefined) return undefined;
   const imp = (pkg: string) => import(pathToFileURL(join(dir, '@deepseek-ai', pkg, 'lib', 'index.js')).href);
-  const [cordis, agent, loop, session, proj, sp, jsonl, jobs, v4, llm, exp] = await Promise.all([
+  const [cordis, agent, loop, session, proj, sp, jsonl, jobs, v4, llm, exp, att] = await Promise.all([
     imp('cordis'),
     imp('dsh-agent'),
     imp('dsh-agent-loop'),
@@ -64,6 +68,7 @@ export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined>
     imp('dsh-session-format-v3-to-v4'),
     imp('dsh-llm'),
     imp('dsh-session-log-export'),
+    imp('dsh-attachment-local'),
   ]);
   let version = 'unknown';
   try {
@@ -89,6 +94,8 @@ export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined>
     BlockAssembler: llm.BlockAssembler,
     expandAssistantStream: llm.expandAssistantStream,
     formatSessionMarkdown: exp.formatSessionMarkdown,
+    LlmRuntime: llm.default,
+    LocalAttachmentStore: att.default ?? att.LocalAttachmentStore,
   };
 }
 
@@ -100,20 +107,60 @@ export interface LoopRuntime {
   dispose(): Promise<void>;
 }
 
-export async function createLoop(dsh: Dsh, opts: { jobs?: boolean } = {}): Promise<LoopRuntime> {
+/** The text-only DSH default model of a real-llm loop (D76): what a fresh DSH profile may have. */
+export const TEXT_ONLY_DEFAULT = Object.freeze({ provider: 'dsh-default', model: 'flash' });
+
+export interface LoopOptions {
+  jobs?: boolean;
+  /**
+   * 'real': the real `llm` runtime with one text-only DSH default provider ({@link TEXT_ONLY_DEFAULT})
+   * whose calls are recorded as stray. Default: a stub `llm` that records every call.
+   */
+  llm?: 'stub' | 'real';
+  /** Mount the real local attachment store under the loop's temp root. */
+  attachments?: boolean;
+}
+
+export async function createLoop(dsh: Dsh, opts: LoopOptions = {}): Promise<LoopRuntime> {
   const root = await mkdtemp(join(tmpdir(), 'raw-agent-rt-'));
   const ctx = new dsh.Context();
   const stray: unknown[] = [];
-  ctx.provide('llm', {
-    prepareCall: async (c: unknown) => {
+  if (opts.llm === 'real') {
+    ctx.plugin(dsh.LlmRuntime);
+    await new Promise((r) => setTimeout(r, 10));
+    const strayCall = (c: unknown) => {
       stray.push(c);
       throw new Error('STRAY DSH MODEL REQUEST');
-    },
-    stream() {
-      stray.push('stream');
-      throw new Error('STRAY DSH MODEL REQUEST');
-    },
-  });
+    };
+    const row = (provider: string, id: string) => ({
+      provider,
+      id,
+      name: id,
+      inputModalities: ['text'],
+      context: { contextWindow: 100000 },
+    });
+    ctx.get('llm').registerAdapter([TEXT_ONLY_DEFAULT.provider], {
+      providerInfo: (p: string) => ({ id: p, name: 'Text-only default' }),
+      providerRetryPolicy: () => undefined,
+      imageRequestPricing: () => undefined,
+      imageRequestTarget: () => undefined,
+      listModels: async (p: string) => [row(p, TEXT_ONLY_DEFAULT.model)],
+      resolveModel: async (p: string, m: string) => row(p, m),
+      prepareCall: async (c: unknown) => strayCall(c),
+      stream: (c: unknown) => strayCall(c ?? 'stream'),
+    });
+  } else
+    ctx.provide('llm', {
+      prepareCall: async (c: unknown) => {
+        stray.push(c);
+        throw new Error('STRAY DSH MODEL REQUEST');
+      },
+      stream() {
+        stray.push('stream');
+        throw new Error('STRAY DSH MODEL REQUEST');
+      },
+    });
+  if (opts.attachments) ctx.plugin(dsh.LocalAttachmentStore, { dshHome: join(root, 'dsh-home') });
   ctx.provide('tools', {
     resolve: async () => ({ dispose() {}, view: () => new Map() }),
     execute: async () => {
@@ -129,6 +176,20 @@ export async function createLoop(dsh: Dsh, opts: { jobs?: boolean } = {}): Promi
   await ctx.plugin(dsh.AgentLoop, { agents: [], maxParallelToolCalls: 1 }).await();
   await new Promise((r) => setTimeout(r, 30));
   return { ctx, root, stray, dispose: () => ctx.fiber.dispose() };
+}
+
+/**
+ * DSH's image admission for one prompt, as the session controller runs it before admitting a
+ * message with an image (`P/dsh-api-session-controller/lib/index.js:844-849`): the agent's current
+ * model must declare image input. Resolves to the refusal text, or undefined when admitted.
+ */
+export async function imageAdmissionRefusal(ctx: Any, agent: Any): Promise<string | undefined> {
+  const current = agent.model.current();
+  if (current === undefined) return undefined;
+  const model = await ctx.get('llm').resolveModelInfo(current.provider, current.model);
+  if (model.inputModalities !== undefined && !model.inputModalities.includes('image'))
+    return `Model "${current.model}" does not support image input.`;
+  return undefined;
 }
 
 export interface SessionCheck {

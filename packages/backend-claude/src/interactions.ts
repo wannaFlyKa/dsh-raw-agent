@@ -73,6 +73,11 @@ export interface InteractionAdapterOptions {
   cliVersion: () => string | undefined;
   canBypass: () => boolean;
   newId: () => string;
+  /**
+   * Called right before a deny that interrupts the turn (the TUI's "No" on the main agent). The
+   * CLI then ends the turn with `error_during_execution`, which is the user's stop, not an error.
+   */
+  onInterruptingDeny?: () => void;
 }
 
 export function createCanUseTool(o: InteractionAdapterOptions): CanUseTool {
@@ -85,12 +90,8 @@ export function createCanUseTool(o: InteractionAdapterOptions): CanUseTool {
     if (toolName === 'AskUserQuestion') {
       const questions = Array.isArray(input.questions) ? (input.questions as never[]) : [];
       const answer = await o.handler.question({ id, agent, callId, questions }, opts.signal);
-      if (answer === null) {
-        return {
-          behavior: 'deny',
-          message: rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', undefined).message,
-        };
-      }
+      if (answer === null)
+        return deny(rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', undefined));
       return { behavior: 'allow', updatedInput: { ...input, answers: answer.answers } };
     }
 
@@ -102,8 +103,7 @@ export function createCanUseTool(o: InteractionAdapterOptions): CanUseTool {
       if (typeof input.planFilePath === 'string') req.planFilePath = input.planFilePath;
       const answer = await o.handler.plan(req, opts.signal);
       if (answer.kind === 'keep-planning') {
-        const r = rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', answer.feedback);
-        return { behavior: 'deny', message: r.message };
+        return deny(rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', answer.feedback));
       }
       const mode = { 'accept-edits': 'acceptEdits', default: 'default', bypass: 'bypassPermissions' }[answer.choiceId];
       if (mode === undefined) return { behavior: 'allow', updatedInput: input };
@@ -145,11 +145,20 @@ export function createCanUseTool(o: InteractionAdapterOptions): CanUseTool {
         ? { behavior: 'allow', updatedInput: input, updatedPermissions: [s] }
         : { behavior: 'allow', updatedInput: input };
     }
-    const r = rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', answer.feedback);
-    return r.interrupt
-      ? { behavior: 'deny', message: r.message, interrupt: true }
-      : { behavior: 'deny', message: r.message };
+    return deny(rejectMessage(rejectConstantsFor(o.cliVersion()), agent.kind === 'child', answer.feedback));
   };
+
+  /**
+   * One deny rule for every ask (permission, AskUserQuestion decline, "No, keep planning"): the
+   * main thread's no-feedback reject says "STOP … and wait for the user", so it also interrupts
+   * the turn, as the TUI's reject does. Sending that text and letting the turn go on would ask
+   * the model to wait while it keeps running.
+   */
+  function deny(r: { message: string; interrupt: boolean }): PermissionResult {
+    if (!r.interrupt) return { behavior: 'deny', message: r.message };
+    o.onInterruptingDeny?.();
+    return { behavior: 'deny', message: r.message, interrupt: true };
+  }
 }
 
 export function createOnElicitation(o: InteractionAdapterOptions): OnElicitation {

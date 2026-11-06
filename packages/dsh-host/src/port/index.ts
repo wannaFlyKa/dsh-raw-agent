@@ -5,18 +5,50 @@
 
 export type { CordisContext as HostContext } from './types.js';
 export type * from './types.js';
-export { mountAgent, WAKE_SOURCE_KIND, type AgentMount, type AgentMountOptions } from './loop.js';
+export {
+  mountAgent,
+  presetIdFor,
+  WAKE_SOURCE_KIND,
+  AttachmentInputError,
+  toInput,
+  toResultBlocks,
+  saveResultImages,
+  type AgentMount,
+  type AgentMountOptions,
+} from './loop.js';
 export { mountHost, catalogAdapter, SETTINGS_MODEL } from './catalog.js';
 export {
   TurnLog,
   WriterAssertError,
+  spliceInbox,
+  type InboxSplice,
   REPAIR_STARTED_TEXT,
   WRITER_EVENT_TYPES,
   type LiveChannel,
   type LiveFrame,
+  type ToolResultBlock,
 } from './writer.js';
 export { StreamRecorder, replayStream, expandRecords } from './stream.js';
-export { startJob, jobKind, JOB_WAIT_MS, JOB_REWAIT_MS } from './jobs.js';
+export {
+  mountConfigRoutes,
+  configRoutes,
+  readFileForPreview,
+  CONFIG_FILES_ROUTE,
+  CONFIG_FILE_ROUTE,
+  lifecycleRoutes,
+  mountLifecycleRoutes,
+  START_ROUTE,
+  FORCE_STOP_ROUTE,
+  STATE_ROUTE,
+  SESSION_ROUTE,
+  CHOICE_ROUTE,
+  ANSWER_ROUTE,
+  sessionControlRoutes,
+  parseChoice,
+  parseAnswer,
+  type SessionControlDeps,
+} from './routes.js';
+export { startJob, jobKind, JOB_WAIT_MS, JOB_REWAIT_MS, TEARDOWN_REASONS } from './jobs.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);

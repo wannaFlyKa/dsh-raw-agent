@@ -1,22 +1,29 @@
 // The Claude Code backend factory (D80). Pre-spawn capabilities are static data here (r4).
 
-import { accessSync, constants, readFileSync, statSync } from 'node:fs';
+import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import type {
   AgentBackendFactory,
   AgentBackendSession,
+  ConfigFileInfo,
   FactoryCapabilities,
+  MaskedConfig,
   OpenSessionOptions,
+  SettingsDefaults,
+  TrustState,
 } from '@dsh-raw-agent/core';
 import { uuidv5 } from '@dsh-raw-agent/core/node';
 import { resolveClaudeBinary, type BinaryResolveDeps } from './binary.js';
 import { decideFileCheckpointing } from './checkpoint.js';
+import { claudeConfigFiles, maskClaudeSettings } from './config-files.js';
 import { buildClaudeEnv } from './env.js';
 import { createCanUseTool, createOnElicitation } from './interactions.js';
-import { query } from './sdk.js';
+import { loadSdk } from './sdk.js';
 import { ClaudeBackendSession, newRequestId, type QueryFn } from './session.js';
 import { createSpawner } from './spawn.js';
 import { ALLOW_BYPASS_OPTION, buildStartOptions } from './start-options.js';
+import { readSettingsDefaults } from './settings-defaults.js';
+import { readTrustState } from './trust.js';
 
 export const CLAUDE_KIND = 'claude-code';
 
@@ -43,7 +50,7 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
     { id: 'plan', label: 'Plan mode' },
     { id: 'auto', label: 'Auto' },
     { id: 'dontAsk', label: "Don't ask" },
-    { id: 'bypassPermissions', label: 'Bypass permissions' },
+    { id: 'bypassPermissions', label: 'Bypass permissions', requiresOption: ALLOW_BYPASS_OPTION },
   ],
   mainAgentPicker: 'new-session-only',
   efforts: [
@@ -80,13 +87,43 @@ export const nodeBinaryDeps = (env: OpenSessionOptions['env']): BinaryResolveDep
 });
 
 export interface ClaudeFactoryOptions {
-  /** Test seam; defaults to the SDK's `query`. */
+  /** Test seam; defaults to the SDK's `query`, loaded on the first spawn (`loadSdk`). */
   queryFn?: QueryFn;
   debug?: (note: string, detail: unknown) => void;
+  /**
+   * The env the no-process reads use (config folder, sandbox marker). Defaults to the DSH
+   * process env at call time, filtered by the env policy, as the CLI would see it.
+   */
+  env?: () => Readonly<Record<string, string | undefined>>;
+  /** Test seam for the no-process reads. */
+  fs?: { readText(p: string): string | undefined; realpath(p: string): string; exists(p: string): boolean };
+  homedir?: string;
 }
 
+const nodeFs = {
+  readText(p: string): string | undefined {
+    try {
+      return readFileSync(p, 'utf8');
+    } catch {
+      return undefined;
+    }
+  },
+  realpath(p: string): string {
+    try {
+      return realpathSync(p);
+    } catch {
+      return p;
+    }
+  },
+  exists(p: string): boolean {
+    return existsSync(p);
+  },
+};
+
 export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): AgentBackendFactory {
-  const queryFn = factoryOptions.queryFn ?? (query as unknown as QueryFn);
+  const readEnv = () => buildClaudeEnv(factoryOptions.env ? factoryOptions.env() : process.env).env;
+  const fs = factoryOptions.fs ?? nodeFs;
+  const home = () => factoryOptions.homedir ?? homedir();
   return {
     kind: CLAUDE_KIND,
     displayName: 'Claude Code',
@@ -94,7 +131,24 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     sessionIdFor: (hostSessionId) => uuidv5(ID_NAMESPACE, `session:${hostSessionId}`),
     inputIdFor: (hostMessageId) => uuidv5(ID_NAMESPACE, `input:${hostMessageId}`),
 
+    // No-process reads (D83). None starts a process or writes a file.
+    async configFiles(cwd: string): Promise<ConfigFileInfo[]> {
+      return claudeConfigFiles(cwd, { env: readEnv(), platform: process.platform, homedir: home() });
+    },
+    maskConfig(file: { path: string; format: string }, text: string): MaskedConfig {
+      return maskClaudeSettings(file, text);
+    },
+    async settingsDefaults(cwd: string): Promise<SettingsDefaults> {
+      const env = readEnv();
+      const files = claudeConfigFiles(cwd, { env, platform: process.platform, homedir: home() });
+      return readSettingsDefaults(files, (p) => fs.readText(p), env);
+    },
+    async trustState(cwd: string): Promise<TrustState> {
+      return readTrustState(cwd, { env: readEnv(), platform: process.platform, homedir: home(), ...fs });
+    },
+
     async open(o: OpenSessionOptions): Promise<AgentBackendSession> {
+      // Read at every spawn, so a changed path applies to the next spawn only (D87).
       const bin = resolveClaudeBinary(o.userConfig.executablePath, nodeBinaryDeps(o.env));
       const { env } = buildClaudeEnv(o.env);
       const deps = nodeBinaryDeps(o.env);
@@ -109,6 +163,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
       const abortController = new AbortController();
       o.signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
+      const queryFn = factoryOptions.queryFn ?? ((await loadSdk()).query as unknown as QueryFn);
       const ref: { session?: ClaudeBackendSession } = {};
       // Pre-spawn view only: a settings `defaultMode: bypassPermissions` also allows bypass (D14).
       const canBypass = o.userConfig.options[ALLOW_BYPASS_OPTION] === true;
@@ -117,6 +172,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         cliVersion: () => ref.session?.cliVersion,
         canBypass: () => canBypass,
         newId: newRequestId,
+        onInterruptingDeny: () => ref.session?.noteInterruptRequested(),
       };
       const startInput: Parameters<typeof buildStartOptions>[0] = {
         executablePath: bin.path,

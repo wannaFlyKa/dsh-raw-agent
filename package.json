@@ -14,6 +14,7 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:cli-constants": "tsc -b && node scripts/test-cli-constants.mjs",
     "lint": "eslint . && prettier --check . && node scripts/check-imports.mjs",
     "check-imports": "node scripts/check-imports.mjs",
     "format": "prettier --write .",

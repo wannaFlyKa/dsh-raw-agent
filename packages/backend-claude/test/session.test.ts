@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { AsyncQueue, type BackendEvent, type InteractionHandler } from '@dsh-raw-agent/core';
-import { createClaudeFactory, toSdkUserMessage, type QueryFn } from '@dsh-raw-agent/backend-claude';
+import { createClaudeFactory, fileReference, toSdkUserMessage, type QueryFn } from '@dsh-raw-agent/backend-claude';
 
 /** A fake Query: records calls, yields what the test pushes. */
 function fakeQuery() {
@@ -92,6 +92,63 @@ describe('user message shape (D23, D27)', () => {
   });
 });
 
+describe('R4.3 attachments in the SDK user message (D23)', () => {
+  const text = (parts: Parameters<typeof toSdkUserMessage>[0]['parts']) =>
+    (toSdkUserMessage({ id: 'u', parts }, 'queue') as unknown as { message: { content: unknown[] } }).message.content;
+
+  it('keeps DSH part order: a pasted image first, then the file reference and the typed text', () => {
+    expect(
+      text([
+        { type: 'image', mediaType: 'image/png', base64: 'AA' },
+        { type: 'file', hostPath: '/h/files/ab/d/notes.txt' },
+        { type: 'text', text: 'what is in these?' },
+      ]),
+    ).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA' } },
+      { type: 'text', text: '@"/h/files/ab/d/notes.txt" what is in these?' },
+    ]);
+  });
+
+  it('sets a file reference off by whitespace, as the CLI parser needs (start or after \\s)', () => {
+    expect(
+      text([
+        { type: 'text', text: 'a\n' },
+        { type: 'file', hostPath: '/x' },
+        { type: 'text', text: ' b' },
+      ]),
+    ).toEqual([{ type: 'text', text: 'a\n@"/x" b' }]);
+    expect(
+      text([
+        { type: 'file', hostPath: '/x' },
+        { type: 'file', hostPath: '/y z' },
+      ]),
+    ).toEqual([{ type: 'text', text: '@"/x" @"/y z"' }]);
+  });
+
+  it('an image alone is one image block; images split text blocks in place', () => {
+    expect(text([{ type: 'image', mediaType: 'image/gif', base64: 'R0' }])).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/gif', data: 'R0' } },
+    ]);
+    expect(
+      text([
+        { type: 'text', text: 'one' },
+        { type: 'image', mediaType: 'image/png', base64: 'AA' },
+        { type: 'text', text: 'two' },
+      ]),
+    ).toEqual([
+      { type: 'text', text: 'one' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AA' } },
+      { type: 'text', text: 'two' },
+    ]);
+  });
+
+  it('a path with a double quote uses the bare form, or fails when it also has whitespace', () => {
+    expect(fileReference('/a b/c.txt')).toBe('@"/a b/c.txt"');
+    expect(fileReference('/a/"q".txt')).toBe('@/a/"q".txt');
+    expect(() => fileReference('/a b/"q".txt')).toThrow(/both a space and a double quote/);
+  });
+});
+
 describe.skipIf(process.platform === 'win32')('Claude factory and session (fake query)', () => {
   it('opens one persistent session with raw options, streams events, interrupts without closing', async () => {
     const fake = fakeQuery();
@@ -145,6 +202,43 @@ describe.skipIf(process.platform === 'win32')('Claude factory and session (fake 
     expect(events[0]).toEqual({ type: 'session-info', model: 'claude-sonnet-5-5', version: '2.1.318' });
     expect(events.at(-1)).toEqual({ type: 'exit' });
     expect(session.capabilities.backendVersion).toBe('2.1.318');
+  });
+
+  it('a send that cannot be built leaves nothing pending, so the next turn ends', async () => {
+    const fake = fakeQuery();
+    const factory = createClaudeFactory({ queryFn: fake.queryFn });
+    const session = await factory.open({
+      cwd: '/tmp',
+      env: { PATH: '/usr/bin' },
+      start: { kind: 'new', sessionId: factory.sessionIdFor!('dsh-session-bad') },
+      userConfig: { executablePath: fakeClaude(), options: {} },
+      interactions: noInteractions,
+      signal: new AbortController().signal,
+    });
+    const events: BackendEvent[] = [];
+    const reader = (async () => {
+      for await (const e of session.events()) events.push(e);
+    })();
+    fake.out.push({ type: 'system', subtype: 'init', model: 'm', claude_code_version: '2.1.318', session_id: 'x' });
+    await expect(
+      session.send({ id: 'bad', parts: [{ type: 'file', hostPath: '/a b/"q".txt' }] }, 'next'),
+    ).rejects.toThrow(/both a space and a double quote/);
+    await session.send({ id: 'good', parts: [{ type: 'text', text: 'hi' }] }, 'next');
+    fake.out.push({
+      type: 'result',
+      subtype: 'success',
+      num_turns: 1,
+      result: 'ok',
+      user_message_uuids: ['good'],
+      session_id: 'x',
+      usage: {},
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    const end = events.find((e) => e.type === 'turn-end') as { pendingInputs?: number } | undefined;
+    expect(end).toBeDefined();
+    expect(end!.pendingInputs ?? 0).toBe(0);
+    await session.dispose();
+    await reader;
   });
 
   it('derives stable ids (D5)', () => {

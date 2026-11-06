@@ -57,6 +57,13 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Model aliases:** with `enforceAvailableModels`, the `haiku`, `sonnet` and `default` aliases can resolve to the user's default model. Never assume an alias is cheap.
 - **Sandboxing:** inside a DSH file sandbox, Claude Code can fail with `EROFS` on `~/.claude/session-env`. Spawn the CLI from a process that can write to `~/.claude`.
 - **Host session variables:** a DSH started from inside a Claude Code session inherits `CLAUDE*` variables (see rule 5).
+- **DSH's model seat and `/model` save the profile default** (`agentDefaultModel.saveSelection`). Our catalog lists no model rows, so they cannot pick our provider; our own pickers live in `conversation.input.left` and call `agent.model.select` (session only) plus `setModel`.
+- **Single DSH slots** (`conversation.input.model`, `conversation.input.permission`) cannot be replaced per session. To hide the permission seat in our sessions only, mark the ancestor that holds `[data-slot="conversation.input.permission"]`. The seat wrapper is `display: contents`, so a visibility probe must look at its children.
+- **DSH `/permission`** changes only DSH's approval policy, which Claude ignores, but it is still offered in our sessions and shows a level that is not applied (open, S4).
+- **Workspace trust:** in SDK mode without `workspaceTrust` the CLI ignores the project's `permissions` rules (hooks, env and CLAUDE.md still apply). Ask the TUI's trust question first and pass `workspaceTrust` only after the user accepts; the CLI writes its own trust record.
+- **SDK import side effect:** SDK 0.3.318 sets `NoDefaultCurrentDirectoryInExePath=1` in `process.env` at import, on every OS. Load the SDK lazily and restore the env (D7).
+- **DSH terminal tab** (`sidebarRight.openTabIn(session, 'terminal')`) opens only in the session folder; it cannot start in another folder.
+- **Track an input only after its SDK message is built.** A send that throws after `tracker.sent()` leaves a pending id, and every later turn end then waits for it forever.
 
 ## 5. Development workflow
 
@@ -101,6 +108,7 @@ pnpm lint           # eslint, prettier --check, import check
 pnpm typecheck
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
 pnpm live           # Playwright suites against the isolated DSH on port 8790 (see §5)
+pnpm test:cli-constants  # check our env lists and reject texts against the installed claude binary
 ```
 
 - **Push:** this machine's git has no credential helper. Push with

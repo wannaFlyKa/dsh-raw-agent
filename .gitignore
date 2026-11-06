@@ -14,6 +14,8 @@ CLAUDE.local.md
 playwright-report/
 test-results/
 *.png.tmp
+# DSH session exports saved by live runs (keep them in the git-ignored research/ folder)
+/export-*.md
 
 # env and secrets
 .env

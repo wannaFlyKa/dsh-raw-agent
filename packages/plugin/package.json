@@ -11,13 +11,16 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./lib/client.js"
   },
   "files": [
     "lib/host.js",
     "lib/host.js.map",
     "lib/agent.js",
     "lib/agent.js.map",
+    "lib/client.js",
+    "lib/client.js.map",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg"
@@ -35,11 +38,16 @@
   "devDependencies": {
     "@dsh-raw-agent/backend-claude": "workspace:*",
     "@dsh-raw-agent/core": "workspace:*",
-    "@dsh-raw-agent/dsh-host": "workspace:*"
+    "@dsh-raw-agent/dsh-host": "workspace:*",
+    "@dsh-raw-agent/dsh-client": "workspace:*"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
     }
   }
 }

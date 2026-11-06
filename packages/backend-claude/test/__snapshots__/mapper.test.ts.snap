@@ -24,7 +24,7 @@ exports[`mapper on a recorded background task, interrupt and wake turn > maps th
   "session-info",
   "turn-start self",
   "step-start msg_04",
-  "step-message msg_04 [reasoning,text]",
+  "step-message msg_04 [text]",
   "turn-end completed completed pending=0",
 ]
 `;

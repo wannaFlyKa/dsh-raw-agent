@@ -66,6 +66,10 @@ export type BackendEvent =
     }
   | { type: 'superseded'; chainIds: string[] }
   | { type: 'input-consumed'; inputId: string }
+  /** A message the CLI shows the user outside the conversation (CLI `system/informational`). */
+  | { type: 'notice'; level: string; text: string }
+  /** The agent dropped a pending input (D25: interrupt with cancelQueued); it never ran. */
+  | { type: 'input-cancelled'; inputId: string }
   | { type: 'conversation-reset'; newSessionId: string; trigger?: string }
   | {
       type: 'turn-end';

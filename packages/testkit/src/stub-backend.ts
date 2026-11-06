@@ -17,7 +17,14 @@ export const STUB_CAPABILITIES: FactoryCapabilities = Object.freeze({
   resume: true,
   fork: 'none',
   needsProcess: [],
-  permissionModes: [],
+  permissionModes: [
+    { id: 'default', label: 'Default' },
+    { id: 'plan', label: 'Plan' },
+  ],
+  efforts: [
+    { id: 'low', label: 'Low' },
+    { id: 'high', label: 'High' },
+  ],
   mainAgentPicker: 'none',
   steer: 'restart',
 }) as FactoryCapabilities;
@@ -29,16 +36,28 @@ export interface StubScript {
   onSend?: ScriptStep[][];
   /** Events after interrupt() (for example the agent's result for a running tool, then turn-end). */
   onInterrupt?: ScriptStep[];
+  /** Report `cancelQueued` support; interrupt({cancelQueued}) then cancels every unconsumed input but the first. */
+  cancelQueued?: boolean;
+  /**
+   * Placeholder input ids used in recorded scripts: `inputAliases[k]` in an `input-consumed`
+   * event is replaced by the id of the k-th input the driver sent.
+   */
+  inputAliases?: string[];
 }
 
 export interface StubRecord {
   opened: OpenSessionOptions[];
   sent: UserInput[];
   interrupts: number;
+  interruptOptions: Array<{ cancelQueued?: boolean } | undefined>;
   stoppedTasks: string[];
+  /** Session controls the driver called, in order: `[name, value]` (D35, D38). */
+  controls: Array<[string, unknown]>;
   disposed: number;
   /** Push events by hand into the open session. */
   emit(steps: ScriptStep[]): Promise<void>;
+  /** The process dies: an `exit` with this error, then the stream ends. */
+  crash(error?: string): void;
 }
 
 export function createStubFactory(
@@ -46,13 +65,37 @@ export function createStubFactory(
   kind = 'stub',
 ): { factory: AgentBackendFactory; record: StubRecord } {
   let queue: AsyncQueue<BackendEvent> | undefined;
+  const consumed = new Set<string>();
+  const alias = (e: BackendEvent): BackendEvent => {
+    if (e.type !== 'input-consumed') return e;
+    const k = script.inputAliases?.indexOf(e.inputId) ?? -1;
+    const id = k >= 0 ? record.sent[k]?.id : undefined;
+    return id === undefined ? e : { ...e, inputId: id };
+  };
   const play = async (steps: ScriptStep[]) => {
     for (const s of steps) {
       if (s.type === 'wait') await new Promise((r) => setTimeout(r, (s as { ms: number }).ms));
-      else queue?.push(s as BackendEvent);
+      else {
+        const e = alias(s as BackendEvent);
+        if (e.type === 'input-consumed') consumed.add(e.inputId);
+        queue?.push(e);
+      }
     }
   };
-  const record: StubRecord = { opened: [], sent: [], interrupts: 0, stoppedTasks: [], disposed: 0, emit: play };
+  const record: StubRecord = {
+    opened: [],
+    sent: [],
+    interrupts: 0,
+    interruptOptions: [],
+    stoppedTasks: [],
+    controls: [],
+    disposed: 0,
+    emit: play,
+    crash(error) {
+      queue?.push(error === undefined ? { type: 'exit' } : { type: 'exit', error });
+      queue?.end();
+    },
+  };
   let sends = 0;
   const factory: AgentBackendFactory = {
     kind,
@@ -71,7 +114,7 @@ export function createStubFactory(
           sideQuestions: false,
           workflows: false,
           teamMessaging: false,
-          cancelQueued: false,
+          cancelQueued: script.cancelQueued === true,
           fileRewind: false,
           planChoices: [],
         },
@@ -81,10 +124,18 @@ export function createStubFactory(
           const steps = script.onSend?.[sends++] ?? [];
           void play(steps);
         },
-        async interrupt() {
+        async interrupt(opts) {
           record.interrupts++;
+          record.interruptOptions.push(opts);
+          const cancelled =
+            opts?.cancelQueued && script.cancelQueued
+              ? record.sent
+                  .slice(1)
+                  .filter((i) => !consumed.has(i.id))
+                  .map((i) => i.id)
+              : [];
           void play(script.onInterrupt ?? []);
-          return { cancelledInputIds: [] };
+          return { cancelledInputIds: cancelled };
         },
         async forceStop() {
           q.push({ type: 'exit' });
@@ -98,6 +149,15 @@ export function createStubFactory(
         controls: {
           async stopTask(taskId) {
             record.stoppedTasks.push(taskId);
+          },
+          async setModel(model) {
+            record.controls.push(['setModel', model]);
+          },
+          async setEffort(effort) {
+            record.controls.push(['setEffort', effort]);
+          },
+          async setPermissionMode(mode) {
+            record.controls.push(['setPermissionMode', mode]);
           },
         },
       };

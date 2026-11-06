@@ -12,6 +12,15 @@ export const JOB_REWAIT_MS = 30 * 60 * 1000;
 /** After a kill, how long the job waits for the task's own end before it settles anyway. */
 export const JOB_KILL_GRACE_MS = 5000;
 
+/**
+ * Cancel reasons DSH uses when it tears jobs down, not when the user kills one
+ * (`P/dsh-jobs-local/lib/index.js:813` "owner disposed", `:833` "jobs service disposed"; the
+ * record's `settleCause` is set to `teardown` before `cancel` runs, `:848-850`). On teardown the
+ * job settles locally at once and the task is NOT stopped (D47): an evicted agent or a DSH
+ * shutdown must not kill background work through our own cancel hook (rules 6, 7).
+ */
+export const TEARDOWN_REASONS: readonly string[] = Object.freeze(['owner disposed', 'jobs service disposed']);
+
 export function jobKind(kind: TaskKind): string {
   return `raw-agent-${kind}`;
 }
@@ -44,6 +53,10 @@ export function startJob(
         handle = job;
         return {
           cancel(reason?: string) {
+            if (reason !== undefined && TEARDOWN_REASONS.includes(reason)) {
+              finish({ status: 'killed', detail: reason });
+              return;
+            }
             stop();
             const t = setTimeout(
               () => finish(reason ? { status: 'killed', detail: reason } : { status: 'killed' }),

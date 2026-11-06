@@ -17,6 +17,17 @@ export interface AgentBackendFactory {
   /** No-process reads (D83). Optional; none may start a process. */
   sessionExists?(sessionId: string, cwd: string): Promise<boolean>;
   sessionTitle?(sessionId: string, cwd: string): Promise<string | undefined>;
+  /** Read-only: does the agent already trust this folder (D73)? Never writes the record. */
+  trustState?(cwd: string): Promise<TrustState>;
+  /** The agent's own settings files for this folder (D63). Paths only; nothing is read or written. */
+  configFiles?(cwd: string): Promise<ConfigFileInfo[]>;
+  /** Mask secret values in one file's text (D63). The DSH layer knows no file format. */
+  maskConfig?(file: { path: string; format: string }, text: string): MaskedConfig;
+  /**
+   * Read-only preview of what the user's settings choose for a new session (R1.4): model, effort
+   * and permission mode. For display only; the agent applies its own settings itself.
+   */
+  settingsDefaults?(cwd: string): Promise<SettingsDefaults>;
 
   /** Only when ids === 'host-chosen' (D5): deterministic, no storage. */
   sessionIdFor?(hostSessionId: string): string;
@@ -216,6 +227,12 @@ export type ElicitationAnswer =
 export interface PermissionModeInfo {
   id: string;
   label: string;
+  /**
+   * Offered only when this backend user option is on (D38 r4; Claude: bypass needs
+   * `allowDangerouslySkipPermissions`, as `claude --allow-dangerously-skip-permissions`, D14).
+   * A mode the session already runs in (for example from the user's settings) is still shown.
+   */
+  requiresOption?: string;
 }
 
 export interface EffortInfo {
@@ -254,9 +271,82 @@ export interface CommandInfo {
   argumentHint?: string;
 }
 
+/** One settings file the agent reads (D63). `scope` is a stable key such as 'user' or 'project'. */
+export interface ConfigFileInfo {
+  label: string;
+  path: string;
+  scope: string;
+  format: 'json' | 'toml' | 'text';
+}
+
+/** One hidden value. `start`/`end` index the masked text; `sourceStart`/`sourceEnd` the original. */
+export interface ConfigSecret {
+  start: number;
+  end: number;
+  sourceStart: number;
+  sourceEnd: number;
+  /** The key path of the value, for example 'env.ANTHROPIC_API_KEY'. */
+  key?: string;
+}
+
+export interface MaskedConfig {
+  masked: string;
+  secrets: ConfigSecret[];
+}
+
+/** The agent's own workspace-trust question (D73), as its terminal app shows it. */
+export interface TrustQuestion {
+  title: string;
+  body: string;
+  acceptLabel: string;
+  declineLabel: string;
+}
+
+export interface TrustState {
+  state: 'trusted' | 'untrusted' | 'unknown';
+  /** The folder the trust is for (what `trustAccepted.directory` must name). */
+  directory: string;
+  /** Repository root, when the folder is inside one. */
+  root?: string;
+  /** Where a 'trusted' answer came from (the folder itself or a parent). */
+  trustedBy?: string;
+  /** What is lost while untrusted, in the agent's own terms (from S10). */
+  untrustedEffect?: string;
+  question?: TrustQuestion;
+}
+
 export interface ContextUsage {
   used: number;
   window: number;
   autoCompactAt?: number;
   categories?: Array<{ name: string; tokens: number }>;
+}
+
+/** What the user's own settings choose (R1.4). Display only; read without a process (D83). */
+export interface SettingsDefaults {
+  model?: string;
+  effort?: string;
+  permissionMode?: string;
+  /** Where each value came from, for example 'env', 'local', 'project', 'user'. */
+  sources: Partial<Record<'model' | 'effort' | 'permissionMode', string>>;
+  /**
+   * D63: every top-level key of the settings files and the layers that set it, highest
+   * precedence first. `merged` when more than one layer sets an object or list value (the agent
+   * combines those layers instead of picking one).
+   */
+  keys?: SettingsKeySource[];
+}
+
+export interface SettingsKeySource {
+  key: string;
+  /** Scopes that set the key, highest precedence first (for Claude: local, project, user). */
+  scopes: string[];
+  merged?: boolean;
+}
+
+/** A session-only choice from the UI (D35-D38). `null` or 'settings' means "back to my settings". */
+export interface SessionChoiceRequest {
+  model?: string;
+  effort?: string | null;
+  mode?: string;
 }

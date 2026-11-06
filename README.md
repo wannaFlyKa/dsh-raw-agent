@@ -17,6 +17,13 @@ You already know Claude Code, and your setup is tuned: settings, skills, MCP ser
 
 See [docs/requirements.md](docs/requirements.md) for the full list.
 
+## Install note: the SDK platform package
+
+The plugin uses the Claude Agent SDK, whose install pulls one large platform package with a
+bundled CLI. The plugin never runs it (it always runs your own `claude`), and it cannot stop the
+install. [packages/plugin/README.md](packages/plugin/README.md) says why and gives the opt-in
+`overrides` block that removes it.
+
 ## Not affiliated
 
 This is an independent community project. It is not made or endorsed by Anthropic or DeepSeek. "Claude" and "Claude Code" are trademarks of Anthropic.

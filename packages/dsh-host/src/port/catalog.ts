@@ -9,7 +9,9 @@ import type { CordisContext } from './types.js';
 export const SETTINGS_MODEL = 'settings';
 
 /** A plain object with the LlmAdapter surface (`P/dsh-llm/lib/index.js:1670-1754`). */
-export function catalogAdapter(factory: AgentBackendFactory, seedModels: readonly string[] = []) {
+export function catalogAdapter(factory: AgentBackendFactory, seedModels: readonly string[] = [], listed = false) {
+  const seeds = (provider: string) =>
+    seedModels.map((id) => ({ provider, id, name: id, inputModalities: ['text', 'image'] }));
   const settingsRow = (provider: string) => ({
     provider,
     id: SETTINGS_MODEL,
@@ -28,11 +30,14 @@ export function catalogAdapter(factory: AgentBackendFactory, seedModels: readonl
       height: image.height,
       maxBytes: image.bytes,
     }),
-    // Test-only seed rows (the live list from supportedModels() is a later milestone, D33).
-    listModels: async (provider: string) => [
-      settingsRow(provider),
-      ...seedModels.map((id) => ({ provider, id, name: id, inputModalities: ['text', 'image'] })),
-    ],
+    // S4 (a), K1: no row is listed in DSH's global model directory. The composer's native model
+    // seat and `/model` choose through `session.selectModel`, which also saves the profile's
+    // default model (`P/dsh-api-session-controller/lib/index.js:704-720`), so a pick there made
+    // new Standard sessions route to this provider (Phase 3 spike). With no listed row,
+    // `selectModel` refuses our provider before it saves anything (`requireModel`). Choices go
+    // through the plugin's own control (D36). Rows are still resolved for the loop and for image
+    // admission (`resolveModel`).
+    listModels: async (_provider: string) => (listed ? [settingsRow(_provider), ...seeds(_provider)] : []),
     resolveModel: async (provider: string, model: string) => ({
       ...settingsRow(provider),
       id: model,

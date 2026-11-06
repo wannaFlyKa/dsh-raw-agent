@@ -56,12 +56,32 @@ export function npmShimTarget(shimPath: string, text: string): string | undefine
   return last === undefined ? undefined : path.win32.join(dir, last);
 }
 
+/**
+ * The configured path as the user typed it in the plugin settings (D87): surrounding spaces and
+ * quotes removed, a leading `~` expanded to the home folder. Empty means "not configured".
+ */
+export function normalizeConfiguredPath(
+  configured: string | undefined,
+  homedir: string,
+  platform: NodeJS.Platform,
+): string | undefined {
+  if (configured === undefined) return undefined;
+  let c = configured.trim();
+  if (c.length >= 2 && ((c.startsWith('"') && c.endsWith('"')) || (c.startsWith("'") && c.endsWith("'"))))
+    c = c.slice(1, -1).trim();
+  if (c === '') return undefined;
+  const p = platform === 'win32' ? path.win32 : path.posix;
+  if (c === '~') return homedir;
+  if (c.startsWith('~/') || (platform === 'win32' && c.startsWith('~\\'))) return p.join(homedir, c.slice(2));
+  return c;
+}
+
 export function resolveClaudeBinary(configured: string | undefined, deps: BinaryResolveDeps): ResolvedBinary {
   const tried: string[] = [];
   const p = deps.platform === 'win32' ? path.win32 : path.posix;
 
-  if (configured !== undefined && configured.trim() !== '') {
-    const c = configured.trim();
+  const c = normalizeConfiguredPath(configured, deps.homedir, deps.platform);
+  if (c !== undefined) {
     tried.push(c);
     if (deps.isExecutable(c)) return { path: c, source: 'configured' };
     throw new ClaudeBinaryNotFoundError(

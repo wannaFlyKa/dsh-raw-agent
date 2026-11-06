@@ -1,4 +1,5 @@
-// SDK message → BackendEvent mapper (architecture §6, D18, D20, D21, D26, D27, D57, D69, D71, D86).
+// SDK message → BackendEvent mapper (architecture §6, D18, D20, D21, D26, D27, D57, D69, D71, D72,
+// D84, D86).
 //
 // Phase 3 spike scope: the main thread (text, thinking, tool_use, tool_result, result, interrupt,
 // synthetic messages, whole responses without a stream) and background tasks (task_* frames).
@@ -7,8 +8,11 @@
 // Guarantees the DSH writer relies on (§7.2):
 // - every `step-message` follows its `step-start`;
 // - a `tool-result` is emitted only after the `step-message` that advertises its call;
-// - duplicates and re-sends are dropped;
-// - `delta.blockIndex` is the position of that block in the step's `step-message.blocks`;
+// - duplicates and re-sends are dropped (W1: by uuid, by tool id, and cumulative re-sent frames);
+// - `delta.blockIndex` is the position of that block in the step's `step-message.blocks`
+//   (empty signed reasoning blocks are not written, D86, so they take no position);
+// - a whole response (no `message_start`, D84) is one step; its further frames with the same
+//   `message.id` are further `step-message`s of that step (`final: false`, no new `step-start`);
 // - `turn-end.pendingInputs` counts sent inputs not yet consumed.
 
 import type {
@@ -20,6 +24,7 @@ import type {
   ToolResultContent,
   Usage,
 } from '@dsh-raw-agent/core';
+import { isDeepStrictEqual } from 'node:util';
 import {
   isObject,
   num,
@@ -43,14 +48,34 @@ interface Slot {
   block?: ContentBlock;
   /** Delta text seen so far; the fallback for an interrupted text or reasoning block. */
   streamed: string;
+  /** The CLI message uuid that filled this slot (for tombstones, D84). */
+  uuid?: string;
+  /** Removed by a tombstone before it was written (D84). */
+  dropped?: boolean;
+}
+
+/** D86: a reasoning block with no text (a signed, empty `thinking`) is not written. */
+function isEmptyReasoning(b: ContentBlock): boolean {
+  return b.type === 'reasoning' && b.text === '';
+}
+
+/** Whether a slot ends up in the step's blocks (same rule as #closeStep). */
+function slotKept(s: Slot): boolean {
+  if (s.dropped) return false;
+  if (s.block !== undefined) return !isEmptyReasoning(s.block);
+  return s.kind !== 'tool-call' && s.streamed !== '';
 }
 
 interface OpenStep {
   id: string;
   streamed: boolean;
   slots: Slot[];
-  /** API content index → slot position (redacted_thinking has none). */
+  /** API content index → slot index (redacted_thinking has none). */
   positions: Map<number, number>;
+  /** Blocks filled from assistant frames, in fill order (cumulative re-send check, W1). */
+  filled: ContentBlock[];
+  /** Uuids of the CLI messages merged into this step, in order. */
+  chain: string[];
   usage?: Usage;
   model?: string;
   lastChainId?: string;
@@ -161,6 +186,8 @@ export class ClaudeMessageMapper {
   readonly #advertised = new Set<string>();
   /** tool-result events waiting for their call to be advertised, in arrival order. */
   #buffered: ToolResultEvent[] = [];
+  /** The open whole-response step (D84): its message id, and whether its usage was sent. */
+  #whole: { id: string; usageSent: boolean } | undefined;
   readonly #background = new Map<string, TaskKind>();
 
   constructor(tracker: SentInputTracker, options: MapperOptions = {}) {
@@ -201,6 +228,9 @@ export class ClaudeMessageMapper {
       case 'result':
         this.#result(msg as WireResult, out);
         break;
+      case 'tombstone':
+        this.#tombstone(msg, out);
+        break;
       default:
         this.#debug('ignored message type', msg);
     }
@@ -211,6 +241,7 @@ export class ClaudeMessageMapper {
   exit(error?: string): BackendEvent[] {
     const out: BackendEvent[] = [];
     this.#step = undefined;
+    this.#whole = undefined;
     this.#buffered = [];
     this.#turnOpen = false;
     out.push(error === undefined ? { type: 'exit' } : { type: 'exit', error });
@@ -244,9 +275,11 @@ export class ClaudeMessageMapper {
     const state = str(msg.state);
     if (id === undefined) return;
     if (state === 'started') this.#consume([id], out);
-    // 'cancelled' of a still-pending input: it leaves the map (D25). The interrupt receipt
-    // reports it to the DSH layer; it is never "consumed".
-    else if (state === 'cancelled') this.#tracker.cancel([id]);
+    // 'cancelled' of a still-pending input: it leaves the map and is never "consumed" (D25).
+    // The frame can arrive before the interrupt receipt, which then lists nothing still pending,
+    // so the DSH layer hears of it here (M1 live: a cancelled steer was otherwise claimed).
+    else if (state === 'cancelled')
+      for (const inputId of this.#tracker.cancel([id])) out.push({ type: 'input-cancelled', inputId });
   }
 
   // ---- system frames ----
@@ -318,6 +351,14 @@ export class ClaudeMessageMapper {
         });
         break;
       }
+      case 'informational': {
+        // The CLI's own user-facing line, e.g. after `set_model` "Model "x" is restricted by your
+        // organization's settings. Using y instead." (CLI 2.1.318 `inform`). Shown as is.
+        const text = str(msg.content);
+        if (text !== undefined && text.trim() !== '')
+          out.push({ type: 'notice', level: str(msg.level) ?? 'notice', text });
+        break;
+      }
       default:
         this.#debug('ignored system subtype', msg);
     }
@@ -339,9 +380,12 @@ export class ClaudeMessageMapper {
           streamed: true,
           slots: [],
           positions: new Map(),
+          filled: [],
+          chain: [],
           aborted: false,
           toolIds: new Set(),
         };
+        this.#whole = undefined;
         const usage = usageFromStart(ev.message?.usage as WireMessage['usage']);
         if (usage !== undefined) step.usage = usage;
         const model = canonicalModel(str(ev.message?.model));
@@ -363,9 +407,9 @@ export class ClaudeMessageMapper {
         const step = this.#step;
         const index = num(ev.index);
         if (step === undefined || index === undefined) return;
-        const pos = step.positions.get(index);
-        const slot = pos === undefined ? undefined : step.slots[pos];
-        if (pos === undefined || slot === undefined) return;
+        const slotIndex = step.positions.get(index);
+        const slot = slotIndex === undefined ? undefined : step.slots[slotIndex];
+        if (slotIndex === undefined || slot === undefined || slot.dropped) return;
         const d = ev.delta ?? {};
         let kind: 'text' | 'reasoning' | 'tool-input' | undefined;
         let text: string | undefined;
@@ -374,6 +418,9 @@ export class ClaudeMessageMapper {
         else if (d.type === 'input_json_delta') [kind, text] = ['tool-input', d.partial_json];
         if (kind === undefined || text === undefined || text === '') return;
         slot.streamed += text;
+        // The block's position among the blocks that will be written (D86: empty reasoning has none).
+        let pos = 0;
+        for (let i = 0; i < slotIndex; i++) if (slotKept(step.slots[i]!)) pos++;
         out.push({ type: 'delta', agent: MAIN, stepId: step.id, kind, blockIndex: pos, text, at });
         return;
       }
@@ -414,67 +461,133 @@ export class ClaudeMessageMapper {
       this.#seenUuids.add(uuid);
     }
     const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+    const id = str(msg.message?.id) ?? uuid ?? `msg-${at}`;
+    const step = this.#step;
+    const inStreamedStep = step !== undefined && step.id === id && step.streamed;
     // A re-sent message whose tool ids are already written is skipped (D72).
-    if (content.some((b) => b.type === 'tool_use' && typeof b.id === 'string' && this.#advertised.has(b.id))) {
+    if (
+      !inStreamedStep &&
+      content.some((b) => b.type === 'tool_use' && typeof b.id === 'string' && this.#advertised.has(b.id))
+    ) {
       this.#debug('re-sent assistant message', msg);
       return;
     }
     this.#maybeTurnStart(msg, out);
-    const id = str(msg.message?.id) ?? uuid ?? `msg-${at}`;
     const model = str(msg.message?.model);
     const synthetic = model === '<synthetic>';
     const error = msg.error === undefined || msg.error === null ? undefined : String(msg.error);
 
-    const step = this.#step;
-    if (step !== undefined && step.id === id && step.streamed) {
+    if (inStreamedStep) {
       // Streamed step: fill the started slots in order.
-      for (const b of content) {
-        const block = convertBlock(b);
-        if (block === undefined) continue;
-        const slot = step.slots.find((s) => s.block === undefined && s.kind === block.type);
-        if (slot !== undefined) slot.block = block;
-        else step.slots.push({ kind: block.type, block, streamed: '' });
+      const blocks = content.map(convertBlock).filter((b): b is ContentBlock => b !== undefined);
+      // W1: a cumulative frame repeats the blocks already filled; skip that prefix.
+      let skip = 0;
+      if (blocks.length > 1)
+        while (skip < blocks.length && skip < step.filled.length && isDeepStrictEqual(blocks[skip], step.filled[skip]))
+          skip++;
+      for (const block of blocks.slice(skip)) {
+        if (block.type === 'tool-call' && (step.toolIds.has(block.id) || this.#advertised.has(block.id))) {
+          this.#debug('re-sent tool_use block (W1)', block); // the checker refuses a repeated id
+          continue;
+        }
+        const slot = step.slots.find((s) => s.block === undefined && !s.dropped && s.kind === block.type);
+        const filled: Slot = slot ?? { kind: block.type, streamed: '' };
+        filled.block = block;
+        if (uuid !== undefined) filled.uuid = uuid;
+        if (slot === undefined) step.slots.push(filled);
+        step.filled.push(block);
         if (block.type === 'tool-call') step.toolIds.add(block.id);
       }
-      if (uuid !== undefined) step.lastChainId = uuid;
+      if (uuid !== undefined) {
+        step.lastChainId = uuid;
+        step.chain.push(uuid);
+      }
       if (msg.aborted === true) step.aborted = true;
       return;
     }
 
     // No API stream for this message: synthetic, error, local command, or a whole response (D69, D84).
-    const blocks = content.map(convertBlock).filter((b): b is ContentBlock => b !== undefined);
-    const e: Extract<BackendEvent, { type: 'step-message' }> = {
-      type: 'step-message',
-      agent: MAIN,
-      stepId: id,
-      blocks,
-      final: true,
-    };
-    const startEvent: Extract<BackendEvent, { type: 'step-start' }> = {
-      type: 'step-start',
-      agent: MAIN,
-      stepId: id,
-      at,
-    };
-    if (synthetic || error !== undefined) {
-      startEvent.synthetic = true;
-      e.synthetic = true;
-      if (error !== undefined) e.error = error;
-    } else {
-      const usage = usageFromStart(msg.message?.usage as WireMessage['usage']);
-      // A whole response carries final usage only when output tokens are present (D84).
-      if (usage !== undefined && num(msg.message?.usage?.output_tokens) !== undefined) {
-        usage.output = num(msg.message?.usage?.output_tokens) ?? 0;
-        e.usage = usage;
-      }
-      const m = canonicalModel(model);
-      if (m !== undefined) e.model = m;
+    // D86: empty signed reasoning is not written; redacted_thinking has no block.
+    const blocks = content.map(convertBlock).filter((b): b is ContentBlock => b !== undefined && !isEmptyReasoning(b));
+    const special = synthetic || error !== undefined;
+    const continues = !special && this.#whole?.id === id;
+    if (!continues) {
+      // A stale streamed step (no message_stop) is closed by the writer on this step-start (D18).
+      this.#step = undefined;
+      this.#whole = special ? undefined : { id, usageSent: false };
+      const startEvent: Extract<BackendEvent, { type: 'step-start' }> = {
+        type: 'step-start',
+        agent: MAIN,
+        stepId: id,
+        at,
+      };
+      if (special) startEvent.synthetic = true;
+      out.push(startEvent);
     }
-    if (uuid !== undefined) e.lastChainId = uuid;
-    this.#step = undefined;
-    out.push(startEvent, e);
-    for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
+    if (blocks.length > 0) {
+      const e: Extract<BackendEvent, { type: 'step-message' }> = {
+        type: 'step-message',
+        agent: MAIN,
+        stepId: id,
+        blocks,
+        // A whole response may continue in further frames of the same message id (D84, D68);
+        // the step closes on the next step-start, at the turn end, or when its calls resolve.
+        final: special,
+      };
+      if (special) {
+        e.synthetic = true;
+        if (error !== undefined) e.error = error;
+      } else {
+        const whole = this.#whole!;
+        const usage = usageFromStart(msg.message?.usage as WireMessage['usage']);
+        const output = num(msg.message?.usage?.output_tokens);
+        // Final usage only (not a stream placeholder), counted once per message id (D57, D84).
+        if (usage !== undefined && output !== undefined && output > 0 && !whole.usageSent) {
+          usage.output = output;
+          e.usage = usage;
+          whole.usageSent = true;
+        }
+        const m = canonicalModel(model);
+        if (m !== undefined) e.model = m;
+      }
+      if (uuid !== undefined) e.lastChainId = uuid;
+      out.push(e);
+      for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
+    }
     this.#flushResults(out);
+  }
+
+  /**
+   * D84 (2): `tombstone {message}` (CLI 2.1.318: "@internal Emitted when a previously-yielded
+   * message is superseded"; whether the SDK stream forwards it is **unverified**, S1). Drops
+   * what is not yet written: a buffered tool result, or the step content the message filled.
+   * Anything already emitted stays; the DSH layer takes the uuid off its fork points (D72).
+   */
+  #tombstone(msg: WireMessage, out: BackendEvent[]): void {
+    const target = isObject(msg.message) ? msg.message : undefined;
+    const uuid = str(target?.uuid);
+    if (uuid === undefined) return;
+    this.#seenUuids.add(uuid);
+    const before = this.#buffered.length;
+    this.#buffered = this.#buffered.filter((r) => r.chainId !== uuid);
+    const step = this.#step;
+    let dropped = 0;
+    if (step !== undefined) {
+      for (const slot of step.slots) {
+        if (slot.uuid !== uuid || slot.dropped) continue;
+        slot.dropped = true;
+        if (slot.block?.type === 'tool-call') step.toolIds.delete(slot.block.id);
+        dropped++;
+      }
+      step.chain = step.chain.filter((c) => c !== uuid);
+      if (step.lastChainId === uuid) {
+        const last = step.chain.at(-1);
+        if (last === undefined) delete step.lastChainId;
+        else step.lastChainId = last;
+      }
+    }
+    this.#debug('tombstone', { uuid, droppedResults: before - this.#buffered.length, droppedBlocks: dropped });
+    out.push({ type: 'superseded', chainIds: [uuid] });
   }
 
   #closeStep(out: BackendEvent[]): void {
@@ -483,8 +596,10 @@ export class ClaudeMessageMapper {
     this.#step = undefined;
     const blocks: ContentBlock[] = [];
     for (const s of step.slots) {
-      if (s.block !== undefined) blocks.push(s.block);
-      else if (s.kind === 'text' && s.streamed !== '') blocks.push({ type: 'text', text: s.streamed });
+      if (s.dropped) continue;
+      if (s.block !== undefined) {
+        if (!isEmptyReasoning(s.block)) blocks.push(s.block); // D86
+      } else if (s.kind === 'text' && s.streamed !== '') blocks.push({ type: 'text', text: s.streamed });
       else if (s.kind === 'reasoning' && s.streamed !== '') blocks.push({ type: 'reasoning', text: s.streamed });
       // An unclosed tool_use block is left out (§6 interrupt row).
     }

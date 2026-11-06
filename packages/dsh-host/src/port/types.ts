@@ -66,14 +66,21 @@ export interface DshSession {
   snapshotEvents(): readonly DshEvent[];
 }
 
+/** The agent's durable inbox (`P/dsh-agent-loop/lib/index.js:70-201`). */
+export interface DshInbox {
+  readonly nextTurn: readonly DshUserMessage[];
+  readonly nextStep: readonly DshUserMessage[];
+  /** Public removal: records `outcome: 'canceled'` and emits `agent/inbox/discarded` (D25). */
+  remove?(messageId: string): boolean;
+}
+
 export interface DshAgent {
   readonly id: string;
+  /** The agent's Cordis context (`P/dsh-agent` runtime types); used for its preset binding. */
+  readonly ctx?: unknown;
   readonly session: DshSession;
   readonly status: 'idle' | 'running';
-  readonly inbox: {
-    readonly nextTurn: readonly DshUserMessage[];
-    readonly nextStep: readonly DshUserMessage[];
-  };
+  readonly inbox: DshInbox;
   readonly model: { current(): unknown; select(s: { provider: string; model: string }): void };
   send(message: DshUserMessage, target: 'next-turn' | 'next-step', wakeup: boolean): void;
   followup(message: DshUserMessage): void;
@@ -111,6 +118,29 @@ export interface DshJobs {
   attachController(name: string): () => void;
 }
 
+/** DSH's image media types (`P/dsh-attachment/lib/types/types.d.ts:5`). */
+export const DSH_IMAGE_MEDIA_TYPES: readonly string[] = Object.freeze([
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'image/gif',
+]);
+
+/**
+ * The parts of `ctx.attachments` the port uses (`P/dsh-attachment/lib/types/index.d.ts`). Refs are
+ * opaque here: the port passes them back to the store or into a native event unchanged.
+ */
+export interface DshAttachments {
+  /** Verified bytes of one stored (normalized) image (`index.d.ts:84`). */
+  readImage?(ref: unknown, signal?: AbortSignal): Promise<{ ref: { mediaType?: string }; data: Uint8Array }>;
+  /** Validate and store an ordered image batch; refs in input order (`index.d.ts:43`). */
+  saveImages?(
+    inputs: ReadonlyArray<{ data: Uint8Array; mediaType: string; name?: string }>,
+  ): Promise<readonly unknown[]>;
+  /** Absolute host path of a verbatim stored file, or undefined when not host-file-backed (`index.d.ts:123`). */
+  fileHostPath?(ref: unknown): string | undefined;
+}
+
 /** The parts of a Cordis context the port uses. */
 export interface CordisContext {
   on(
@@ -121,6 +151,8 @@ export interface CordisContext {
   emit(name: string, ...args: unknown[]): void;
   effect(fn: () => () => void, label?: string): unknown;
   get(name: string): unknown;
+  /** Cordis `ctx.provide(name, value)` (`P/cordis/lib/index.js:1384`): a service owned by this fiber. */
+  provide?(name: string, value: unknown): unknown;
   /** Cordis `ctx.inject(deps, apply)`: runs `apply` in a child scope while every dep is served. */
   inject?(deps: string[], apply: (child: CordisContext) => void): unknown;
   readonly logger?: { warn(...a: unknown[]): void; info(...a: unknown[]): void; debug?(...a: unknown[]): void };

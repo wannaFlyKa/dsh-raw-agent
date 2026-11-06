@@ -39,6 +39,8 @@ function setup(binding: HostBinding | undefined, choice?: string) {
   };
   const sink: TurnSink = {
     stepOpen: false,
+    hasMessage: false,
+    claim: () => false,
     openCallIds: [],
     hasCall: () => false,
     openStep: () => {},
@@ -48,10 +50,11 @@ function setup(binding: HostBinding | undefined, choice?: string) {
     closeStep: () => {},
   };
   const rt = new SessionRuntime(factory, port, { env: {} });
+  let n = 0;
   const run = () =>
     rt.runTurn(
       sink,
-      { userInputs: [{ id: 'u1', parts: [{ type: 'text', text: 'hi' }] }], wake: false },
+      { userInputs: [{ id: `u${++n}`, parts: [{ type: 'text', text: 'hi' }] }], wake: false },
       new AbortController().signal,
     );
   return { opened, models, run, rt };

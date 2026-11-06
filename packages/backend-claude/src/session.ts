@@ -34,24 +34,41 @@ export interface ClaudeSessionInit {
   debug?: (note: string, detail: unknown) => void;
 }
 
-/** `@"<path>"` is the TUI's own attach mechanism (D23). */
+/**
+ * `@"<path>"` is the TUI's own attach mechanism (D23). The CLI's mention parser (CLI 2.1.318
+ * binary, fn `k0r`) reads `@"…"` only at the start or after whitespace, and the quoted path cannot
+ * hold `"`. A path with `"` but no whitespace uses the bare `@path` form (fn `CIn`); a path with
+ * both cannot be referenced, so the send fails rather than drop the user's file.
+ */
 export function fileReference(hostPath: string): string {
-  return `@"${hostPath}"`;
+  if (!hostPath.includes('"')) return `@"${hostPath}"`;
+  if (!/\s/.test(hostPath) && !hostPath.startsWith('"')) return `@${hostPath}`;
+  throw new Error(`cannot attach ${JSON.stringify(hostPath)}: its path holds both a space and a double quote`);
 }
 
-/** Build the SDK user message for one input (D23, D27). */
+/**
+ * Build the SDK user message for one input (D23, D27). Parts keep their order: text and file
+ * references join into one text block (a file reference is set off by whitespace, as the CLI's
+ * parser needs), and each image is a base64 image block, as the TUI sends a pasted image.
+ */
 export function toSdkUserMessage(input: UserInput, mode: 'next' | 'queue'): SDKUserMessage {
   const content: Array<Record<string, unknown>> = [];
   let text = '';
+  let afterFile = false;
   const flushText = () => {
     if (text !== '') content.push({ type: 'text', text });
     text = '';
+    afterFile = false;
   };
   for (const part of input.parts) {
-    if (part.type === 'text') text += part.text;
-    else if (part.type === 'file')
-      text += (text === '' || text.endsWith(' ') ? '' : ' ') + fileReference(part.hostPath);
-    else {
+    if (part.type === 'text') {
+      if (afterFile && part.text !== '' && !/^\s/.test(part.text)) text += ' ';
+      text += part.text;
+      if (part.text !== '') afterFile = false;
+    } else if (part.type === 'file') {
+      text += (text === '' || /\s$/.test(text) ? '' : ' ') + fileReference(part.hostPath);
+      afterFile = true;
+    } else {
       flushText();
       content.push({ type: 'image', source: { type: 'base64', media_type: part.mediaType, data: part.base64 } });
     }
@@ -161,8 +178,16 @@ export class ClaudeBackendSession implements AgentBackendSession {
 
   async send(input: UserInput, mode: 'next' | 'queue'): Promise<void> {
     if (this.#exited) throw new Error('Claude Code is not running');
+    // Build first: a message that cannot be built (an unreferenceable file path) must not stay
+    // pending in the tracker, or every later turn end would wait for it (M1 verify 3-2).
+    const message = toSdkUserMessage(input, mode);
     this.#tracker.sent(input.id);
-    this.#input.push(toSdkUserMessage(input, mode));
+    this.#input.push(message);
+  }
+
+  /** A user answer that interrupts the turn (reject on the main agent): the next error result is a stop. */
+  noteInterruptRequested(): void {
+    this.#mapper.noteInterruptRequested();
   }
 
   async interrupt(opts?: { cancelQueued?: boolean }): Promise<{ cancelledInputIds: string[] }> {
