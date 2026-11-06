@@ -160,7 +160,7 @@ Answered since round 1: the `dsh-time-context` guard in a full web profile (`dsh
 5. **Usage display.** Feed the native ring and turn row (real delta times), plus a plugin panel for Claude's `/context` categories, cost and plan limits.
 6. **DSH name clashes.** How to reach Claude's own `/model`, `/export`, `/feedback` and `/permission` (agent-scoped Host command with `command/*` records, or accept DSH's).
 7. **DSH compaction.** Make sure `compaction-basic` and `command-compact` are not mounted for our sessions, and the catalog adapter refuses every request.
-8. **Jobs.** Pending `wait()` per job (verified), not `attachController()`.
+8. **Jobs.** Pending `wait()` per job (verified), not `attachController()`. *(Superseded: the design attaches its own preset-scoped job controller and keeps one pending `wait()` only as a second guard; see `docs/architecture.md` D47.)*
 9. **Process lifecycle.** Idle reaping, process limits, and process-group cleanup after a CLI crash (orphaned tool processes).
 10. **Busy and idle.** Drive them from `status`, `result` and `command_lifecycle`; skip empty `num_turns: 0` results and `local_command` usage.
 11. **Version drift.** Treat every control as optional; detect `Unsupported control request subtype`.

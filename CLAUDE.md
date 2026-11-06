@@ -66,18 +66,44 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Commits:** small and focused, one milestone or fix per commit, imperative subject lines. Never commit `research/`, `.dsh-dev/`, secrets, model ARNs, account ids or machine-specific paths.
 - **Docs:** plain, simple English, with short sentences. Mark anything inferred but not verified as **unverified**.
 
-## 6. Repo layout (planned; update when it changes)
+## 6. Repo layout (from docs/architecture.md §8; update when it changes)
 
 ```
-CLAUDE.md            this file (single source of truth)
-AGENTS.md            pointer to CLAUDE.md
-docs/requirements.md requirement list with acceptance checks
-docs/architecture.md decisions (created in the design phase)
-docs/research/       public research notes (no local paths or ids)
-packages/            plugin source (layout decided in the design phase)
-research/            local only, git-ignored evaluation material
+CLAUDE.md                 this file (single source of truth)
+AGENTS.md                 pointer to CLAUDE.md
+docs/requirements.md      requirement list with acceptance checks and a status column
+docs/architecture.md      design decisions (D-numbers), event mapping, backend interface
+docs/research/            public research notes (no local paths or ids)
+packages/core/            backend interface, event union, shared pure logic
+packages/backend-claude/  the ONLY package that imports the Claude Agent SDK
+packages/dsh-host/        Host half: preset driver + guard, native event writer, children, jobs,
+                          interaction channel, routes, services. DSH touch points only in src/port/
+packages/dsh-client/      browser half (TSX). DSH touch points only in src/port/
+packages/views-claude/    Claude tool views
+packages/testkit/         stub backend, fake CLI, recorded fixtures, in-process DSH loop harness
+packages/plugin/          the one published bundle (dsh-raw-agent) and composition root
+examples/sample-restyle/  sample plugin that restyles our UI through our services
+scripts/                  check-imports.mjs, bundle.mjs, live/ (isolated DSH setup, Playwright)
+research/                 local only, git-ignored evaluation material
 ```
+
+Import rule: `dsh-host` and `dsh-client` import only `core`. Only `backend-claude` imports the SDK. Only `plugin/` imports `backend-claude`. No runtime import of `@deepseek-ai/*` (types only). `scripts/check-imports.mjs` enforces it.
 
 ## 7. Commands
 
-To be filled in when the toolchain is chosen (build, test, lint, live test).
+Toolchain: TypeScript 5 (strict, ESM), pnpm 11 workspace, `tsc -b` + esbuild, Vitest, Playwright (`playwright-core` + Chromium), ESLint + Prettier. Full list: docs/architecture.md §9.
+
+```sh
+corepack enable && pnpm install --frozen-lockfile
+pnpm build          # types + bundles into packages/plugin/lib
+pnpm test           # unit + fake-CLI contract + DSH round-trip tests
+pnpm lint           # eslint, prettier --check, import check
+pnpm typecheck
+pnpm --filter dsh-raw-agent pack --pack-destination dist/
+pnpm live           # Playwright suites against the isolated DSH on port 8790 (see §5)
+```
+
+- **Push:** this machine's git has no credential helper. Push with
+  `git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`.
+- **Ignore rules** are anchored (`/research/`, `/.dsh-dev/`) so that `docs/research/` is tracked.
+- **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.
