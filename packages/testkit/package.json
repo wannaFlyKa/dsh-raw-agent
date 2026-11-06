@@ -1,0 +1,23 @@
+{
+  "name": "@dsh-raw-agent/testkit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Stub backend, fake CLI, recorded fixtures, in-process DSH loop harness.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@dsh-raw-agent/core": "workspace:*"
+  }
+}

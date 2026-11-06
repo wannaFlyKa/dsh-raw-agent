@@ -1,0 +1,23 @@
+{
+  "name": "@dsh-raw-agent/dsh-host",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Host half: preset driver + guard, native event writer, jobs, interaction channel, routes, services. DSH touch points only in src/port/.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@dsh-raw-agent/core": "workspace:*"
+  }
+}

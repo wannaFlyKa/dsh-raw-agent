@@ -1,0 +1,24 @@
+{
+  "name": "@dsh-raw-agent/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Backend interface, backend event union and shared pure logic. Imports nothing from DSH or any agent SDK.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./node": {
+      "types": "./lib/node.d.ts",
+      "default": "./lib/node.js"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  }
+}

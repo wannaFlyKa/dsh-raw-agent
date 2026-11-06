@@ -1,0 +1,371 @@
+// The native event writer (D17, D18, D20, D21, D74). The only code that appends transcript events.
+//
+// Each method asserts the v4 rule it could break *before* it appends, and refuses the append by
+// throwing WriterAssertError (DSH checks these rules only when a log is loaded, so a bad append is
+// silent until the session no longer opens: dsh-claude issue #57). The rules, from
+// `P/dsh-session-format-v3-to-v4/lib/index.js` (see docs/research/dsh-seams.md §2.2):
+//   (a) assistant/message and tool/call only inside an open step of the open turn;
+//   (b) a tool/call only for a tool-call block advertised in this step, same id, identical name
+//       and byte-identical arguments, once;
+//   (c) every advertised call has a tool/result before step/end;
+//   (d, f) every assistant/message has a stream that alone reproduces content, usage and
+//       replayState (the generation check, `P/dsh-session-persistence-jsonl/lib/index.js:1838`);
+//   (e) known event types only; never a `plugin:` type (D17 e).
+// Steps are numbered by the writer; the loop opened the turn and writes turn/end itself.
+
+import { randomUUID } from 'node:crypto';
+import { StreamRecorder, deepEqual, replayStream } from './stream.js';
+import type { DshBlock, DshChunk, DshSession, DshStreamRecord, DshUsage, DshUserMessage } from './types.js';
+
+export class WriterAssertError extends Error {
+  override readonly name = 'WriterAssertError';
+}
+
+/** Model-visible wording of DSH's own repair result for a started call (`P/dsh-session/lib/index.js:730-733`). */
+export const REPAIR_STARTED_TEXT =
+  'The tool call was interrupted after it was recorded, but no result was durably recorded. Its outcome is unknown. Decide whether to retry from the tool semantics: retry only if the operation is read-only or idempotent; if it may have side effects, first verify external state or ask the user. Do not retry blindly.';
+
+/** The event types this writer may append (rule e). */
+export const WRITER_EVENT_TYPES: readonly string[] = Object.freeze([
+  'user/message',
+  'step/start',
+  'assistant/message',
+  'assistant/attempt',
+  'tool/call',
+  'tool/result',
+  'step/end',
+]);
+
+export type LiveFrame =
+  | { type: 'start'; attemptId: string; revision: number; turn: number; step: number }
+  | { type: 'chunk'; attemptId: string; revision: number; index: number; time: number; chunk: DshChunk }
+  | {
+      type: 'end';
+      attemptId: string;
+      revision: number;
+      index: number;
+      outcome:
+        | { kind: 'committed'; eventType: 'assistant/message' | 'assistant/attempt'; seq: number }
+        | { kind: 'abandoned' };
+    };
+
+/** Per-agent live stream counters (D20: the driver owns attempt ids and revisions). */
+export interface LiveChannel {
+  emit(frame: LiveFrame): void;
+  nextRevision(): number;
+  nextAttemptId(): string;
+}
+
+export type ToolResultBlock = { type: 'text'; text: string };
+
+export interface CommitInput {
+  blocks: DshBlock[];
+  usage?: DshUsage;
+  model?: string;
+  interrupted?: boolean;
+  /** Native-field binding (D21); also the finish chunk's replayState. */
+  binding: Record<string, unknown>;
+}
+
+interface Call {
+  name: string;
+  arguments: string;
+  seq: number;
+  resolved: boolean;
+}
+
+export interface WriterOptions {
+  provider: string;
+  now?: () => number;
+  /** Test switch: skip the stream self-check, to prove the harness catches what it would refuse. */
+  skipStreamCheck?: boolean;
+  /** Where refusals and fallbacks are reported. */
+  warn?: (note: string, detail?: unknown) => void;
+}
+
+export class TurnLog {
+  readonly #session: DshSession;
+  readonly #live: LiveChannel;
+  readonly #turn: number;
+  readonly #opts: WriterOptions;
+  readonly #now: () => number;
+  #step = 0;
+  #stepOpen = false;
+  #closed = false;
+  #hasMessage = false;
+  #calls = new Map<string, Call>();
+  #recorder = new StreamRecorder();
+  #attemptId = '';
+  #frameIndex = 0;
+  /** Block indices that already have a block-start chunk in this attempt. */
+  #started = new Set<number>();
+
+  constructor(session: DshSession, live: LiveChannel, turn: number, opts: WriterOptions) {
+    this.#session = session;
+    this.#live = live;
+    this.#turn = turn;
+    this.#opts = opts;
+    this.#now = opts.now ?? Date.now;
+  }
+
+  get turn(): number {
+    return this.#turn;
+  }
+  get step(): number {
+    return this.#step;
+  }
+  get stepOpen(): boolean {
+    return this.#stepOpen;
+  }
+  get hasMessage(): boolean {
+    return this.#hasMessage;
+  }
+  /** Written calls without a result in the open step. */
+  get openCallIds(): string[] {
+    return [...this.#calls].filter(([, c]) => !c.resolved).map(([id]) => id);
+  }
+  hasCall(callId: string): boolean {
+    return this.#calls.has(callId);
+  }
+
+  #append(type: string, data: unknown, options?: { surfaceOp?: 'append'; sourceEventSeqs?: number[] }): number {
+    if (!WRITER_EVENT_TYPES.includes(type) || type.startsWith('plugin:'))
+      throw new WriterAssertError(`refused unknown event type ${type} (rule e)`);
+    if (this.#closed) throw new WriterAssertError(`refused ${type}: the turn is closed`);
+    return this.#session.append(type, data, options).seq;
+  }
+
+  /** The human message, unchanged (D22). Only between steps. */
+  writeUser(message: DshUserMessage): void {
+    if (this.#stepOpen) throw new WriterAssertError('refused user/message inside an open step');
+    if (message.source.kind !== 'user') throw new WriterAssertError('refused a non-human user/message');
+    this.#append('user/message', message, { surfaceOp: 'append' });
+  }
+
+  openStep(): void {
+    if (this.#stepOpen) throw new WriterAssertError('refused step/start: a step is already open');
+    this.#step += 1;
+    this.#append('step/start', { turn: this.#turn, step: this.#step });
+    this.#stepOpen = true;
+    this.#hasMessage = false;
+    this.#calls = new Map();
+    this.#beginAttempt();
+  }
+
+  #beginAttempt(): void {
+    this.#recorder = new StreamRecorder();
+    this.#started = new Set();
+    this.#frameIndex = 0;
+    this.#attemptId = this.#live.nextAttemptId();
+    // D20: `start` right after step/start, before any other append.
+    this.#live.emit({
+      type: 'start',
+      attemptId: this.#attemptId,
+      revision: this.#live.nextRevision(),
+      turn: this.#turn,
+      step: this.#step,
+    });
+  }
+
+  #push(chunk: DshChunk, time: number): void {
+    const c = this.#recorder.push(time, chunk);
+    this.#live.emit({
+      type: 'chunk',
+      attemptId: this.#attemptId,
+      revision: this.#live.nextRevision(),
+      index: this.#frameIndex++,
+      time,
+      chunk: c,
+    });
+  }
+
+  /** Start blocks up to `index` so DSH's assembler keeps block order (earlier, unseen ones as placeholders). */
+  #startUpTo(index: number, blockType: string, time: number): void {
+    for (let i = 0; i <= index; i++) {
+      if (this.#started.has(i)) continue;
+      this.#started.add(i);
+      this.#push({ type: 'block-start', index: i, blockType: i === index ? blockType : 'text' }, time);
+    }
+  }
+
+  /** A live delta (D20), stamped with its real arrival time. Tool-input text is not streamed (D21). */
+  delta(kind: 'text' | 'reasoning' | 'tool-input', blockIndex: number, text: string, at: number): void {
+    if (!this.#stepOpen || this.#hasMessage || kind === 'tool-input' || text === '') return;
+    const time = Math.max(Math.trunc(at), 0);
+    this.#startUpTo(blockIndex, kind, time);
+    this.#push({ type: kind === 'text' ? 'text-delta' : 'reasoning-delta', index: blockIndex, text }, time);
+  }
+
+  /**
+   * Write the step's assistant/message (with its embedded stream), then a tool/call per kept
+   * tool-call block (D18). An interrupted message keeps only its text prefix and no usage or
+   * finish; an empty interrupted prefix becomes an assistant/attempt.
+   */
+  commit(input: CommitInput): { calls: string[] } {
+    if (!this.#stepOpen) throw new WriterAssertError('refused assistant/message outside an open step (rule a)');
+    if (this.#hasMessage) throw new WriterAssertError('refused a second main-thread assistant/message in one step');
+    const interrupted = input.interrupted === true;
+    if (interrupted && input.blocks.some((b) => b.type === 'tool-call'))
+      throw new WriterAssertError('refused interrupted assistant/message that keeps a tool call (D17 f)');
+    const replayState = { response: input.binding };
+    const hasCall = input.blocks.some((b) => b.type === 'tool-call');
+
+    const encodeTail = (time: number) => {
+      input.blocks.forEach((block, i) => {
+        this.#startUpTo(i, block.type, time);
+        this.#push({ type: 'block-end', index: i, block: structuredClone(block) }, time);
+      });
+      if (!interrupted) {
+        if (input.usage !== undefined) this.#push({ type: 'usage', usage: input.usage }, time);
+        this.#push({ type: 'finish', reason: { kind: hasCall ? 'tool-calls' : 'stop' }, replayState }, time);
+      }
+    };
+    const expected = interrupted
+      ? input.blocks.filter((b) => (b.type === 'text' || b.type === 'reasoning') && b.text.trim() !== '')
+      : input.blocks;
+    const at = this.#now();
+    encodeTail(at);
+    let records = this.#recorder.snapshot();
+    if (!this.#opts.skipStreamCheck && !deepEqual(this.#content(records, interrupted), expected)) {
+      // The live deltas do not assemble to the final blocks (a dropped tail slot, for example).
+      // Fall back to a stream with no deltas: block-end per block. Timing is lost, the log stays valid.
+      this.#opts.warn?.('stream fallback: live deltas did not reproduce the final blocks', { step: this.#step });
+      this.#recorder = new StreamRecorder();
+      this.#started = new Set();
+      encodeTail(at);
+      records = this.#recorder.snapshot();
+    }
+    const content = this.#content(records, interrupted);
+
+    if (interrupted && content.length === 0) {
+      const seq = this.#append('assistant/attempt', { turn: this.#turn, step: this.#step, stream: records });
+      this.#endFrame({ kind: 'committed', eventType: 'assistant/attempt', seq });
+      this.#hasMessage = true;
+      return { calls: [] };
+    }
+
+    const source: Record<string, unknown> = {
+      kind: 'model',
+      provider: this.#opts.provider,
+      model: input.model ?? 'settings',
+      rawAgent: input.binding,
+    };
+    if (!interrupted) source.replayState = replayState;
+    const message = { id: randomUUID(), role: 'assistant', content, source };
+    const data: Record<string, unknown> = { turn: this.#turn, step: this.#step, message, stream: records };
+    if (!interrupted && input.usage !== undefined) data.usage = input.usage;
+    if (interrupted) data.interrupted = true;
+    if (!this.#opts.skipStreamCheck) this.#assertStream(data);
+
+    const seq = this.#append('assistant/message', data, { surfaceOp: 'append' });
+    this.#endFrame({ kind: 'committed', eventType: 'assistant/message', seq });
+    this.#hasMessage = true;
+
+    const calls: string[] = [];
+    for (const b of content) {
+      if (b.type !== 'tool-call') continue;
+      if (this.#calls.has(b.id)) throw new WriterAssertError(`refused duplicate tool call id ${b.id}`);
+      const callSeq = this.#append('tool/call', {
+        turn: this.#turn,
+        step: this.#step,
+        callId: b.id,
+        name: b.name,
+        arguments: b.arguments,
+      });
+      this.#calls.set(b.id, { name: b.name, arguments: b.arguments, seq: callSeq, resolved: false });
+      calls.push(b.id);
+    }
+    return { calls };
+  }
+
+  #content(records: DshStreamRecord[], interrupted: boolean): DshBlock[] {
+    const r = replayStream(records);
+    return interrupted ? r.interruptedBlocks : r.blocks;
+  }
+
+  /** D17 (f): the embedded stream alone must reproduce the event. */
+  #assertStream(data: Record<string, unknown>): void {
+    const r = replayStream(data.stream as DshStreamRecord[]);
+    if (r.chunkCount === 0) throw new WriterAssertError('refused assistant/message with an empty stream (rule d)');
+    const message = data.message as { content: unknown; source: { replayState?: unknown } };
+    const content = data.interrupted === true ? r.interruptedBlocks : r.blocks;
+    if (!deepEqual(message.content, content)) throw new WriterAssertError('refused: content disagrees with its stream');
+    if (!deepEqual(data.usage, r.usage)) throw new WriterAssertError('refused: usage disagrees with its stream');
+    if (!deepEqual(message.source.replayState, r.replayState))
+      throw new WriterAssertError('refused: replay state disagrees with its stream');
+  }
+
+  #endFrame(outcome: Extract<LiveFrame, { type: 'end' }>['outcome']): void {
+    this.#live.emit({
+      type: 'end',
+      attemptId: this.#attemptId,
+      revision: this.#live.nextRevision(),
+      index: this.#frameIndex,
+      outcome,
+    });
+  }
+
+  /** A tool/result for a call written in this step (rule b, D18 buffering happens in the mapper). */
+  result(callId: string, content: ToolResultBlock[], isError: boolean, meta?: Record<string, unknown>): void {
+    if (!this.#stepOpen) throw new WriterAssertError(`refused tool/result for ${callId} outside an open step`);
+    const call = this.#calls.get(callId);
+    if (call === undefined) throw new WriterAssertError(`refused tool/result for ${callId}: no tool/call in this step`);
+    if (call.resolved) throw new WriterAssertError(`refused a second tool/result for ${callId}`);
+    const message: Record<string, unknown> = {
+      id: randomUUID(),
+      role: 'tool',
+      toolCallId: callId,
+      source: { kind: 'tool', callId },
+      content: content.length > 0 ? content : [{ type: 'text', text: '' }],
+    };
+    if (isError) message.isError = true;
+    const data: Record<string, unknown> = { turn: this.#turn, step: this.#step, message };
+    if (meta !== undefined) data.meta = meta;
+    this.#append('tool/result', data, { surfaceOp: 'append', sourceEventSeqs: [call.seq] });
+    call.resolved = true;
+  }
+
+  /**
+   * Close the open step (D18, D74): an assistant/attempt when nothing was committed, DSH's exact
+   * repair result for every unresolved call (rule c), then step/end.
+   */
+  closeStep(): void {
+    if (!this.#stepOpen) return;
+    if (!this.#hasMessage) {
+      const stream = this.#recorder.snapshot();
+      this.#append('assistant/attempt', { turn: this.#turn, step: this.#step, stream });
+      this.#endFrame({ kind: 'abandoned' });
+      this.#hasMessage = true;
+    }
+    for (const [callId, call] of this.#calls) {
+      if (call.resolved) continue;
+      const message = {
+        id: `interrupted-tool-result-${callId}-${this.#session.seq + 1}`,
+        role: 'tool',
+        toolCallId: callId,
+        isError: true,
+        source: { kind: 'tool', callId },
+        content: [{ type: 'text', text: REPAIR_STARTED_TEXT }],
+      };
+      this.#append(
+        'tool/result',
+        {
+          turn: this.#turn,
+          step: this.#step,
+          message,
+          error: { name: 'ToolOutcomeUnknownError', code: 'TOOL_OUTCOME_UNKNOWN' },
+        },
+        { surfaceOp: 'append', sourceEventSeqs: [call.seq] },
+      );
+      call.resolved = true;
+    }
+    this.#append('step/end', { turn: this.#turn, step: this.#step });
+    this.#stepOpen = false;
+  }
+
+  /** Close everything this writer opened. Later appends are refused (the loop writes turn/end). */
+  close(): void {
+    this.closeStep();
+    this.#closed = true;
+  }
+}

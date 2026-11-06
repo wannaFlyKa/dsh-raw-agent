@@ -1,0 +1,23 @@
+{
+  "name": "@dsh-raw-agent/views-claude",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Claude tool views, keyed by wire tool name (D19). Imports only core.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@dsh-raw-agent/core": "workspace:*"
+  }
+}

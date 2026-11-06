@@ -1,0 +1,9 @@
+**/lib/
+**/dist/
+**/node_modules/
+/research/
+/.dsh-dev/
+coverage/
+pnpm-lock.yaml
+*.md
+**/test/fixtures/

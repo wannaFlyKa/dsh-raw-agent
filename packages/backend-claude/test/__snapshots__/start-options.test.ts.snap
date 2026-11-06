@@ -1,0 +1,107 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`raw start options (D12-D16) > new session snapshot 1`] = `
+{
+  "abortController": "[AbortController]",
+  "canUseTool": "[function]",
+  "cwd": "/work/repo",
+  "enableFileCheckpointing": true,
+  "env": {
+    "HOME": "/home/user",
+    "PATH": "/usr/bin",
+  },
+  "forwardSubagentText": true,
+  "includePartialMessages": true,
+  "onElicitation": "[function]",
+  "pathToClaudeCodeExecutable": "/home/user/.local/bin/claude",
+  "perTaskStopAffordance": true,
+  "sessionId": "00000000-0000-5000-8000-000000000001",
+  "settingSources": [
+    "user",
+    "project",
+    "local",
+  ],
+  "spawnClaudeCodeProcess": "[function]",
+  "systemPrompt": {
+    "preset": "claude_code",
+    "type": "preset",
+  },
+  "toolConfig": {
+    "askUserQuestion": {
+      "previewFormat": "markdown",
+    },
+  },
+}
+`;
+
+exports[`raw start options (D12-D16) > resume and fork snapshots 1`] = `
+{
+  "abortController": "[AbortController]",
+  "agent": "reviewer",
+  "canUseTool": "[function]",
+  "cwd": "/work/repo",
+  "enableFileCheckpointing": true,
+  "env": {
+    "HOME": "/home/user",
+    "PATH": "/usr/bin",
+  },
+  "forwardSubagentText": true,
+  "includePartialMessages": true,
+  "onElicitation": "[function]",
+  "pathToClaudeCodeExecutable": "/home/user/.local/bin/claude",
+  "perTaskStopAffordance": true,
+  "resume": "sid",
+  "settingSources": [
+    "user",
+    "project",
+    "local",
+  ],
+  "spawnClaudeCodeProcess": "[function]",
+  "systemPrompt": {
+    "preset": "claude_code",
+    "type": "preset",
+  },
+  "toolConfig": {
+    "askUserQuestion": {
+      "previewFormat": "markdown",
+    },
+  },
+}
+`;
+
+exports[`raw start options (D12-D16) > resume and fork snapshots 2`] = `
+{
+  "abortController": "[AbortController]",
+  "canUseTool": "[function]",
+  "cwd": "/work/repo",
+  "enableFileCheckpointing": true,
+  "env": {
+    "HOME": "/home/user",
+    "PATH": "/usr/bin",
+  },
+  "forkSession": true,
+  "forwardSubagentText": true,
+  "includePartialMessages": true,
+  "onElicitation": "[function]",
+  "pathToClaudeCodeExecutable": "/home/user/.local/bin/claude",
+  "perTaskStopAffordance": true,
+  "resume": "src",
+  "resumeSessionAt": "chain",
+  "sessionId": "dst",
+  "settingSources": [
+    "user",
+    "project",
+    "local",
+  ],
+  "spawnClaudeCodeProcess": "[function]",
+  "systemPrompt": {
+    "preset": "claude_code",
+    "type": "preset",
+  },
+  "toolConfig": {
+    "askUserQuestion": {
+      "previewFormat": "markdown",
+    },
+  },
+}
+`;

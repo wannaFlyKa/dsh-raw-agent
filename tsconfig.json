@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/core" },
+    { "path": "packages/backend-claude" },
+    { "path": "packages/dsh-host" },
+    { "path": "packages/dsh-client" },
+    { "path": "packages/views-claude" },
+    { "path": "packages/testkit" },
+    { "path": "packages/plugin" }
+  ]
+}
