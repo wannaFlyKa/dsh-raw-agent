@@ -4,7 +4,8 @@
 // Scope: the main thread (text, thinking, tool_use, tool_result, result, interrupt, synthetic
 // messages, whole responses without a stream), background tasks (task_* frames), and child
 // agents: subagents, nested subagents and teammates (`parent_tool_use_id` set; D45, D50, D68,
-// in `children.ts`). Workflow agents are not on the stream (D49).
+// in `children.ts`). Workflow agents are not on the stream: their runs, snapshots and live
+// transcript tails are in `workflows.ts` (D48, D49).
 //
 // Guarantees the DSH writer relies on (§7.2):
 // - every `step-message` follows its `step-start`;
@@ -39,6 +40,7 @@ import {
   type WireUser,
 } from './wire.js';
 import { ChildAgents } from './children.js';
+import { WorkflowRuns, taskUsageOf, type WorkflowRunsOptions } from './workflows.js';
 
 type ToolResultEvent = Extract<BackendEvent, { type: 'tool-result' }>;
 
@@ -89,6 +91,8 @@ export interface MapperOptions {
   now?: () => number;
   /** Called for frames the mapper drops on purpose, for debug logs. */
   debug?: (note: string, msg: unknown) => void;
+  /** Workflow runs: the live transcript poll's sink, folder guard and test seams (D49). */
+  workflows?: Omit<WorkflowRunsOptions, 'now' | 'debug'>;
 }
 
 /** Shorten provider-specific model ids for display (D61). The inference-profile form is **unverified**. */
@@ -192,12 +196,21 @@ export class ClaudeMessageMapper {
   #whole: { id: string; usageSent: boolean } | undefined;
   readonly #background = new Map<string, TaskKind>();
   readonly #children: ChildAgents;
+  readonly #workflows: WorkflowRuns;
+  /** Workflow launches whose call result is held (D18): emitted after that result. */
+  #pendingLaunches = new Map<string, Record<string, unknown>>();
 
   constructor(tracker: SentInputTracker, options: MapperOptions = {}) {
     this.#tracker = tracker;
     this.#now = options.now ?? Date.now;
     this.#debug = options.debug ?? (() => {});
     this.#children = new ChildAgents({ debug: this.#debug });
+    this.#workflows = new WorkflowRuns({ ...options.workflows, now: this.#now, debug: this.#debug });
+  }
+
+  /** Workflow runs seen on this stream (D48). */
+  get workflows(): WorkflowRuns {
+    return this.#workflows;
   }
 
   /** Child agents seen on this stream (labels for asks, D77). */
@@ -255,6 +268,8 @@ export class ClaudeMessageMapper {
     this.#buffered = [];
     this.#turnOpen = false;
     this.#children.exit(out, error ?? 'Claude Code ended');
+    this.#workflows.exit(out, error ?? 'Claude Code ended');
+    this.#pendingLaunches.clear();
     out.push(error === undefined ? { type: 'exit' } : { type: 'exit', error });
     return out;
   }
@@ -321,7 +336,11 @@ export class ClaudeMessageMapper {
         const kind = taskKind(str(msg.task_type));
         // D45: every child agent, foreground or background, gets a child session.
         const agent = kind === 'agent' ? this.#children.taskStarted(msg, at, out) : undefined;
-        if (msg.is_backgrounded !== true || this.#background.has(taskId)) break; // foreground tasks are not jobs (D47)
+        if (kind === 'workflow') this.#workflows.taskStarted(msg);
+        // Foreground tasks are not jobs (D47). A workflow always runs in the background; its
+        // `task_started` has no `is_backgrounded` field (live M4).
+        const background = msg.is_backgrounded === true || kind === 'workflow';
+        if (!background || this.#background.has(taskId)) break;
         this.#background.set(taskId, kind);
         const e: Extract<BackendEvent, { type: 'task-start' }> = {
           type: 'task-start',
@@ -338,11 +357,14 @@ export class ClaudeMessageMapper {
         // Background jobs, and child agents (their rows show tokens and tool uses, D46).
         if (taskId === undefined || (!this.#background.has(taskId) && !this.#children.isAgentTask(taskId))) break;
         const e: Extract<BackendEvent, { type: 'task-progress' }> = { type: 'task-progress', taskId };
-        const summary = str(msg.summary) ?? str(msg.description);
+        // A workflow's `description` is the current "<phase>: <agent>"; its `summary` the run label.
+        const isRun = this.#workflows.isRun(taskId);
+        const summary = isRun ? (str(msg.description) ?? str(msg.summary)) : (str(msg.summary) ?? str(msg.description));
         if (summary !== undefined) e.summary = summary;
         const usage = taskUsage(msg.usage);
         if (usage !== undefined) e.usage = usage;
         out.push(e);
+        if (isRun) this.#workflows.progress(msg, at, out); // D48 snapshot, workflow agents
         break;
       }
       case 'task_notification': {
@@ -356,6 +378,8 @@ export class ClaudeMessageMapper {
         // The child's own end first, then its job (D45, D47).
         if (this.#children.isAgentTask(taskId))
           this.#children.taskEnded(taskId, str(msg.status), str(msg.summary), out);
+        if (this.#workflows.isRun(taskId))
+          this.#workflows.ended(taskId, str(msg.status), str(msg.summary), taskUsageOf(msg.usage), out);
         if (!this.#background.has(taskId)) break;
         this.#background.delete(taskId);
         const s = str(msg.status);
@@ -653,8 +677,23 @@ export class ClaudeMessageMapper {
 
   #flushResults(out: BackendEvent[]): void {
     const keep: ToolResultEvent[] = [];
-    for (const r of this.#buffered) (this.#advertised.has(r.callId) ? out : keep).push(r);
+    for (const r of this.#buffered) {
+      if (!this.#advertised.has(r.callId)) {
+        keep.push(r);
+        continue;
+      }
+      out.push(r);
+      this.#launch(r.callId, out);
+    }
     this.#buffered = keep;
+  }
+
+  /** A held workflow launch whose call result was just written (D48: start after the result). */
+  #launch(callId: string, out: BackendEvent[]): void {
+    const info = this.#pendingLaunches.get(callId);
+    if (info === undefined) return;
+    this.#pendingLaunches.delete(callId);
+    this.#workflows.launched(info, callId, this.#now(), out);
   }
 
   #user(msg: WireUser, out: BackendEvent[]): void {
@@ -665,6 +704,8 @@ export class ClaudeMessageMapper {
     }
     const content = msg.message?.content;
     if (!Array.isArray(content)) return; // the CLI's own text (for example "[Request interrupted by user]") is never written (D22)
+    // `tool_use_result` belongs to the frame's one tool result (the CLI sends one per frame).
+    const single = content.filter((b) => b.type === 'tool_result').length === 1;
     for (const b of content) {
       if (b.type !== 'tool_result') continue;
       const callId = str((b as { tool_use_id?: unknown }).tool_use_id);
@@ -677,8 +718,12 @@ export class ClaudeMessageMapper {
         content: convertToolResultContent((b as { content?: unknown }).content),
       };
       if (uuid !== undefined) e.chainId = uuid;
-      if (this.#advertised.has(callId)) out.push(e);
-      else this.#buffered.push(e); // D18: results before message_stop are buffered
+      const launch = single ? WorkflowRuns.launchInfo(msg) : undefined;
+      if (launch !== undefined) this.#pendingLaunches.set(callId, launch);
+      if (this.#advertised.has(callId)) {
+        out.push(e);
+        this.#launch(callId, out);
+      } else this.#buffered.push(e); // D18: results before message_stop are buffered
     }
   }
 
@@ -702,6 +747,8 @@ export class ClaudeMessageMapper {
       this.#debug('dropping tool results with no advertised call', this.#buffered);
       this.#buffered = [];
     }
+    // A launch whose result was never written still starts its run (no tool-result to follow).
+    for (const callId of [...this.#pendingLaunches.keys()]) this.#launch(callId, out);
 
     const reason = str(msg.terminal_reason ?? undefined);
     const subtype = str(msg.subtype);

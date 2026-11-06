@@ -74,6 +74,11 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **SIGKILL of DSH leaves the CLI running** while a background task runs (it re-parents to pid 1 and may run one wake turn by itself). A normal stop or restart is clean. Open: D75 pid check.
 - **DSH's job-list Stop needs two presses** (arm, then confirm). A live driver that presses once only arms it.
 - **Track an input only after its SDK message is built.** A send that throws after `tracker.sent()` leaves a pending id, and every later turn end then waits for it forever.
+- **Workflow transcripts:** the Workflow launch result names `<session>/subagents/workflows/wf_…` before the CLI creates that folder. Keep the folder pending and check it again at each read; never give up after one failed check.
+- **Workflow agent end:** the CLI marks an agent done about 60 ms before it writes the agent's last transcript line. Keep reading a settled agent for a short grace period, or text-only agents end empty.
+- **Stopped workflow agents** come as `error` with the CLI's text "Stopped because the workflow was stopped". Show them as stopped, not failed. On a crash (run stop reason `error`), running agents settle as `error`.
+- **Workflow controls:** the SDK can stop only the whole run (`stopTask(runTaskId)`). `stopTask(agentId)` is a silent no-op, and pause, skip and retry are TUI-only. Do not offer them (D48).
+- **Ultracode** is a session toggle, not an effort level: the TUI and our picker send `apply_flag_settings {ultracode: true}` only. A later effort pick (`{effortLevel}`) turns it off. The typed keyword works only on user frames with `origin: {kind: 'human'}`.
 
 ## 5. Development workflow
 
@@ -128,4 +133,6 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live MCP elicitation tests:** a scratch stdio MCP server times out its request after 60 s, so drive the card quickly.
 - **Live job tests:** set `DSH_RAW_AGENT_TEST_JOB_WAIT_MS=20000` on the test DSH process to shorten job waits (default 1 h), so a task can outlive a wait. Test only; never set it for users.
 - **Live team tests:** set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` on the test DSH process only (the plugin never sets it).
+- **Live ultracode frame checks:** point the dev profile's `raw-agent.config.executablePath` at a small wrapper that `tee`s stdin to a file and `exec`s the real `claude`. Restore `cordis.patch.yml` afterwards.
+- **Live workflow approval:** a Workflow launch asks permission only outside `auto`/bypass modes. Test it in `default` mode.
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

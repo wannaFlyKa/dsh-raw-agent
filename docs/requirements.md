@@ -62,7 +62,7 @@ Definitions:
 | R6.2 | Background agents and shells appear in DSH's job list with live status. | Job rows appear and settle with the right status. | done |
 | R6.3 | Agent teams: roster, messages between teammates, teammate transcripts. Messaging a teammate if the CLI supports it. | Two named agents exchange `SendMessage`, and the UI shows it. | partial: no messaging a teammate from the UI; the CLI has no control for it (D50) |
 | R6.4 | Custom agents (user, project, plugin) are listed, and can be picked for the main thread if the CLI allows it. | The list matches `supportedAgents()`. | done |
-| R6.5 | Dynamic workflows: run row, phases, agents with status and tokens, live agent output, stop whole run, final report. Ultracode effort and keyword work. | A 2-phase workflow shows its phases and agents live. Stop ends it cleanly. | open |
+| R6.5 | Dynamic workflows: run row, phases, agents with status and tokens, live agent output, stop whole run, final report. Ultracode effort and keyword work. | A 2-phase workflow shows its phases and agents live. Stop ends it cleanly. | done (per-agent stop, restart and pause: not offered, the CLI has no control for them, D48; the typed ultracode keyword is checked only through an SDK probe, not typed in DSH) |
 
 ## R7. Commands, skills, MCP
 

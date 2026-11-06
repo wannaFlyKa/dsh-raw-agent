@@ -13,6 +13,7 @@ import {
   statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
+import * as path from 'node:path';
 import type {
   AgentBackendFactory,
   AgentRef,
@@ -27,7 +28,7 @@ import type {
 } from '@dsh-raw-agent/core';
 import { uuidv5 } from '@dsh-raw-agent/core/node';
 import { resolveClaudeBinary, type BinaryResolveDeps } from './binary.js';
-import { decideFileCheckpointing } from './checkpoint.js';
+import { claudeConfigDir, decideFileCheckpointing } from './checkpoint.js';
 import { claudeConfigFiles, maskClaudeSettings } from './config-files.js';
 import { buildClaudeEnv } from './env.js';
 import {
@@ -89,7 +90,15 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
     { id: 'high', label: 'High' },
     { id: 'xhigh', label: 'Extra high' },
     { id: 'max', label: 'Max' },
-    { id: 'ultracode', label: 'Ultracode' },
+    // D37: the TUI's `/effort ultracode`: a session mode at any effort level (CLI 2.1.318 binary:
+    // "Ultracode (any effort level, this session only)", "Enable ultracode for the session:
+    // standing dynamic-workflow orchestration at any effort level").
+    {
+      id: 'ultracode',
+      label: 'Ultracode',
+      kind: 'mode',
+      description: 'Standing dynamic-workflow orchestration, at any effort level. This session only.',
+    },
   ],
   steer: 'native',
 }) as FactoryCapabilities;
@@ -323,6 +332,8 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         killGroup: () => spawner.killGroup('SIGKILL'),
       };
       if (factoryOptions.debug) init.debug = factoryOptions.debug;
+      // D49: workflow transcript folders are read only under the CLI's own projects folder.
+      init.projectsDir = path.join(claudeConfigDir(env, deps.homedir, process.platform), 'projects');
       ref.session = new ClaudeBackendSession(init);
       return ref.session;
     },

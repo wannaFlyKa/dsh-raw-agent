@@ -7,10 +7,15 @@ export * from './api.js';
 export * from './view-model.js';
 export * from './asks-model.js';
 export * from './agents-model.js';
+export * from './workflow-model.js';
+export { TaskOutputReader, type TaskOutputSnapshot } from './task-output.js';
 export { ChildLinks, ChildLinkStore, CHILD_LINK_RETRY_MS, type ChildLinkSnapshot } from './child-links.js';
 export {
   AgentsPanel,
   AgentsButton,
+  TaskOutputView,
+  TaskOutputBody,
+  canStopChild,
   AgentsHeader,
   ChildRow,
   ChildStrip,
@@ -19,6 +24,15 @@ export {
   type ChildRowProps,
 } from './ui/agents-panel.js';
 export { WakeTriggerCard } from './ui/wake-card.js';
+export {
+  WorkflowAgentRow,
+  WorkflowNodeView,
+  WorkflowRunCard,
+  WorkflowRuns,
+  type WorkflowAgentRowProps,
+  type WorkflowNodeViewProps,
+  type WorkflowRunCardProps,
+} from './ui/workflow-panel.js';
 export { restoreReturnedDrafts, type DraftTarget, type RestoreResult } from './drafts.js';
 export {
   SessionControlStore,
@@ -67,6 +81,13 @@ export {
   WAKE_DEFINITION_KIND,
   wakeDefinition,
   WakeNode,
+  WORKFLOW_NODE_KIND,
+  WORKFLOW_DEFINITION_KIND,
+  WORKFLOW_RUN_START_EVENT,
+  WORKFLOW_RUN_END_EVENT,
+  workflowDefinition,
+  WorkflowNode,
+  type WorkflowNodeData,
   type AskInteraction,
   type ComposerOwner,
   type FixedInput,

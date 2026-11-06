@@ -443,6 +443,22 @@ export class ChildHub {
     return { ok: true, status: entry.live ? 'stopping' : entry.view.status };
   }
 
+  /**
+   * The host child session of one child, once it is made (D48: a workflow member record names
+   * it). Undefined when the child is unknown or has no host session.
+   */
+  async session(id: string): Promise<string | undefined> {
+    const entry = this.#entries.get(id);
+    if (!entry) return undefined;
+    const handle = await entry.ready;
+    return handle?.hostSessionId;
+  }
+
+  /** The role of one child, if it is known. */
+  role(id: string): AgentRole | undefined {
+    return this.#entries.get(id)?.spec.role;
+  }
+
   /** The open turn's writer of one child, for its D44 audit pair. */
   openSink(id: string): TurnSink | undefined {
     const entry = this.#entries.get(id);

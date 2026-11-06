@@ -29,6 +29,7 @@ import { modeCommandDescription, runModeCommand } from '../mode-command.js';
 import { SETTINGS_MODEL } from './catalog.js';
 import { startJob } from './jobs.js';
 import { childPreStep, createChildSession } from './children.js';
+import { appendWorkflowRecord, openWorkflowRuns } from './workflows.js';
 import {
   DSH_IMAGE_MEDIA_TYPES,
   type CordisContext,
@@ -392,6 +393,9 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
         spec,
         runner,
       ),
+    // D48: native workflow records in this (the parent) session; no DSH workflow call (R2.4).
+    recordWorkflow: (record) => appendWorkflowRecord(agent.session, record),
+    openWorkflowRuns: () => openWorkflowRuns(agent.session),
     warn,
     returnDraft(messageId) {
       // D25: the steer goes back to the composer; the recorded `outcome: 'canceled'` is the truth.

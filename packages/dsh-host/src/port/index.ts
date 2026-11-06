@@ -44,6 +44,9 @@ export {
   CHILD_STOP_ROUTE,
   TASK_STOP_ROUTE,
   CHILD_OF_ROUTE,
+  WORKFLOW_STOP_ROUTE,
+  WORKFLOW_AGENT_STOP_ROUTE,
+  TASK_OUTPUT_ROUTE,
   SESSION_ROUTE,
   CHOICE_ROUTE,
   ANSWER_ROUTE,
@@ -66,6 +69,7 @@ export {
   TEARDOWN_REASONS,
 } from './jobs.js';
 export { createChildSession, childPreStep, liveChildCount, type ChildPortOptions } from './children.js';
+export { WORKFLOW_EVENT_TYPES, workflowEventData, appendWorkflowRecord, openWorkflowRuns } from './workflows.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);

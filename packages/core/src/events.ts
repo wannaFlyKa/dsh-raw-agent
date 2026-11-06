@@ -29,6 +29,57 @@ export type TaskStatus = 'completed' | 'failed' | 'stopped';
 /** What kind of child agent a child session holds (D45, D50). */
 export type AgentRole = 'subagent' | 'teammate' | 'workflow-agent';
 
+/** A workflow phase (D48). `index` is the agent's own 1-based phase number. */
+export interface WorkflowPhase {
+  index: number;
+  title: string;
+}
+
+/**
+ * A workflow agent's state (D48). 'queued': declared, not started; 'running'; 'done'; 'error'
+ * (failed, or ended because the run was stopped); 'stopped': still open when the run ended.
+ */
+export type WorkflowAgentState = 'queued' | 'running' | 'done' | 'error' | 'stopped';
+
+/** One agent row of a workflow snapshot (D48). Every field but `index`, `label`, `state` is optional. */
+export interface WorkflowAgent {
+  /** The agent's own stable number in the run (one per agent call). The merge key. */
+  index: number;
+  label: string;
+  state: WorkflowAgentState;
+  /** The agent's own state word, when it differs from `state` or is unknown. */
+  rawState?: string;
+  phaseIndex?: number;
+  phaseTitle?: string;
+  /** The child agent id (the child session's ref id), once the agent started. */
+  agentId?: string;
+  /** Retry number; a higher attempt replaces a settled row (D48). */
+  attempt?: number;
+  model?: string;
+  agentType?: string;
+  tokens?: number;
+  toolCalls?: number;
+  lastToolName?: string;
+  lastToolSummary?: string;
+  queuedAt?: number;
+  startedAt?: number;
+  lastProgressAt?: number;
+  durationMs?: number;
+  promptPreview?: string;
+  resultPreview?: string;
+  error?: string;
+  /** The agent's result came from a cache of an earlier run. */
+  cached?: boolean;
+  /** The agent was refused before it started. */
+  blocked?: boolean;
+}
+
+export interface TaskUsage {
+  tokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+}
+
 export type BackendEvent =
   | { type: 'session-info'; model?: string; mode?: string; version?: string }
   | { type: 'turn-start'; origin: 'user' | 'self' }
@@ -141,6 +192,44 @@ export type BackendEvent =
     }
   | { type: 'task-end'; taskId: string; status: TaskStatus; summary?: string }
   | { type: 'tasks-snapshot'; taskIds: string[] }
+  /**
+   * A dynamic workflow run started (D48). Comes after the run's `task-start` and after the
+   * `tool-result` of the call that launched it. `taskId` is the run's task (stop it with
+   * `stopTask(taskId)`); `runId` is the agent's own run id. Paths are the agent's own files.
+   */
+  | {
+      type: 'workflow-start';
+      taskId: string;
+      name: string;
+      label?: string;
+      runId?: string;
+      /** The main-thread tool call that launched the run. */
+      callId?: string;
+      transcriptDir?: string;
+      scriptPath?: string;
+      at: number;
+    }
+  /**
+   * The run's full state (D48): the merged snapshot (replace the previous one). Only sent when
+   * something changed. Agent rows link to child agents by `agentId` (their `agent-start` comes
+   * right after the first snapshot that names them).
+   */
+  | {
+      type: 'workflow-snapshot';
+      taskId: string;
+      phases: WorkflowPhase[];
+      agents: WorkflowAgent[];
+      usage?: TaskUsage;
+      at: number;
+    }
+  /** The run ended (D48). Its agents' `agent-end` and a final snapshot come first; its `task-end` follows. */
+  | {
+      type: 'workflow-end';
+      taskId: string;
+      stopReason: 'completed' | 'cancelled' | 'error';
+      summary?: string;
+      usage?: TaskUsage;
+    }
   | { type: 'mode'; mode: string }
   /** An interaction finished on the agent's side (D43: a URL elicitation completed). */
   | { type: 'interaction-done'; id: string }
@@ -148,8 +237,7 @@ export type BackendEvent =
   | { type: 'interaction-cancel'; id: string }
   | { type: 'exit'; error?: string };
 
-// Not in the spike yet (added in place later, §7.2): workflow-start,
-// workflow-snapshot, workflow-end, title,
+// Not in the spike yet (added in place later, §7.2): title,
 // usage, context, compaction, limits, retry, commands.
 
 export type BackendEventType = BackendEvent['type'];

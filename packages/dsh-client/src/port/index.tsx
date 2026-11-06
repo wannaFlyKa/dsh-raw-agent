@@ -13,6 +13,7 @@ import { AgentsHeader } from '../ui/agents-panel.js';
 import { AskPanel } from '../ui/ask-cards.js';
 import { SessionControls } from '../ui/controls.js';
 import { WakeTriggerCard } from '../ui/wake-card.js';
+import { WorkflowNodeView } from '../ui/workflow-panel.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);
@@ -510,6 +511,94 @@ export function WakeNode(props: { node?: { data?: WakeTrigger } }): React.ReactE
   return <WakeTriggerCard trigger={data} />;
 }
 
+// --- D48: our workflow card beside DSH's own workflow-run node ------------------------------------
+
+/**
+ * DSH's native workflow records (`P/dsh-tool-workflow/lib/types/types.d.ts:10-32`). DSH's own
+ * `ui-workflow-run` Definition (`P/dsh-client-ui-workflow-run/lib/client.js:717-760`) folds them
+ * into its `workflow-run` node: run, phases, members, status, open a running member. We never
+ * claim them (`exclusive` stays unset), so that node is drawn as before.
+ */
+export const WORKFLOW_RUN_START_EVENT = 'tool-workflow/run-start';
+export const WORKFLOW_RUN_END_EVENT = 'tool-workflow/run-end';
+/** Our chat node kind (no DSH package uses this key). */
+export const WORKFLOW_NODE_KIND = 'raw-agent-workflow';
+export const WORKFLOW_DEFINITION_KIND = 'raw-agent-workflow-run';
+
+/** What our node carries: the run's identity; the live numbers come from the session store. */
+export interface WorkflowNodeData {
+  runId: string;
+  name: string;
+  /** The run's native end, once the log has it (a run of an earlier process). */
+  stopReason?: string;
+}
+
+interface WorkflowContext {
+  key: string;
+  id: string;
+  state?: WorkflowNodeData;
+  start?: { location?: unknown; event?: { seq: number } };
+  matches: Array<{ location?: unknown }>;
+}
+
+/**
+ * A Chat-target Definition that reads the same `run-start` and `run-end` records as DSH's node
+ * (Definitions may share a Match, `P/dsh-client-ui-conversation/README.md` "Conversation
+ * assembly") and builds one node of our kind, anchored at the run-start record, so our card sits
+ * with DSH's run node. Our renderer draws only runs the session's live process knows.
+ */
+export function workflowDefinition(): Record<string, unknown> {
+  const runIdOf = (data: unknown): string | undefined => {
+    const id = (data as { runId?: unknown } | undefined)?.runId;
+    return typeof id === 'string' && id !== '' ? id : typeof id === 'number' ? String(id) : undefined;
+  };
+  return {
+    kind: WORKFLOW_DEFINITION_KIND,
+    target: 'chat',
+    match: (event: { type: string; data: unknown }) => {
+      if (event.type !== WORKFLOW_RUN_START_EVENT && event.type !== WORKFLOW_RUN_END_EVENT) return null;
+      const id = runIdOf(event.data);
+      if (id === undefined) return null;
+      return { id, role: event.type === WORKFLOW_RUN_START_EVENT ? 'start' : 'update' };
+    },
+    start: (_context: unknown, match: { event: { data: unknown } }): WorkflowNodeData => {
+      const data = match.event.data as { name?: unknown };
+      return { runId: runIdOf(match.event.data) ?? '', name: typeof data?.name === 'string' ? data.name : '' };
+    },
+    update: (context: WorkflowContext, match: { event: { type: string; data: unknown } }) => {
+      if (!context.state) return context.state;
+      if (match.event.type !== WORKFLOW_RUN_END_EVENT) return context.state;
+      const reason = (match.event.data as { stopReason?: unknown } | undefined)?.stopReason;
+      return typeof reason === 'string' ? { ...context.state, stopReason: reason } : context.state;
+    },
+    buildViewNode: (context: WorkflowContext) => {
+      if (context.state === undefined || context.start === undefined) return null;
+      return {
+        key: context.key,
+        kind: WORKFLOW_NODE_KIND,
+        id: context.id,
+        target: 'chat',
+        anchorSeq: context.start.event?.seq ?? 0,
+        location: context.start.location ?? context.matches[0]?.location ?? { kind: 'unresolved' },
+        visibility: 'visible',
+        data: context.state,
+      };
+    },
+  };
+}
+
+/** The keyed chat renderer of our workflow node (DSH passes the node and the session id). */
+export function WorkflowNode(props: {
+  node?: { data?: WorkflowNodeData };
+  sessionId?: string;
+  stores?: SessionStores;
+  actions?: HostActions;
+}): React.ReactElement | null {
+  const runId = props.node?.data?.runId;
+  if (!runId || !props.sessionId || !props.stores || !props.actions) return null;
+  return <WorkflowNodeView sessionId={props.sessionId} runId={runId} stores={props.stores} actions={props.actions} />;
+}
+
 interface UiConversationService {
   events?: { register(definition: Record<string, unknown>): () => void };
 }
@@ -712,6 +801,14 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       scope.slots.register(
         { name: 'conversation.chat.node', key: WAKE_NODE_KIND },
         WakeNode as React.ComponentType<never>,
+      ),
+    );
+    // D48: the workflow card (numbers, output, Stop entire workflow) beside DSH's run node.
+    scope.effect?.(() => events.register(workflowDefinition()), 'raw-agent: workflow card');
+    scope.slots.inject('conversation.chat.node', () =>
+      scope.slots.register(
+        { name: 'conversation.chat.node', key: WORKFLOW_NODE_KIND, inject: () => ({ stores, actions }) },
+        WorkflowNode as React.ComponentType<never>,
       ),
     );
   });

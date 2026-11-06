@@ -1,0 +1,7 @@
+{"type":"launched"}
+{"type":"started","key":"v2:5c9e18c230bcf6f1647e64b964f43a5745176d7790540c706d9f3714677c6cdb","agentId":"a0000000000000001","label":"a1","phase":"One"}
+{"type":"result","key":"v2:5c9e18c230bcf6f1647e64b964f43a5745176d7790540c706d9f3714677c6cdb","agentId":"a0000000000000001","result":"one","remoteControlDeviceReport":false,"toolsUsed":["Bash"]}
+{"type":"started","key":"v2:6cfb8e29dee08de13dee6b99d7982e8411a05af54d143b496f826d99e7d4f068","agentId":"a0000000000000002","label":"b1","phase":"Two"}
+{"type":"started","key":"v2:fcf2dd988530baed767dba36ec4039ce2f58d0924b3a34e47c1f8bc1b5b1e315","agentId":"a0000000000000003","label":"b2","phase":"Two"}
+{"type":"result","key":"v2:6cfb8e29dee08de13dee6b99d7982e8411a05af54d143b496f826d99e7d4f068","agentId":"a0000000000000002","result":"beta","remoteControlDeviceReport":false}
+{"type":"result","key":"v2:fcf2dd988530baed767dba36ec4039ce2f58d0924b3a34e47c1f8bc1b5b1e315","agentId":"a0000000000000003","result":"slow","remoteControlDeviceReport":false,"toolsUsed":["Bash"]}

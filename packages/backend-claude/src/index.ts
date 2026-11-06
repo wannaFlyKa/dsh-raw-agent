@@ -72,3 +72,24 @@ export { readTrustState, repositoryRoot, TRUST_QUESTION, UNTRUSTED_EFFECT, type 
 export { loadSdk, resetSdkForTests, type SdkModule } from './sdk.js';
 export { REJECT_CONSTANTS as REJECT_CONSTANTS_BY_VERSION } from './interactions.js';
 export { readSettingsDefaults, parseSettingsText, settingsKeySources } from './settings-defaults.js';
+export {
+  WorkflowRuns,
+  parseWorkflowProgress,
+  workflowAgentState,
+  workflowStopReason,
+  WORKFLOW_POLL_MS,
+  ANNOUNCE_AFTER_MS,
+  FRAME_USER_REQUEST,
+  FRAME_COMPUTED_TASK,
+  type WorkflowRunsOptions,
+  type WorkflowTimers,
+} from './workflows.js';
+export {
+  TranscriptTail,
+  insideFolder,
+  nodeTailFs,
+  MAX_READ_BYTES,
+  MAX_LINE_BYTES,
+  type TailFs,
+} from './workflow-tail.js';
+export { effortFlags } from './session.js';

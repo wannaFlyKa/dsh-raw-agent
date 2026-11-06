@@ -39,6 +39,8 @@ export interface SessionViewWire {
     notice?: { level: string; text: string; at: number };
     /** D15: the main-thread agent the process runs with. */
     agent?: string;
+    /** D37: the agent's own ultracode state, once the live process reported it. */
+    ultracode?: { on: boolean; requested?: boolean; available?: boolean };
   };
   choice: {
     model?: string;
@@ -64,6 +66,66 @@ export interface SessionViewWire {
   tasks?: TaskWire[];
   /** D51: the agents the live process lists. */
   agents?: AgentInfo[];
+  /** D48: dynamic workflow runs of this process (phases, agents, tokens, status). */
+  workflows?: WorkflowWire[];
+  /** D48: the agent can stop one workflow agent on its own (else only the whole run). */
+  workflowAgentStop?: boolean;
+}
+
+/** One workflow agent row (mirrors core `WorkflowAgent` plus the host's child session). */
+export interface WorkflowAgentWire {
+  index: number;
+  label: string;
+  state: 'queued' | 'running' | 'done' | 'error' | 'stopped';
+  rawState?: string;
+  phaseIndex?: number;
+  phaseTitle?: string;
+  /** The agent's child id (same as its child row's id), once it started. */
+  agentId?: string;
+  attempt?: number;
+  model?: string;
+  agentType?: string;
+  tokens?: number;
+  toolCalls?: number;
+  lastToolName?: string;
+  lastToolSummary?: string;
+  queuedAt?: number;
+  startedAt?: number;
+  lastProgressAt?: number;
+  durationMs?: number;
+  promptPreview?: string;
+  resultPreview?: string;
+  error?: string;
+  cached?: boolean;
+  blocked?: boolean;
+  /** The agent's host child session, once its member record is written. */
+  childSessionId?: string;
+}
+
+/** One workflow run (mirrors dsh-host `WorkflowView`). */
+export interface WorkflowWire {
+  /** The run's task id: "Stop entire workflow" names it. */
+  taskId: string;
+  /** The id of the native `tool-workflow/*` records (the chat node matches it). */
+  runId: string;
+  name: string;
+  label?: string;
+  status: 'starting' | 'running' | 'completed' | 'cancelled' | 'error';
+  stopping?: boolean;
+  phases: Array<{ index: number; title: string }>;
+  agents: WorkflowAgentWire[];
+  usage?: { tokens?: number; toolUses?: number; durationMs?: number };
+  callId?: string;
+  startedAt: number;
+  endedAt?: number;
+  summary?: string;
+}
+
+/** `GET api/raw-agent/task-output`: the end of one background shell's or monitor's output. */
+export interface TaskOutputWire {
+  output: string;
+  totalBytes: number;
+  truncated: boolean;
 }
 
 export type ChildStatusWire = 'starting' | 'running' | 'completed' | 'failed' | 'stopped';
@@ -241,6 +303,8 @@ export type ChannelLine =
       live?: SessionViewWire['live'];
       /** Present when the Host sends the agent rows on the channel (R6.1-R6.3). */
       agents?: { children: ChildWire[]; team?: TeamWire; tasks: TaskWire[] };
+      /** Present when the Host sends the workflow runs on the channel (D48). */
+      workflows?: WorkflowWire[];
     }
   | { type: 'ping' };
 
@@ -346,6 +410,16 @@ export interface RawAgentApi {
   stopChild(sessionId: string, childId: string): Promise<{ ok: boolean; status?: string; error?: string }>;
   /** D47: stop one background task. */
   stopTask(sessionId: string, taskId: string): Promise<{ ok: boolean; error?: string }>;
+  /** D48: "Stop entire workflow" (the run's task id). */
+  stopWorkflow(sessionId: string, taskId: string): Promise<{ ok: boolean; status?: string; error?: string }>;
+  /** D48: stop one workflow agent; `unsupported` when the agent cannot do that. */
+  stopWorkflowAgent(
+    sessionId: string,
+    taskId: string,
+    agentId: string,
+  ): Promise<{ ok: boolean; status?: string; error?: string; unsupported?: boolean }>;
+  /** R6.2: the output of one background shell or monitor of this session (running or ended). */
+  taskOutput(sessionId: string, taskId: string): Promise<TaskOutputWire>;
   /** D45: which of our sessions holds this host child session; undefined when none does. */
   childOf(childSessionId: string): Promise<ChildLinkWire | undefined>;
   configFiles(sessionId: string): Promise<{ backend: string; files: ConfigFileItem[] }>;
@@ -434,6 +508,41 @@ export function createApi(fetchFn: FetchFn): RawAgentApi {
       if (r.ok) return { ok: body?.ok !== false };
       return { ok: false, error: body?.error ?? `request failed (${r.status})` };
     },
+    async stopWorkflow(id, task) {
+      const r = await fetchFn(`${BASE}/workflow-stop?${q(id)}&task=${encodeURIComponent(task)}`, post());
+      const body = (await r.json().catch(() => undefined)) as
+        { ok?: boolean; status?: string; error?: string } | undefined;
+      const status = typeof body?.status === 'string' ? { status: body.status } : {};
+      if (r.ok) return { ok: body?.ok !== false, ...status };
+      return { ok: false, error: body?.error ?? `request failed (${r.status})`, ...status };
+    },
+    async stopWorkflowAgent(id, task, agent) {
+      const r = await fetchFn(
+        `${BASE}/workflow-agent-stop?${q(id)}&task=${encodeURIComponent(task)}&agent=${encodeURIComponent(agent)}`,
+        post(),
+      );
+      const body = (await r.json().catch(() => undefined)) as
+        { ok?: boolean; status?: string; error?: string; unsupported?: boolean } | undefined;
+      const status = typeof body?.status === 'string' ? { status: body.status } : {};
+      if (r.ok) return { ok: body?.ok !== false, ...status };
+      return {
+        ok: false,
+        error: body?.error ?? `request failed (${r.status})`,
+        ...status,
+        ...(body?.unsupported === true ? { unsupported: true } : {}),
+      };
+    },
+    async taskOutput(id, task) {
+      const body = await read<Partial<TaskOutputWire>>(
+        fetchFn,
+        `${BASE}/task-output?${q(id)}&task=${encodeURIComponent(task)}`,
+      );
+      return {
+        output: typeof body?.output === 'string' ? body.output : '',
+        totalBytes: typeof body?.totalBytes === 'number' ? body.totalBytes : 0,
+        truncated: body?.truncated === true,
+      };
+    },
     async childOf(id) {
       const r = await fetchFn(`${BASE}/child-of?${q(id)}`);
       if (r.status === 404) return undefined;
@@ -496,6 +605,18 @@ export function parseChannelLine(text: string): ChannelLine | undefined {
         : undefined;
     line.agents = { children, tasks, ...(team ? { team } : {}) };
   }
+  // The workflow runs (D48): an older Host line without them keeps the polled runs.
+  const runs = (v as { workflows?: unknown }).workflows;
+  if (Array.isArray(runs))
+    line.workflows = runs.filter(
+      (w): w is WorkflowWire =>
+        typeof w === 'object' &&
+        w !== null &&
+        typeof (w as WorkflowWire).taskId === 'string' &&
+        typeof (w as WorkflowWire).runId === 'string' &&
+        Array.isArray((w as WorkflowWire).agents) &&
+        Array.isArray((w as WorkflowWire).phases),
+    );
   return line;
 }
 

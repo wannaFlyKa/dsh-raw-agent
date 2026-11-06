@@ -54,24 +54,58 @@ export function modelSelect(info: SessionInfo): SelectModel {
   return { value: chosen ?? SETTINGS, options, title };
 }
 
-/** The effort picker (D35, D37). Ids come from the backend; "Your settings" clears the choice. */
+/**
+ * The effort picker (D35, D37). Ids come from the backend; "Your settings" clears the choice. A
+ * `mode` entry (Claude: ultracode) is a session mode at any effort level: a model's effort list does
+ * not narrow it, and it is greyed out only when the live agent says it cannot be turned on (the
+ * agent tells hosts to offer it only then). Picking a level after it turns it off, as the agent's
+ * own `/effort <level>` does.
+ */
 export function effortSelect(info: SessionInfo): SelectModel | undefined {
   if (info.efforts.length === 0) return undefined;
   const v = info.view;
   const settingsEffort = info.settings?.effort;
+  const ultra = v.live.ultracode;
+  const modeEntry = info.efforts.find((e) => e.kind === 'mode');
+  // The user's own settings may turn the mode on: name it, so "your settings" is not a surprise.
+  const fromSettings = [
+    settingsEffort,
+    modeEntry && ultra?.on === true && v.choice.effort === undefined
+      ? `${modeEntry.label.toLowerCase()} on`
+      : undefined,
+  ]
+    .filter((x): x is string => x !== undefined && x !== '')
+    .join(', ');
   const options: SelectOption[] = [
-    { value: SETTINGS, label: settingsEffort ? `Effort: your settings (${settingsEffort})` : 'Effort: your settings' },
+    { value: SETTINGS, label: fromSettings ? `Effort: your settings (${fromSettings})` : 'Effort: your settings' },
   ];
-  // A model that lists its efforts narrows the list (D34); otherwise every backend effort shows.
+  // A model that lists its efforts narrows the levels (D34); otherwise every backend level shows.
   const modelId = v.choice.model ?? v.live.model;
   const supported = info.models.find((m) => m.value === modelId)?.efforts;
   for (const e of info.efforts) {
-    const off = supported !== undefined && !supported.includes(e.id) && e.id !== v.choice.effort;
-    options.push(
-      off ? { value: e.id, label: `Effort: ${e.label}`, disabled: true } : { value: e.id, label: `Effort: ${e.label}` },
-    );
+    const chosen = e.id === v.choice.effort;
+    const isMode = e.kind === 'mode';
+    const off = isMode
+      ? ultra?.available === false && !chosen
+      : supported !== undefined && !supported.includes(e.id) && !chosen;
+    const o: SelectOption = { value: e.id, label: isMode ? `${e.label} (any effort)` : `Effort: ${e.label}` };
+    const hint = [
+      e.description,
+      off && isMode ? `${info.backend.displayName} says it is not available for this session and model.` : undefined,
+      chosen && isMode && ultra?.available === false
+        ? `${info.backend.displayName} says it cannot take effect now.`
+        : undefined,
+    ]
+      .filter((x): x is string => x !== undefined && x !== '')
+      .join(' ');
+    if (hint !== '') o.hint = hint;
+    if (off) o.disabled = true;
+    options.push(o);
   }
-  return { value: v.choice.effort ?? SETTINGS, options, title: 'Effort for this session only.' };
+  const title = modeEntry
+    ? `Effort for this session only. ${modeEntry.label} keeps the effort level; picking a level turns it off.`
+    : 'Effort for this session only.';
+  return { value: v.choice.effort ?? SETTINGS, options, title };
 }
 
 /** The mode the picker shows: a pending choice, else the agent's own report (R5.1). */

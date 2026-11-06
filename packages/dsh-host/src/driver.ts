@@ -30,6 +30,7 @@ import {
   type ChildView,
   type TeamView,
 } from './children.js';
+import { WorkflowRecorder, type OpenWorkflowRun, type WorkflowRecord, type WorkflowView } from './workflows.js';
 
 /** What the driver writes into one open host turn. Implemented by the port writer. */
 export interface TurnSink {
@@ -161,6 +162,13 @@ export interface HostSessionPort {
   ): JobLink | JobRefusal | undefined;
   /** D45: create a host child session under this session for a child agent. */
   createChild?(spec: ChildSpec, runner: ChildRunner): Promise<ChildHandle>;
+  /**
+   * D48: write one native workflow record into this session (dsh-seams R2.4: no host workflow
+   * call is needed). A throw: the host refused it.
+   */
+  recordWorkflow?(record: WorkflowRecord): void;
+  /** D48: workflow records this session's log holds open (a process that is gone wrote them). */
+  openWorkflowRuns?(): OpenWorkflowRun[];
   warn(note: string, detail?: unknown): void;
   /**
    * D25: a steer the agent dropped on Stop goes back to the user: remove it from the host inbox
@@ -191,6 +199,11 @@ export interface LiveInfo {
   notice?: { level: string; text: string; at: number };
   /** D15: the main-thread agent the process was started with (passed at spawn, or read on resume). */
   agent?: string;
+  /**
+   * D37: the agent's own ultracode state (Claude: `getSettings().applied`), read after every spawn
+   * and every applied choice. `available: false`: the picker greys out its ultracode entry.
+   */
+  ultracode?: { on: boolean; requested?: boolean; available?: boolean };
 }
 
 /** The session-only choices (D35-D38) and what reached the live process. */
@@ -240,7 +253,20 @@ export interface SessionView {
   tasks?: TaskView[];
   /** D51: the agents the live process lists for the main-thread picker (no process: absent). */
   agents?: AgentInfo[];
+  /** Dynamic workflow runs of this process (D48): phases, agents, tokens, status, stop. */
+  workflows?: WorkflowView[];
+  /** D48: the backend can stop one workflow agent on its own (else only the whole run). */
+  workflowAgentStop?: boolean;
 }
+
+/** How long "Stop entire workflow" waits for the run's own end before it reports "stopping". */
+export const WORKFLOW_STOP_WAIT_MS = 2000;
+/** The most task output the output route returns (the end of it). */
+export const TASK_OUTPUT_MAX_CHARS = 256 * 1024;
+/** How many task ids (running or ended) one session remembers for the output route. */
+export const TASK_KINDS_KEPT = 200;
+/** Ended shell and monitor rows kept in the session view (their output stays readable). */
+export const ENDED_TASKS_KEPT = 10;
 
 /** The result of one choice: what happened, in words for the UI. */
 export interface ChoiceResult {
@@ -362,8 +388,21 @@ export class SessionRuntime {
   #tasks = new Set<string>();
   /** What each background task is, for the plugin task list and for re-linking jobs (D47). */
   readonly #taskInfo = new Map<string, TaskView>();
+  /**
+   * Ended shells and monitors of this process (R6.2): their rows stay, so their output stays
+   * readable after they end. At most ENDED_TASKS_KEPT, cleared at each spawn.
+   */
+  readonly #endedTasks = new Map<string, TaskView>();
   /** Live child agents (D45). */
   readonly #hub: ChildHub;
+  /** Dynamic workflow runs and their native records (D48). */
+  readonly #workflows: WorkflowRecorder;
+  /** Workflow records made while no host agent was attached (D87); written at the next attach. */
+  #workflowBacklog: WorkflowRecord[] = [];
+  /** Records a gone process left open in the log were closed once (at the first spawn). */
+  #staleChecked = false;
+  /** The kind of every task this runtime saw (output route: own shells and monitors only). */
+  readonly #taskKinds = new Map<string, TaskKind>();
   /** Background work that ended since the last turn: named by the next wake trigger (D26). */
   #wakeNotes: string[] = [];
   /** The trigger text of the wake turn waiting to open (D26). */
@@ -388,6 +427,8 @@ export class SessionRuntime {
   #appliedModel: string | undefined;
   #refusedModel: string | undefined;
   #appliedEffort: string | undefined;
+  /** D37: the last effort state the live process reported (see LiveInfo.ultracode). */
+  #ultracode: LiveInfo['ultracode'];
   #effortChoice: string | undefined;
   #pendingMode: string | undefined;
   /** The user picked a mode in this session (D38): a new process of this session keeps it. */
@@ -435,6 +476,23 @@ export class SessionRuntime {
       teamMessaging: () => this.#backend?.capabilities.teamMessaging === true,
       imageText: (mediaType) => imageUnavailableText(mediaType, 'child result images are not stored'),
     });
+    this.#workflows = new WorkflowRecorder({
+      now: this.#now,
+      warn: (n, d) => this.#warn(n, d),
+      notify: () => this.#notify(),
+      write: (r) => this.#writeWorkflow(r),
+      childSession: (id) => this.#hub.session(id),
+    });
+  }
+
+  /** D48: one native workflow record into the parent session; held while no host agent is attached. */
+  #writeWorkflow(r: WorkflowRecord): void {
+    const port = this.#port;
+    if (!port) {
+      this.#workflowBacklog.push(r);
+      return;
+    }
+    port.recordWorkflow?.(r);
   }
 
   /**
@@ -576,6 +634,16 @@ export class SessionRuntime {
   /** Bind a new host agent (D87: after an eviction). A turn the agent started meanwhile wakes now. */
   attach(port: HostSessionPort): void {
     this.#port = port;
+    // D48: workflow records made while detached, in order.
+    const backlog = this.#workflowBacklog;
+    this.#workflowBacklog = [];
+    for (const r of backlog) {
+      try {
+        port.recordWorkflow?.(r);
+      } catch (error) {
+        this.#warn(`could not record workflow ${r.kind}`, String((error as Error)?.message ?? error));
+      }
+    }
     // D47: tasks whose job the host dropped with the evicted agent keep running; link them again.
     for (const taskId of this.#tasks) if (!this.#jobs.has(taskId)) this.#linkJob(taskId);
     if (this.#wakePending && this.#wakeBuffer !== undefined) {
@@ -602,7 +670,11 @@ export class SessionRuntime {
     if (!info || !port) return;
     const backend = this.#backend;
     const stop = () => {
-      void backend?.controls.stopTask?.(taskId).catch((err) => this.#warn('stopTask failed', String(err)));
+      if (info.kind === 'workflow') this.#workflows.noteStop(taskId); // the job's kill stops the whole run
+      void backend?.controls.stopTask?.(taskId).catch((err) => {
+        if (info.kind === 'workflow') this.#workflows.clearStop(taskId);
+        this.#warn('stopTask failed', String(err));
+      });
     };
     let link: ReturnType<HostSessionPort['startJob']>;
     try {
@@ -652,6 +724,7 @@ export class SessionRuntime {
     if (this.#refusedModel !== undefined) choice.refused = { model: this.#refusedModel };
     if (this.#appliedEffort !== undefined) choice.applied.effort = this.#appliedEffort;
     const v: SessionView = { state: this.state(), live: { ...this.#live }, choice };
+    if (this.#ultracode !== undefined) v.live.ultracode = { ...this.#ultracode };
     if (this.#models) v.models = this.#models.map((m) => ({ ...m }));
     if (this.#port) v.cwd = this.#port.cwd;
     const asks = this.#desk.list();
@@ -659,8 +732,13 @@ export class SessionRuntime {
     if (this.#hub.size > 0) v.children = this.#hub.views();
     const team = this.#hub.team();
     if (team) v.team = team;
-    if (this.#taskInfo.size > 0) v.tasks = [...this.#taskInfo.values()].map((t) => ({ ...t }));
+    if (this.#taskInfo.size > 0 || this.#endedTasks.size > 0)
+      v.tasks = [...this.#taskInfo.values(), ...this.#endedTasks.values()].map((t) => ({ ...t }));
     if (this.#agents) v.agents = this.#agents.map((a) => ({ ...a }));
+    if (this.#workflows.size > 0) {
+      v.workflows = this.#workflows.views();
+      v.workflowAgentStop = this.#backend?.capabilities.workflowAgentStop === true;
+    }
     return v;
   }
 
@@ -679,7 +757,95 @@ export class SessionRuntime {
    * 2 s for the agent's own end, then reports "stopping".
    */
   stopChild(childId: string): Promise<{ ok: boolean; status: ChildStatus | 'stopping' | 'unknown'; error?: string }> {
+    // D48: a workflow agent stops on its own only when the backend can do that.
+    if (this.#hub.role(childId) === 'workflow-agent' && this.#backend?.capabilities.workflowAgentStop !== true) {
+      const status = this.#hub.views().find((c) => c.id === childId)?.status ?? 'unknown';
+      return Promise.resolve({ ok: false, status, error: this.#noAgentStopText() });
+    }
     return this.#hub.stop(childId);
+  }
+
+  #noAgentStopText(): string {
+    return `${this.#factory.displayName} cannot stop one agent of a workflow. Stop the whole workflow instead.`;
+  }
+
+  /**
+   * D48: "Stop entire workflow": the backend's per-task stop on the run. Waits up to 2 s for the
+   * run's own end, then reports "stopping". The process and other tasks keep running (rule 6).
+   */
+  async stopWorkflow(
+    taskId: string,
+    waitMs = WORKFLOW_STOP_WAIT_MS,
+  ): Promise<{ ok: boolean; status: WorkflowView['status'] | 'stopping' | 'unknown'; error?: string }> {
+    if (!this.#workflows.has(taskId))
+      return { ok: false, status: 'unknown', error: 'no such workflow in this session' };
+    const current = () => this.#workflows.views().find((w) => w.taskId === taskId)?.status ?? 'unknown';
+    if (!this.#workflows.isLive(taskId)) return { ok: true, status: current() };
+    const stop = this.#backend?.controls.stopTask;
+    if (!stop) return { ok: false, status: current(), error: `${this.#factory.displayName} cannot stop a workflow` };
+    this.#workflows.noteStop(taskId);
+    try {
+      await stop(taskId);
+    } catch (error) {
+      this.#workflows.clearStop(taskId);
+      return { ok: false, status: current(), error: String((error as Error)?.message ?? error) };
+    }
+    const end = Date.now() + waitMs;
+    while (this.#workflows.isLive(taskId) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    return { ok: true, status: this.#workflows.isLive(taskId) ? 'stopping' : current() };
+  }
+
+  /**
+   * D48: stop one agent of a workflow. Only when the backend can (Claude Code cannot: the user
+   * gets the plain reason and the "Stop entire workflow" path, nothing is sent to the agent).
+   */
+  async stopWorkflowAgent(
+    taskId: string,
+    agentId: string,
+  ): Promise<{ ok: boolean; status: ChildStatus | 'stopping' | 'unknown'; error?: string; unsupported?: boolean }> {
+    const run = this.#workflows.views().find((w) => w.taskId === taskId);
+    if (!run || !run.agents.some((a) => a.agentId === agentId))
+      return { ok: false, status: 'unknown', error: 'no such workflow agent in this session' };
+    if (this.#backend?.capabilities.workflowAgentStop !== true)
+      return { ok: false, status: 'unknown', error: this.#noAgentStopText(), unsupported: true };
+    return this.#hub.stop(agentId);
+  }
+
+  /**
+   * The output of one background shell or monitor task of this session (R6.2, the client's
+   * output view). Only tasks this session's own process started; never a workflow or an agent.
+   */
+  async taskOutput(
+    taskId: string,
+  ): Promise<
+    | { ok: true; output: string; totalBytes: number; truncated: boolean }
+    | { ok: false; code: 'unknown' | 'unsupported' | 'failed'; error: string }
+  > {
+    const kind = this.#taskKinds.get(taskId);
+    if (kind === undefined) return { ok: false, code: 'unknown', error: 'no such task in this session' };
+    if (kind !== 'shell' && kind !== 'monitor')
+      return { ok: false, code: 'unsupported', error: 'only background shells and monitors have an output' };
+    const read = this.#backend?.controls.taskOutput;
+    if (!read)
+      return { ok: false, code: 'unsupported', error: `${this.#factory.displayName} cannot show task output now` };
+    try {
+      const o = await read(taskId);
+      const text = typeof o.output === 'string' ? o.output : '';
+      if (text.length <= TASK_OUTPUT_MAX_CHARS)
+        return { ok: true, output: text, totalBytes: o.totalBytes, truncated: o.truncated };
+      return { ok: true, output: text.slice(-TASK_OUTPUT_MAX_CHARS), totalBytes: o.totalBytes, truncated: true };
+    } catch (error) {
+      return { ok: false, code: 'failed', error: String((error as Error)?.message ?? error) };
+    }
+  }
+
+  #noteTaskKind(taskId: string, kind: TaskKind): void {
+    this.#taskKinds.delete(taskId);
+    this.#taskKinds.set(taskId, kind);
+    if (this.#taskKinds.size > TASK_KINDS_KEPT) {
+      const first = this.#taskKinds.keys().next().value;
+      if (first !== undefined) this.#taskKinds.delete(first);
+    }
   }
 
   /** D47: stop one background task from the plugin task list (a fallback row, or any task). */
@@ -835,6 +1001,7 @@ export class SessionRuntime {
     this.#appliedModel = undefined;
     this.#refusedModel = undefined;
     this.#appliedEffort = undefined;
+    this.#ultracode = undefined;
     this.#live = {};
     this.#mainAgent = undefined;
     return `${this.#factory.displayName} starts again with this agent at the next message`;
@@ -861,6 +1028,7 @@ export class SessionRuntime {
     this.#appliedModel = undefined;
     this.#refusedModel = undefined;
     this.#appliedEffort = undefined;
+    this.#ultracode = undefined;
     this.#live = {};
     this.#resetPending = false;
     return `${this.#factory.displayName} will start again with your settings at the next message`;
@@ -930,6 +1098,7 @@ export class SessionRuntime {
       this.#appliedModel = undefined;
       this.#refusedModel = undefined;
       this.#appliedEffort = undefined;
+      this.#ultracode = undefined;
       this.#resetPending = false;
       this.#live = {};
       this.#mainAgent = mainAgent;
@@ -940,6 +1109,9 @@ export class SessionRuntime {
       this.#sent.clear();
       this.#tasks = new Set();
       this.#taskInfo.clear();
+      this.#endedTasks.clear();
+      this.#taskKinds.clear(); // a new process has none of the old one's tasks
+      this.#closeStaleWorkflows();
       if (!this.#turnActive) this.#idleSince = this.#now();
       void this.#pump(backend);
       this.#loadModels(backend);
@@ -953,6 +1125,23 @@ export class SessionRuntime {
       this.#starting = undefined;
       this.#notify();
     }
+  }
+
+  /**
+   * D48, D74: workflow records left open in the log belong to a process that is gone (a host
+   * restart ends it), so they are closed once, before the first process of this runtime runs.
+   */
+  #closeStaleWorkflows(): void {
+    if (this.#staleChecked) return;
+    this.#staleChecked = true;
+    let open: OpenWorkflowRun[];
+    try {
+      open = this.#port?.openWorkflowRuns?.() ?? [];
+    } catch (error) {
+      this.#warn('could not read the workflow records', String((error as Error)?.message ?? error));
+      return;
+    }
+    if (open.length > 0) this.#workflows.closeStale(open);
   }
 
   async #pump(backend: AgentBackendSession): Promise<void> {
@@ -975,12 +1164,29 @@ export class SessionRuntime {
     // Their events never reach this session's log (a child step would break the main step, D17).
     if (isChildEvent(e)) {
       this.#hub.handle(e);
+      // D48: a workflow agent's member record names its child session.
+      if (e.type === 'agent-start') this.#workflows.agentStarted(e);
+      else if (e.type === 'agent-end') this.#workflows.agentEnded(e);
       this.#notify();
       return;
     }
     switch (e.type) {
+      case 'workflow-start':
+        // Inside a turn it follows the launching call's result in the turn's order (D48).
+        if (this.#box) break;
+        this.#workflows.start(e);
+        return;
+      case 'workflow-snapshot':
+        this.#workflows.snapshot(e);
+        this.#notify();
+        return;
+      case 'workflow-end':
+        this.#workflows.ended(e);
+        return;
       case 'task-start': {
         this.#tasks.add(e.taskId);
+        this.#noteTaskKind(e.taskId, e.kind);
+        if (e.kind === 'workflow') this.#workflows.taskStarted(e.taskId, e.label);
         const info: TaskView = { taskId: e.taskId, kind: e.kind, label: e.label, status: 'running', job: false };
         if (e.agent?.kind === 'child') info.agent = e.agent.id;
         this.#taskInfo.set(e.taskId, info);
@@ -1002,6 +1208,13 @@ export class SessionRuntime {
         const info = this.#taskInfo.get(e.taskId);
         if (info) {
           this.#taskInfo.delete(e.taskId);
+          if (info.kind === 'shell' || info.kind === 'monitor') {
+            this.#endedTasks.set(e.taskId, { ...info, status: e.status, job: false });
+            if (this.#endedTasks.size > ENDED_TASKS_KEPT) {
+              const first = this.#endedTasks.keys().next().value;
+              if (first !== undefined) this.#endedTasks.delete(first);
+            }
+          }
           // D26: the next wake trigger names what ended in the background.
           const word = e.status === 'completed' ? 'finished' : e.status;
           this.#wakeNotes.push(`background ${info.kind} "${info.label}" ${word}`);
@@ -1107,6 +1320,9 @@ export class SessionRuntime {
     // D74: every live child closes its open step and ends its turn, before the root turn ends.
     if (intended) this.#hub.endAll('stopped', `${this.#factory.displayName} was stopped`);
     else this.#hub.endAll('failed', crashMessage(this.#factory.displayName, e.error));
+    // D48, D74: every live workflow run ends with its process.
+    if (intended) this.#workflows.closeAll('cancelled', `${this.#factory.displayName} was stopped`);
+    else this.#workflows.closeAll('error', crashMessage(this.#factory.displayName, e.error));
     // A new process has none of this process's inputs: an unclaimed steer is sent again (D22).
     this.#sent.clear();
     this.#earlySteers = [];
@@ -1170,7 +1386,31 @@ export class SessionRuntime {
         failed('setPermissionMode', error);
       }
     }
+    this.#readEffortState(backend);
     return firstError;
+  }
+
+  /**
+   * D37: read the agent's effort state (no process, the live session answers) without holding the
+   * caller; the next view shows it. Ultracode can depend on the model, so this runs after every
+   * applied choice, a model switch included.
+   */
+  #readEffortState(backend: AgentBackendSession): void {
+    const read = backend.controls.effortState;
+    if (!read) return;
+    read.call(backend.controls).then(
+      (state) => {
+        if (backend !== this.#backend) return;
+        const next: NonNullable<LiveInfo['ultracode']> = { on: state.ultracode === true };
+        if (state.ultracodeRequested !== undefined) next.requested = state.ultracodeRequested;
+        if (state.ultracodeAvailable !== undefined) next.available = state.ultracodeAvailable;
+        const cur = this.#ultracode;
+        if (cur && cur.on === next.on && cur.requested === next.requested && cur.available === next.available) return;
+        this.#ultracode = next;
+        this.#notify();
+      },
+      (error: unknown) => this.#warn(`effortState failed: ${String((error as Error)?.message ?? error)}`),
+    );
   }
 
   /** D34: the model list from this process (no extra process; the live session answers). */
@@ -1491,6 +1731,10 @@ export class SessionRuntime {
           sink.result(e.callId, prepared ?? e.content, e.isError, e.chainId);
           if (sink.openCallIds.length === 0) sink.closeStep();
           return undefined;
+        case 'workflow-start':
+          // D48: after the launching call's result, so the run's node sits in that step.
+          this.#workflows.start(e);
+          return undefined;
         case 'superseded':
           // D72, D84: a replaced uuid is off the agent's chain, so never a fork point.
           for (const id of e.chainIds) this.#superseded.add(id);
@@ -1573,6 +1817,9 @@ export class SessionRuntime {
     this.#desk.dropAll();
     await this.#end(false);
     this.#box?.push({ type: 'ended' }); // a running turn ends as stopped, not as a crash
+    // D48, D74: live runs end; their records are written while the child sessions still exist.
+    this.#workflows.closeAll('cancelled', `${this.#factory.displayName} was stopped`);
+    await this.#workflows.flush(2000);
     await this.#hub.dispose(); // D74: child turns closed, child sessions released
     this.#backend = undefined;
     this.#port = undefined;

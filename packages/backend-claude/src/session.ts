@@ -11,6 +11,7 @@ import {
   type BackendEvent,
   type AgentInfo,
   type ContextUsage,
+  type EffortState,
   type ModelInfo,
   type TaskOutput,
   type UserInput,
@@ -20,6 +21,7 @@ import type { Options, Query, SDKUserMessage } from './sdk.js';
 import { planChoices } from './interactions.js';
 import { AskContext } from './ask-context.js';
 import { withSdkVersionEnvRestored } from './env.js';
+import type { WorkflowRunsOptions } from './workflows.js';
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
@@ -45,6 +47,27 @@ export interface ClaudeSessionInit {
   killGroup?: () => void;
   now?: () => number;
   debug?: (note: string, detail: unknown) => void;
+  /**
+   * D49: the CLI's `projects` folder. Workflow transcript folders are read (tailed) only when
+   * they lie under it. Absent: no live workflow-agent output.
+   */
+  projectsDir?: string;
+  /** Test seams for the workflow transcript poll. */
+  workflowFs?: WorkflowRunsOptions['fs'];
+  workflowTimers?: WorkflowRunsOptions['timers'];
+}
+
+/**
+ * D37: the flag settings for an effort id, as the terminal app's `/effort` sets them (CLI
+ * 2.1.318 binary; live M4 probe U). `ultracode` is the app's `/effort ultracode`: ultracode on,
+ * effort unchanged. A level is `/effort <level>`: only the level; the CLI itself turns ultracode
+ * off when the level changes ("· Ultracode off"). `null` (back to my settings) clears both from
+ * the session's flag layer.
+ */
+export function effortFlags(effortId: string | null): Record<string, unknown> {
+  if (effortId === null) return { effortLevel: null, ultracode: null };
+  if (effortId === 'ultracode') return { ultracode: true };
+  return { effortLevel: effortId };
 }
 
 /**
@@ -138,11 +161,24 @@ export class ClaudeBackendSession implements AgentBackendSession {
     const mapperOpts: ConstructorParameters<typeof ClaudeMessageMapper>[1] = {};
     if (init.now) mapperOpts.now = init.now;
     if (init.debug) mapperOpts.debug = init.debug;
+    // D49: live workflow-agent output is polled from the transcript files and pushed here.
+    const projectsDir = init.projectsDir;
+    const workflows: NonNullable<typeof mapperOpts.workflows> = {
+      emit: (events) => {
+        if (this.#exited) return;
+        for (const e of events) this.#events.push(e);
+      },
+      projectsDir: () => projectsDir,
+    };
+    if (init.workflowFs) workflows.fs = init.workflowFs;
+    if (init.workflowTimers) workflows.timers = init.workflowTimers;
+    mapperOpts.workflows = workflows;
     this.#mapper = new ClaudeMessageMapper(this.#tracker, mapperOpts);
     this.capabilities = {
       perTaskStop: true,
       sideQuestions: false,
-      workflows: false,
+      workflows: true,
+      workflowAgentStop: false,
       teamMessaging: false,
       cancelQueued: true,
       fileRewind: init.options.enableFileCheckpointing === true,
@@ -167,7 +203,9 @@ export class ClaudeBackendSession implements AgentBackendSession {
    * spawning call (a teammate's name), else the frame's `subagent_type: task_description`.
    */
   agentLabel(agentId: string): string | undefined {
-    return this.#mapper.children.label(agentId) ?? this.#asks.agentLabel(agentId);
+    return (
+      this.#mapper.children.label(agentId) ?? this.#mapper.workflows.label(agentId) ?? this.#asks.agentLabel(agentId)
+    );
   }
 
   /** What the interaction adapter reads about the live session (D42, D43, D44, D77). */
@@ -245,6 +283,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
   }
 
   async dispose(): Promise<void> {
+    this.#mapper.workflows.dispose();
     this.#input.end();
     this.#query.close();
     await this.#pump;
@@ -254,6 +293,12 @@ export class ClaudeBackendSession implements AgentBackendSession {
     const q = this.#query;
     return {
       stopTask: async (taskId) => {
+        // D48: the CLI has no control to stop one workflow agent; `stopTask(<agent id>)` is
+        // accepted and does nothing (live M4 probe X). Say so instead of a silent no-op.
+        const run = this.#mapper.workflows.runOfAgent(taskId);
+        if (run !== undefined)
+          throw new Error('Claude Code cannot stop one agent of a workflow. Stop the whole workflow instead.');
+        if (this.#mapper.workflows.isRun(taskId)) this.#mapper.workflows.noteStopRequested(taskId);
         await q.stopTask(taskId);
       },
       // D38: the CLI's `status.permissionMode` frame that follows is the truth; nothing here
@@ -274,11 +319,23 @@ export class ClaudeBackendSession implements AgentBackendSession {
         await q.setModel(model); // never undefined (D35)
       },
       setEffort: async (effortId) => {
-        const flags: Loose =
-          effortId === 'ultracode'
-            ? { effortLevel: 'xhigh', ultracode: true }
-            : { effortLevel: effortId, ultracode: null };
-        await (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, flags);
+        await (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, effortFlags(effortId));
+      },
+      // D37: the terminal app's `/effort ultracode on|off` (and Tab in its effort slider): on or
+      // off for this session, effort unchanged. The CLI refuses it when unavailable.
+      setUltracode: async (on) => {
+        await (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, { ultracode: on });
+      },
+      // The CLI's own report (`getSettings().applied`, undeclared fields, D9). Read-only.
+      effortState: async () => {
+        const r = await optionalControl<Loose>(q, 'getSettings');
+        if (r === undefined) throw new Error('this Claude Code version cannot report its settings');
+        const applied = (r.applied ?? {}) as Loose;
+        const state: EffortState = { ultracode: applied.ultracode === true };
+        if (typeof applied.effort === 'string') state.effort = applied.effort;
+        if (typeof applied.ultracodeRequested === 'boolean') state.ultracodeRequested = applied.ultracodeRequested;
+        if (typeof applied.ultracodeAvailable === 'boolean') state.ultracodeAvailable = applied.ultracodeAvailable;
+        return state;
       },
       models: async () => {
         const list = await q.supportedModels();
@@ -316,6 +373,10 @@ export class ClaudeBackendSession implements AgentBackendSession {
       // The end of a background shell or Monitor output, as the TUI's /tasks view reads it
       // (undeclared `getTaskOutput`, D9; live M3 probe B). Read-only, no model turn.
       taskOutput: async (taskId) => {
+        if (this.#mapper.workflows.isRun(taskId) || this.#mapper.workflows.isAgent(taskId))
+          throw new Error(
+            'Claude Code keeps task output only for background shells and monitors; a workflow shows its agents instead',
+          );
         const r = await optionalControl<Loose>(q, 'getTaskOutput', taskId);
         if (r === undefined) throw new Error('this Claude Code version cannot read task output');
         const out: TaskOutput = {

@@ -57,6 +57,9 @@ export type RegisteredRuntime = Pick<
   | 'showNotice'
   | 'stopChild'
   | 'stopTask'
+  | 'stopWorkflow'
+  | 'stopWorkflowAgent'
+  | 'taskOutput'
 >;
 
 export class SessionRegistry {

@@ -103,6 +103,12 @@ export const CHILD_STOP_ROUTE = '/api/raw-agent/child-stop';
 export const TASK_STOP_ROUTE = '/api/raw-agent/task-stop';
 /** D45: which of our sessions holds this host child session (`?session=<child host id>`). */
 export const CHILD_OF_ROUTE = '/api/raw-agent/child-of';
+/** D48: "Stop entire workflow" (`?session=…&task=<run task id>`). */
+export const WORKFLOW_STOP_ROUTE = '/api/raw-agent/workflow-stop';
+/** D48: stop one workflow agent (`?session=…&task=…&agent=…`); refused when the agent cannot. */
+export const WORKFLOW_AGENT_STOP_ROUTE = '/api/raw-agent/workflow-agent-stop';
+/** R6.2: the output of one of the session's own background shells or monitors (`?session=…&task=…`). */
+export const TASK_OUTPUT_ROUTE = '/api/raw-agent/task-output';
 
 /**
  * The lifecycle routes over the Host registry (D87). A session id names only a runtime the
@@ -191,6 +197,68 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
         try {
           const result = await r.stopTask(task);
           return json(result.ok ? 200 : 409, result);
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: WORKFLOW_STOP_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        const task = url.searchParams.get('task');
+        if (!id || !task) return json(400, { error: 'missing session or task' });
+        const r = registry.get(id);
+        if (!r) return json(missing.status, missing.body);
+        try {
+          const result = await r.stopWorkflow(task);
+          return json(result.ok ? 200 : result.status === 'unknown' ? 404 : 409, result);
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: WORKFLOW_AGENT_STOP_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        const task = url.searchParams.get('task');
+        const agent = url.searchParams.get('agent');
+        if (!id || !task || !agent) return json(400, { error: 'missing session, task or agent' });
+        const r = registry.get(id);
+        if (!r) return json(missing.status, missing.body);
+        try {
+          const result = await r.stopWorkflowAgent(task, agent);
+          const status = result.ok ? 200 : result.unsupported ? 409 : result.status === 'unknown' ? 404 : 409;
+          return json(status, result);
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      // Only a task this session's own process started (a shell or a monitor): the task id is
+      // looked up in that runtime, never used as a path. No file is served.
+      path: TASK_OUTPUT_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        const task = url.searchParams.get('task');
+        if (!id || !task) return json(400, { error: 'missing session or task' });
+        const r = registry.get(id);
+        if (!r) return json(missing.status, missing.body);
+        try {
+          const result = await r.taskOutput(task);
+          if (result.ok) return json(200, result);
+          return json(result.code === 'unknown' ? 404 : result.code === 'unsupported' ? 409 : 502, result);
         } catch (e) {
           return json(500, { error: String((e as Error)?.message ?? e) });
         }
@@ -311,6 +379,7 @@ export function channelLine(view: SessionView): string {
     children: view.children ?? [],
     team: view.team ?? null,
     tasks: view.tasks ?? [],
+    workflows: view.workflows ?? [],
   };
   return `${JSON.stringify(line)}\n`;
 }

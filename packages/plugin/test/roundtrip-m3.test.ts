@@ -375,8 +375,22 @@ describe.skipIf(dsh === undefined)(`M3 DSH round trip (installed DSH ${dsh?.vers
       background: true,
       status: 'completed',
     });
-    expect(s.runtime().view().tasks).toBeUndefined(); // all tasks ended
+    // All tasks ended; ended shells keep a row so their output stays readable (R6.2, M4 live).
+    expect(
+      s
+        .runtime()
+        .view()
+        .tasks?.map((t) => [t.kind, t.status]),
+    ).toEqual([
+      ['shell', 'stopped'],
+      ['shell', 'completed'],
+    ]);
     const runtime = s.runtime();
+    // The child session is created asynchronously; under full-suite load it can lag the agent's end.
+    await until(() => {
+      const id = runtime.view().children?.[0]?.hostSessionId;
+      return id !== undefined && rt!.ctx.agents.get(id) !== undefined;
+    });
     const live = liveChildCount();
     const c = await checkSession(dsh!, rt!, s.handle, s.sessionId);
     expect(c.relationships).toBe('ok');

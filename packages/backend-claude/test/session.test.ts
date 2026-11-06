@@ -193,9 +193,8 @@ describe.skipIf(process.platform === 'win32')('Claude factory and session (fake 
 
     await session.controls.stopTask!('task_1');
     await session.controls.setEffort!('ultracode');
-    expect(fake.calls.find((c) => c[0] === 'applyFlagSettings')![1]).toEqual([
-      { effortLevel: 'xhigh', ultracode: true },
-    ]);
+    // D37: `/effort ultracode` in the terminal app: ultracode on, effort unchanged.
+    expect(fake.calls.find((c) => c[0] === 'applyFlagSettings')![1]).toEqual([{ ultracode: true }]);
 
     await session.dispose();
     await reader;

@@ -81,7 +81,25 @@ export {
   type ChildHubDeps,
 } from './children.js';
 export {
+  WorkflowRecorder,
+  WORKFLOW_RUNS_KEPT,
+  WORKFLOW_CHILD_WAIT_MS,
+  memberOutcomeOfState,
+  memberOutcomeOfStatus,
+  type WorkflowRecord,
+  type WorkflowDeps,
+  type WorkflowView,
+  type WorkflowAgentView,
+  type WorkflowRunStatus,
+  type WorkflowMemberOutcome,
+  type WorkflowStopReason,
+  type OpenWorkflowRun,
+} from './workflows.js';
+export {
   SessionRuntime,
+  WORKFLOW_STOP_WAIT_MS,
+  TASK_OUTPUT_MAX_CHARS,
+  TASK_KINDS_KEPT,
   JOB_LIMIT_CONFIG_KEY,
   type JobLink,
   type JobRefusal,

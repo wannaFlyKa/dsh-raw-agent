@@ -22,11 +22,14 @@ import {
   type RosterModel,
 } from '../agents-model.js';
 import type { AskWire, ChildWire, SessionInfo, TaskWire } from '../api.js';
+import { TaskOutputReader, type TaskOutputSnapshot } from '../task-output.js';
 import type { ChildLinkStore } from '../child-links.js';
 import type { SessionControlStore, SessionSnapshot } from '../session-store.js';
 import type { HostActions } from './actions.js';
 import { AskPanel } from './ask-cards.js';
 import { css } from './style.js';
+import { WorkflowRuns } from './workflow-panel.js';
+import { hasTaskOutput, outputCutNote, plainTaskOutput } from '../workflow-model.js';
 
 const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
 const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
@@ -116,6 +119,14 @@ function useWaitingMarks(children: readonly ChildWire[], asks: readonly AskWire[
   }, [calls, actions]);
 }
 
+/**
+ * D48: a workflow agent has its own Stop only where the agent can stop one agent of a workflow
+ * (Claude Code cannot: the run's "Stop entire workflow" is the way). Other children always can.
+ */
+export function canStopChild(c: ChildWire, info: SessionInfo): boolean {
+  return isRunning(c) && (c.role !== 'workflow-agent' || info.view.workflowAgentStop === true);
+}
+
 export interface ChildRowProps {
   child: ChildWire;
   level: number;
@@ -188,7 +199,7 @@ export function ChildRow(props: ChildRowProps): React.ReactElement {
             {showAsk ? 'Hide the question' : 'Answer'}
           </button>
         )}
-        {isRunning(c) && (
+        {canStopChild(c, info) && (
           <button
             type="button"
             style={css.button}
@@ -201,6 +212,12 @@ export function ChildRow(props: ChildRowProps): React.ReactElement {
           </button>
         )}
       </div>
+      {isRunning(c) && !canStopChild(c, info) && (
+        <span style={styles.meta} data-raw-agent="child-no-stop">
+          {info.backend.displayName} cannot stop one agent of a workflow. Use “Stop entire workflow” in the Workflows
+          tab or in the chat.
+        </span>
+      )}
       {err !== undefined && <span style={css.cardError}>{err}</span>}
       {showAsk && asks.length > 0 && (
         <AskPanel store={store} actions={actions} askId={asks[0]!.id} only={(a) => a.agentId === c.id} />
@@ -209,10 +226,65 @@ export function ChildRow(props: ChildRowProps): React.ReactElement {
   );
 }
 
+/**
+ * R6.2: the end of one background shell's or monitor's output, read from the Host while the view is
+ * open: again every 2 s while the task runs, once more when it ends. Shown as plain text.
+ */
+export function TaskOutputView(props: {
+  task: TaskWire;
+  store: SessionControlStore;
+  pollMs?: number;
+}): React.ReactElement {
+  const { task, store, pollMs } = props;
+  const reader = React.useMemo(
+    () => new TaskOutputReader(() => store.taskOutput(task.taskId), undefined, pollMs),
+    [store, task.taskId, pollMs],
+  );
+  React.useEffect(() => () => reader.dispose(), [reader]);
+  const running = task.status === 'running';
+  React.useEffect(() => reader.setRunning(running), [reader, running]);
+  const snap = React.useSyncExternalStore(reader.subscribe, reader.getSnapshot, reader.getSnapshot);
+  return <TaskOutputBody snap={snap} running={running} onRefresh={() => void reader.refresh()} />;
+}
+
+/** The output view's body (no reads of its own). */
+export function TaskOutputBody(props: {
+  snap: TaskOutputSnapshot;
+  running: boolean;
+  onRefresh?: () => void;
+}): React.ReactElement {
+  const { snap, running } = props;
+  const out = snap.output;
+  const text = out ? plainTaskOutput(out.output) : undefined;
+  const cut = out ? outputCutNote(out) : undefined;
+  return (
+    <div data-raw-agent="task-output" style={css.choiceCol}>
+      {cut !== undefined && <span style={styles.meta}>{cut}</span>}
+      {text !== undefined && (
+        <pre style={{ ...css.pre, maxHeight: 260, overflow: 'auto' }} data-raw-agent="task-output-text">
+          {text === '' ? (running ? 'No output yet.' : 'No output.') : text}
+        </pre>
+      )}
+      {text === undefined && snap.error === undefined && <span style={styles.meta}>Reading the output…</span>}
+      {snap.error !== undefined && <span style={css.cardError}>{snap.error}</span>}
+      <div style={css.row}>
+        <span style={styles.meta}>{running ? 'Updates while the task runs.' : 'The task has ended.'}</span>
+        {!running && props.onRefresh && (
+          <button type="button" style={css.button} disabled={snap.reading} onClick={props.onRefresh}>
+            Read again
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TaskRow(props: { task: TaskWire; snap: SessionSnapshot; store: SessionControlStore }): React.ReactElement {
   const { task: t, snap, store } = props;
+  const [showOutput, setShowOutput] = React.useState(false);
   const stopping = (snap.stopping ?? []).includes(t.taskId);
   const err = snap.stopError?.id === t.taskId ? snap.stopError.text : undefined;
+  const output = hasTaskOutput(t);
   return (
     <div style={styles.row} data-raw-agent="task-row" data-task-id={t.taskId}>
       <div style={styles.rowHead}>
@@ -225,20 +297,34 @@ function TaskRow(props: { task: TaskWire; snap: SessionSnapshot; store: SessionC
       </div>
       {t.progress !== undefined && <span style={styles.last}>{t.progress}</span>}
       {t.note !== undefined && <span style={styles.meta}>{t.note}</span>}
-      {t.status === 'running' && (
+      {(t.status === 'running' || output) && (
         <div style={css.row}>
-          <button
-            type="button"
-            style={css.button}
-            data-raw-agent="task-stop"
-            disabled={stopping}
-            onClick={() => void store.stopTask(t.taskId)}
-          >
-            {stopping ? 'Stopping…' : 'Stop'}
-          </button>
+          {output && (
+            <button
+              type="button"
+              style={css.button}
+              data-raw-agent="task-output-toggle"
+              aria-expanded={showOutput}
+              onClick={() => setShowOutput(!showOutput)}
+            >
+              {showOutput ? 'Hide output' : 'Show output'}
+            </button>
+          )}
+          {t.status === 'running' && (
+            <button
+              type="button"
+              style={css.button}
+              data-raw-agent="task-stop"
+              disabled={stopping}
+              onClick={() => void store.stopTask(t.taskId)}
+            >
+              {stopping ? 'Stopping…' : 'Stop'}
+            </button>
+          )}
         </div>
       )}
       {err !== undefined && <span style={css.cardError}>{err}</span>}
+      {showOutput && output && <TaskOutputView task={t} store={store} />}
     </div>
   );
 }
@@ -314,7 +400,7 @@ export function TeamRoster(props: {
   );
 }
 
-type Tab = 'agents' | 'team' | 'tasks';
+type Tab = 'agents' | 'team' | 'workflows' | 'tasks';
 
 /** The panel body: tabs for agents, the team and background tasks. */
 export function AgentsPanel(props: {
@@ -334,6 +420,8 @@ export function AgentsPanel(props: {
   const tasks = info.view.tasks ?? [];
   const tabs: Array<[Tab, string]> = [['agents', `Agents (${children.length})`]];
   if (roster) tabs.push(['team', 'Team']);
+  const runs = info.view.workflows ?? [];
+  if (runs.length > 0) tabs.push(['workflows', `Workflows (${runs.length})`]);
   if (tasks.length > 0) tabs.push(['tasks', `Background tasks (${tasks.length})`]);
   const shown = tabs.some(([t]) => t === tab) ? tab : 'agents';
   return (
@@ -381,6 +469,7 @@ export function AgentsPanel(props: {
       {shown === 'team' && roster && (
         <TeamRoster roster={roster} info={info} sessionId={store.sessionId} actions={actions} />
       )}
+      {shown === 'workflows' && <WorkflowRuns store={store} snap={snap} info={info} actions={actions} />}
       {shown === 'tasks' && tasks.map((t) => <TaskRow key={t.taskId} task={t} snap={snap} store={store} />)}
     </div>
   );
@@ -467,7 +556,7 @@ function ChildStripBody(
         {childStatusText(child)}
         {asks.length > 0 ? ' · waiting for your approval' : ''}
       </button>
-      {isRunning(child) && (
+      {canStopChild(child, info) && (
         <button
           type="button"
           style={css.button}

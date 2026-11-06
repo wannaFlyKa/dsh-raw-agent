@@ -126,6 +126,12 @@ export interface BackendCapabilities {
   sideQuestions: boolean;
   workflows: boolean;
   teamMessaging: boolean;
+  /**
+   * D48: one workflow agent can be stopped on its own. false for Claude Code: the CLI has no
+   * control for it (its terminal app's "skip agent" is internal; `stopTask(<agent id>)` is a
+   * silent no-op on 2.1.318). Stop the whole run with `stopTask(<run task id>)` instead.
+   */
+  workflowAgentStop?: boolean;
   cancelQueued: boolean;
   fileRewind: boolean;
   planChoices: PlanChoiceInfo[];
@@ -143,6 +149,13 @@ export interface BackendControls {
   setModel?(model: string): Promise<void>;
   /** An id from capabilities.efforts; null clears the flag layer. */
   setEffort?(effortId: string | null): Promise<void>;
+  /**
+   * D37: the agent's own standing workflow mode, on or off, at any effort level (Claude:
+   * ultracode, the terminal app's `/effort ultracode on|off`). Session only.
+   */
+  setUltracode?(on: boolean): Promise<void>;
+  /** The effort and ultracode state the agent reports now (Claude: `getSettings().applied`). */
+  effortState?(): Promise<EffortState>;
   models?(): Promise<ModelInfo[]>;
   agents?(): Promise<AgentInfo[]>;
   commands?(): Promise<CommandInfo[]>;
@@ -324,9 +337,27 @@ export interface PermissionModeInfo {
   requiresOption?: string;
 }
 
+export interface EffortState {
+  effort?: string;
+  /** In effect now. */
+  ultracode: boolean;
+  /** Asked for (a setting or a session choice), whether or not it can take effect. */
+  ultracodeRequested?: boolean;
+  /** Can be turned on (workflows on and a model that supports it). Offer the control only then. */
+  ultracodeAvailable?: boolean;
+}
+
 export interface EffortInfo {
   id: string;
   label: string;
+  /**
+   * `level` (default): one effort level; a model's own effort list narrows it (D34). `mode`: a
+   * session mode beside the level that keeps the level as it is (Claude: ultracode, D37). A model's
+   * effort list does not narrow a mode; the live `EffortState` says whether it can be turned on.
+   */
+  kind?: 'level' | 'mode';
+  /** One plain line for the picker's tooltip. */
+  description?: string;
 }
 
 export interface PlanChoiceInfo {

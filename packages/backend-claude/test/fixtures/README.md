@@ -38,3 +38,19 @@ Hand-built (shapes from the CLI 2.1.318 binary and the SDK types; not yet seen o
   fallback response, one block per frame, with a tool call (D84 1).
 - `tombstone.jsonl`: an abandoned attempt whose tool use and early result are tombstoned, then the
   retry (D84 2). Whether the SDK forwards `tombstone` frames is **unverified** (S1).
+
+Recorded in M4 (CLI 2.1.318, the plugin's own start options, `claude-sonnet-5-5`, effort low; probe
+`backend-workflows`). Each has a `<name>.transcripts/` folder: the run's transcript folder
+(`agent-<id>.jsonl`, `*.meta.json`, `journal.jsonl`), scrubbed with the same id maps by
+`make-fixture.mjs --transcripts`. Agent files keep their user/assistant lines; every other line
+is a stub of the same type. `_t` is the probe's receive time in ms.
+
+- `workflow-two-phase.jsonl`: a 2-phase workflow (phase One: one agent with a Bash call; phase
+  Two: two parallel agents, one starts a background shell); `task_started local_workflow` has no
+  `is_backgrounded`; the Workflow tool result with `runId`, `transcriptDir`, `scriptPath`;
+  `workflow_progress` snapshots; a main-thread foreground Bash interrupted after the run ended;
+  the CLI's wake turn.
+- `workflow-interrupt.jsonl`: two parallel agents; `stopTask(<one agent id>)` (accepted, no
+  effect); an interrupt during a main foreground tool while the run goes on; the run completes.
+- `workflow-stop-run.jsonl`: `stopTask(<run>)` while the only agent runs a long shell: the agent
+  row turns `error` ("Stopped because the workflow was stopped"), `task_notification stopped`.

@@ -3,7 +3,14 @@
 // looks at). A 404 means "not a session of this plugin": the controls render nothing.
 
 import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
-import { RouteError, type AskReplyWire, type ChannelLine, type RawAgentApi, type SessionInfo } from './api.js';
+import {
+  RouteError,
+  type AskReplyWire,
+  type ChannelLine,
+  type RawAgentApi,
+  type SessionInfo,
+  type TaskOutputWire,
+} from './api.js';
 import { nextModeFor } from './view-model.js';
 
 export interface SessionSnapshot {
@@ -161,6 +168,11 @@ export class SessionControlStore {
           else delete view.team;
           if (line.agents.tasks.length > 0) view.tasks = line.agents.tasks;
           else delete view.tasks;
+        }
+        if (line.workflows) {
+          // D48: the runs ride the channel too, so a phase or an agent's tokens show at once.
+          if (line.workflows.length > 0) view.workflows = line.workflows;
+          else delete view.workflows;
         }
         next.info = { ...info, view };
         ++this.#generation; // a poll that started before this line is older
@@ -323,6 +335,24 @@ export class SessionControlStore {
   /** D47: stop one background task from the plugin's task list (the user's click). */
   async stopTask(taskId: string): Promise<boolean> {
     return this.#stopOne(taskId, () => this.#api.stopTask(this.sessionId, taskId));
+  }
+
+  /**
+   * D48: "Stop entire workflow" (the user's click): the agent's per-task stop on the run. The
+   * process, the main turn and other tasks keep running (rule 6).
+   */
+  async stopWorkflow(taskId: string): Promise<boolean> {
+    return this.#stopOne(taskId, () => this.#api.stopWorkflow(this.sessionId, taskId));
+  }
+
+  /** D48: stop one workflow agent, only where the agent can (the Host refuses it otherwise). */
+  async stopWorkflowAgent(taskId: string, agentId: string): Promise<boolean> {
+    return this.#stopOne(agentId, () => this.#api.stopWorkflowAgent(this.sessionId, taskId, agentId));
+  }
+
+  /** R6.2: read the end of one background shell's or monitor's output (a read, no state kept). */
+  taskOutput(taskId: string): Promise<TaskOutputWire> {
+    return this.#api.taskOutput(this.sessionId, taskId);
   }
 
   async #stopOne(id: string, call: () => Promise<{ ok: boolean; error?: string }>): Promise<boolean> {
