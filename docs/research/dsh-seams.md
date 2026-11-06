@@ -44,6 +44,12 @@ Research note for the design phase. Topic: the places in DeepSeek Harness (DSH) 
 12. **Attachments:** a DSH `user/message` carries `{type:'image', attachment: ImageAttachmentRef}` (no bytes) and `{type:'file', attachment: FileAttachmentRef}`. Send images as SDK base64 image blocks (bytes from `ctx.attachments.readImage(ref)`). Send files as `@"<fileHostPath(ref)>"` text. The CLI expands `@path` into its own `file` attachment with no tool call and no permission request, even outside the cwd. This matches the TUI.
 13. **Failure handling.** If the CLI dies, the SDK iterator throws `Claude Code process terminated by signal SIGKILL` and every control call rejects. The driver **must close its own open step** (repair results with `ToolCallRecovery`, `step/end`, `end` the live frame with `abandoned`) before it rethrows. Then the loop writes `turn/end {kind:'error'}` and the UI shows "This turn failed <message>". If the driver rethrows with the step open, the session cannot be reopened. If DSH itself crashes mid-step, reopening adds `tool/result`, `step/end` and `turn/end {kind:'interrupted'}` by itself.
 14. **SDK fork works while the source process is live and mid-tool.** But a fork "at the tip" while the source turn runs drops the in-flight turn: the CLI keeps the user prompt and adds a synthetic "No response requested." Always fork with `resumeSessionAt` at a completed assistant message uuid (DSH forks at a completed boundary by default).
+15. **Model selection (R1.4, Round 3).** Register one catalog provider whose first row means "your Claude settings" and whose other rows come from `supportedModels()`. Its `stream()` refuses every request. The rules:
+    - **Explicit choice = a `model/selection` event in the session log** (own or inherited) that names our provider. Anything else (no event, or only the DSH default in `AgentOptions`) means "use the user's settings": the driver calls no `setModel` and passes no `--model`.
+    - **Apply a choice with `setModel(value)`** on the live process, and **re-apply it after every spawn** (resume after a DSH restart, fork). A resumed process starts on the settings model again (live).
+    - **"Back to my settings" is not `setModel(undefined)`.** `setModel(undefined)`, `setModel('default')` and `applyFlagSettings({model: null})` all switch to Claude Code's default model, not the user's `model` setting. `applyFlagSettings({effortLevel: null})` goes to the model's default effort, not the user's `effortLevel` (live). To reset, re-apply the values the process had at spawn (`getSettings().applied`, read before any control call), or respawn.
+    - **Hazard: DSH saves every picker choice as the profile default.** `session.selectModel` (composer seat and `/model`) records the session's `model/selection` and also calls `agentDefaultModel.saveSelection()`, which edits the DSH profile patch. After a user picks a Claude model, a new **Standard** DSH session routes to our provider and fails (live). The design must avoid the DSH `selectModel` path for Claude choices (see Round 3).
+    - A fork carries the parent's `model/selection` only if the cut is after it. An earlier cut takes the current DSH default (live).
 
 ---
 
@@ -242,6 +248,7 @@ After a crash with an open turn, the loop's resume adds `interruptedTurnClosers`
 5. New: the clash names `/model`, `/export`, `/feedback` (and `/permission`) stay with DSH in our preset. To send Claude's own `/model …` or `/export` to the CLI, the plugin needs an agent-scoped Host command (writes `command/*`) or a client claim that cannot outrank `ui-commands` (registration order, `P/dsh-client-ui-input-trigger/lib/client.js:1280-1288`). A design choice.
 6. New: a one-shot child is never resumed for prompts, but its header `agentPreset` decides what a cold resume would mount. Set it to our preset id and also append `agent-preset/selected` in the child (the probe left `standard` and the header label showed "Standard mode").
 7. New: how much of a Claude subagent stream to write into the child, given that the SDK gives whole child messages and no child deltas (`sdk-surface`). Live child frames would then be one chunk per message (**unverified** visually).
+8. New (Round 3): how to give Claude sessions a model picker that does not call DSH `session.selectModel` (which saves the DSH profile default). The options and what is still **unverified** are in Round 3 §R3.5.
 
 ---
 
@@ -348,3 +355,66 @@ Fork while live (`r2-sdk.mjs forklive`):
 - The source ran `sleep 12` in a turn. Two forks started meanwhile: `resume + forkSession` at the tip, and with `resumeSessionAt` at the first assistant uuid. Both got new session ids and answered from the shared history ("PAPAYA").
 - The source finished its turn normally, answered a later turn, and its transcript still parsed (49 lines, 0 bad).
 - The tip fork lost the in-flight turn: its transcript has the user prompt, then a synthetic assistant "No response requested." So fork only at a completed assistant uuid, which is also what DSH's default fork boundary gives.
+
+---
+
+## Round 3
+
+One question from the critic (§6.1 item 1, requirement R1.4): how the plugin's model catalog, the DSH model picker and the inherited `model/selection` events fit with "never pass `--model`", and with `setModel` for a per-session choice.
+
+Probes (private scratch):
+- `m1.mjs`: SDK probes on the user's CLI 2.1.318, from a clean env, in a scratch git repo whose `.claude/settings.local.json` sets `model: claude-sonnet-5-5` and `effortLevel: low` (this stands in for "the user's settings"). No `model` option is passed. Modes: `A` (controls, then one Haiku and one Sonnet turn), `H` + `R` (a Haiku session, then a resume), `S` (the `getSettings().sources` shape). Total cost about $0.05.
+- `topup-model-probe`: a throwaway plugin (a catalog-only provider `tm` with rows "Your Claude settings" and "Haiku 5.5", plus a preset whose scripted driver logs `modelSelection`, `agent.model.current()`, `agent.options` and the session's `model/selection` events). Run in an isolated DSH web profile on a loopback port, from a clean env, and driven by headless Chromium. No DeepSeek credentials were set, so only our provider had models.
+
+### R3.1 What DSH needs, and what a new session gets
+
+- `preStep()` throws "has no provider/model" when `agent.model.current()` is undefined (`P/dsh-agent-loop/lib/index.js:671-672`). `current()` returns the latest recorded `model/selection` (pending, else last used), else `AgentOptions.provider/model` (`P/dsh-agent/lib/index.js:181-202`).
+- A new session gets `AgentOptions` as live getters on the **DSH profile default** (`dsh-agent-default-model`), whatever the preset (`P/dsh-api-session-controller/lib/index.js:430-452`). An agent preset has no model field (`P/dsh-agent-preset/lib/types/index.d.ts`).
+- Live: a fresh session in our preset passed `deepseek-official/deepseek-flash` to the driver, with no `model/selection` event. The composer showed "Select model", because that model was not in any loaded catalog.
+- So any provider/model satisfies `preStep`. The driver must not read the DSH default as the user's choice.
+- `preStep` also resolves tools and assembles the DSH system prompt with that selection (`:673-683`). Neither makes a model call. The guard (answer 3) drops the result.
+
+### R3.2 What the DSH picker does
+
+- The composer seat (`conversation.input.model`) and `/model` share one per-session directory. Both load the **global** catalog (`session.modelCatalog()`: every registered provider, `P/dsh-api-session-controller/lib/index.js:473-520`) and submit through `session.selectModel` (`P/dsh-client-ui-model-selection/lib/client.js:752,880,2043-2058`). The catalog is not filtered by preset. **Unverified** live: with DeepSeek credentials, DeepSeek groups would also show in a Claude session (code says yes), and our rows would show in Standard sessions.
+- `selectModel` checks the model is listed, calls `llm.resolveCallConfig`, appends `model/selection` with `agent.model.select()`, **and saves the choice as the DSH profile default** (`agentDefaultModel.saveSelection`, `:704-721`). That edits the profile patch through the config editor (`P/dsh-agent-default-model/lib/index.js:53-65`). This is a DSH file, not a Claude settings file, so rule 2 is not broken. But it leaks the choice into every new DSH session.
+- Live:
+  - Picking "Haiku 5.5" wrote `model/selection {provider:'tm', model:'claude-haiku-5-5'}` in the session (no `reasoningEffort`), and added an `agent-default-model` entry with `provider: tm` to the profile patch. The next turn's driver saw `tm/claude-haiku-5-5`.
+  - A new **Standard** session then showed "Haiku 5.5 · Default" in its composer. Its first prompt reached our adapter twice (`purpose: conversation` and `purpose: session-title`) and the turn failed with our adapter's error.
+- `installModelSelection` (agent-scoped, `P/dsh-agent/lib/index.js:231-243`) adds a model-visible "[model changed: …]" user message when the route differs from the last `request/header`. Our driver writes no header, so `previous` is undefined and no notice is added. The guard would drop it anyway.
+- Effort: our rows advertise `reasoning.efforts` with no `defaultEffort`. Then `resolveCallConfig` materializes nothing, the selection carries no effort, and the picker shows "Default" (live). The picker offers only advertised levels (README "No arbitrary effort input").
+- Image admission reads `inputModalities` of the current model, and refuses images when it omits `image` (`P/dsh-api-session-controller/lib/index.js:844-849`). Every row we list must advertise `['text','image']`. With a foreign DSH default the check uses DeepSeek's metadata.
+
+### R3.3 Fork, restart and driver-side selection
+
+- `model/selection` is a known type with no v4 relationship rule (`P/dsh-session-format-v3-to-v4/lib/index.js:1260`; `P/dsh-session/lib/index.js:106`).
+- Fork (`P/dsh-api-session-controller/lib/index.js:787-800`) creates the child with `agentOptions` = the **current DSH default**, plus the inherited prefix. Live:
+  - Cut after the choice: the child inherited the `model/selection` event and the driver saw `tm/claude-haiku-5-5`.
+  - Cut before the choice (turn 1), after another session had changed the DSH default: the child had no selection event, and the driver saw the new default `tm/settings`. So the parent's later choice is not carried, and an unrelated session's choice leaks in. This is correct only if "no event" means "settings default", which is the rule below.
+- The driver may call `agent.model.select()` itself. Live: called inside a step, it appended `model/selection`. The picker then showed "current Your Claude settings". The profile patch was **unchanged** (`AgentModel.select` does not save the default). The log reloaded after a DSH restart, and the projection still held the selection.
+
+### R3.4 What the CLI does (`m1.mjs`)
+
+| Action (no `model` option at spawn) | Result |
+|---|---|
+| Spawn | `getStatus()` Model = the settings model (`claude-sonnet-5-5`). `getSettings().applied = {model, effort: 'low', …}`. `system/init` arrives only with a turn, so read the model from `getStatus()` / `getSettings()` before turn 1 (no model call). |
+| `setModel('claude-haiku-5-5')` | Status shows Haiku. The next turn's `system/init.model`, assistant `model` and `modelUsage` key are Haiku. `getSettings().effective.model` stays the settings value. The settings file mtime is unchanged. |
+| `setModel(undefined)`, `setModel('default')`, `applyFlagSettings({model: null})` | All switch to **Claude Code's default model** (here the `Default` row, a Bedrock inference profile = the account's Opus), **not** the settings model. Matches `SDK/sdk.d.ts:3044-3063` ("`model` to Claude Code's default model (not `ANTHROPIC_MODEL` or `settings.model`)"). |
+| `applyFlagSettings({effortLevel: 'high'})`, then `{effortLevel: null}` | `applied.effort` high → **medium** (the model default), while the settings say `low`. Same doc lines. |
+| Resume a session whose last turn ran on Haiku (no `model` option) | Status shows the settings model again. A per-session choice lives only in the process. |
+| `getSettings().sources` | One entry per layer: `userSettings`, `localSettings`, …, and `flagSettings` once a flag is applied. `setModel` adds nothing there. |
+| `initializationResult().models` | 9 rows on this account: `default` (resolves to the account default, here an inference-profile id), then concrete ids with `supportedEffortLevels`. The `default` row is Claude Code's default, not "your settings". |
+
+### R3.5 Answers for R1.4
+
+1. **Catalog.** Register one provider (for example `claude-code`) whose `stream()` refuses every request (as in answer 7). Rows: a first row "Your Claude settings" (id `settings`), then one row per `supportedModels()` entry (`value` as the id, `displayName` as the name, `supportedEffortLevels` as `reasoning.efforts`, no `defaultEffort`, `inputModalities: ['text','image']`). Read the list from a live session process; until one exists, list only `settings`. Do not start a probe process for it (rule 9). Do not add seed aliases (dsh-claude's mistake). Refresh with `llm/models-updated` when a session's `initializationResult()` arrives.
+2. **Explicit choice.** The driver reads the session's own and inherited `model/selection` events (`session.snapshotEvents()`), not `agent.model.current()`. The latest event that names our provider is the choice. No such event, an event for another provider, or `model: 'settings'` → no `setModel` call. So a new session runs exactly the user's `model` / `effortLevel`, with no `--model` and no effort flag (R1.4 check).
+3. **Applying it.** On a choice, call `setModel(value)`. On an effort, call `applyFlagSettings({effortLevel})` (session flag layer, no file write). Do it on the live process at once if idle, else before the next turn. Re-apply after every spawn (resume, fork, crash respawn), because a new process starts on the settings model.
+4. **Reset.** For "Your Claude settings" or effort "Default", do not send `undefined`/`null`. Re-apply the spawn values captured from `getSettings().applied` right after spawn (before any control call), or respawn with `resume`. **Unverified:** behaviour if the user edits the settings file while the session runs (the captured value would be stale; a respawn picks up the new value).
+5. **Display.** The "Your Claude settings" row can show the real model as a badge or through the `conversation.input.model.label` slot, from `getStatus()` / `getSettings().applied.model`. Shorten inference-profile ids before display (they can hold account ids; `auth-usage` §6).
+6. **Avoid DSH `selectModel` for Claude choices.** It saves the DSH profile default and breaks new Standard sessions (R3.2). Options for the design:
+   - (a) A plugin-owned picker in Claude sessions that calls a plugin Fetch route, which calls `agent.model.select()` (session-only, verified not to touch the default) and then `setModel`. Replacing the `conversation.input.model` seat shadows it in **every** session (single slot, `P/dsh-client-ui-renderer/lib/types/client/registry.d.ts:24-31`), and DSH's `ModelSelect` is not exported, so a per-preset replacement needs a way to fall back to the native seat. **Unverified**; this is the main open item. DSH's own `/model` would still call `selectModel` (it stays DSH's in our preset, answer 10).
+   - (b) Keep the native picker and accept the default leak. Then our adapter must answer DSH requests in other sessions with a clear error. Not acceptable as is: Standard sessions break.
+   - (c) Ask DSH upstream for a "session-only" selection flag on `selectModel`, or a preset-scoped default.
+7. **Fork.** Because "no event" means "settings default", a fork cut before the choice correctly runs the settings model, whatever the DSH default is. A fork cut after it re-applies the inherited choice with `setModel` on the child's first spawn.
+8. **Cost safety for tests.** Aliases may resolve to expensive models (`CLAUDE.md` §4). The probe confirms the `default` row and `setModel(undefined)` run the account default (here Opus), so tests must pick a concrete small model id.

@@ -390,15 +390,15 @@ The DSH mapping column is a best guess from package names and READMEs. All of it
 
 ## Open questions
 
-1. **Continuation turns.** Can a DSH plugin open a turn with no user message, to show the CLI's own reaction turn after a background task? If not, where do those frames go? This is for dsh-seams.
+1. ~~**Continuation turns.**~~ Answered (`dsh-seams` §3, verified): open the DSH turn with `agent.followup(<non-user notice>)`, do not write the notice as a `user/message`, and write the CLI's own step in that turn.
 2. **Workflow node feed.** May a plugin append `tool-workflow/*` events that `P/dsh-client-ui-workflow-run` renders? Can a member row open a view that is not a DSH session? This is for dsh-seams and dsh-ui-surfaces.
 3. **Child views without DSH sessions.** `P/dsh-client-ui-subagent` is built on DSH child sessions. Should Claude subagents become DSH child sessions (a native fit, but they cannot take input), or use our own read-only sidebar tab?
 4. **"Always allow".** DSH's native approval has only a one-shot grant. How do we offer the CLI's own suggestions: our own card, an extension, or a follow-up control?
 5. **Fork with a live source.** Does SDK `forkSession` give a correct copy while the source process is still running and writing? t3code closes the source first, but we must not kill its background work. This needs a live check.
-6. **Interrupt on 2.1.318.** With `perTaskStopAffordance: true`, does `interrupt()` really spare background agents and workflows in open-input mode? This is a live check for sdk-surface.
+6. ~~**Interrupt on 2.1.318.**~~ Answered (`sdk-surface` answer 7, live): with `perTaskStopAffordance: true`, `interrupt()` spares background agents and a running workflow.
 7. **Progress volume.** How often does the CLI send `workflow_progress`, and how large is a frame? This decides whether progress goes into the DSH log or a side store.
-8. **Approvals with no open turn.** t3code denies them. We must show them (rule 7). Which DSH surface accepts an approval outside a turn?
+8. ~~**Approvals with no open turn.**~~ Answered (`dsh-ui-surfaces` Round 2 Q1, live): `ctx.approval` throws outside a turn, but a plugin composer takeover with a pending interaction works, and so does `ctx.userQuestions.ask()` on the root agent.
 9. **`forwardSubagentText`.** Confirm that it changes only what is streamed to the host, not what the model sees or does. Measure how much extra traffic it adds.
 10. **Dialog kinds.** Which `request_user_dialog` kinds does CLI 2.1.318 send, and which have a TUI equivalent we should support?
-11. **Question previews.** Does the DSH question card render option previews? Render them as Markdown, because changing `previewFormat` changes the tool schema.
+11. ~~**Question previews.**~~ Answered: the DSH question card has no preview field (`dsh-ui-surfaces` §3), so previews need a plugin view. Set `previewFormat: 'markdown'`, the TUI's own default, unless the user's env sets it (`raw-baseline` Round 2), and render previews as Markdown.
 12. **Ultracode keyword.** Should typed DSH messages carry `origin: {kind: "human"}`, so the `ultracode` keyword works as in the TUI? The user did type them, but this needs a check against rule 3.

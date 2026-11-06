@@ -52,12 +52,12 @@ Legend:
 
 ### 3.1 `previewFormat`: resolved
 
-`raw-baseline` Round 2 is the answer: set `'markdown'` unless the user set the env var. **Stale text** that still says "not raw": `sdk-surface` §2 (the `previewFormat` row) and `reference-ux` open Q11.
+`raw-baseline` Round 2 is the answer: set `'markdown'` unless the user set the env var. The stale text in `sdk-surface` §2 (the `previewFormat` row) and `reference-ux` open Q11 is fixed (§3.4).
 
 ### 3.2 Silencing `dsh-tool-jobs`: resolved in practice, partly open
 
 - Verified path: keep a `ctx.jobs.wait()` pending per job, so `tool-jobs` sees `awaited: true` and stays silent (`dsh-seams` answer 4, probe `jobs-awaited.mjs`).
-- `dsh-ui-surfaces` §3 and open Q2 still suggest `attachController()` (**unverified**). The design should use the verified path.
+- `dsh-ui-surfaces` §3 and open Q2 now point to the verified path (fixed, §3.4).
 - Still not tested: a pending wait across a DSH restart or session close (rings and waits are process-local, `dsh-ui-surfaces` §3), and whether a job-list Stop still reaches our `kill` while a wait is pending.
 
 ### 3.3 Session titles: resolved
@@ -66,19 +66,19 @@ Legend:
 
 ### 3.4 Stale round 1 text that now contradicts Round 2
 
-The design phase must not rely on these lines. The note owners should fix them.
+**Fixed** (topup pass): each line below was edited in its note to agree with Round 2. The `LOCAL_ENV.md` row is a local file and is not part of this pass.
 
-| Note and place | Stale claim | Round 2 answer |
-|---|---|---|
-| `dsh-ui-surfaces` answers table, `/` menu row; §6 Host commands (`README.md:27` quote, R7.1 bullet) | Unknown commands are rejected; `plugin:cmd` and clashes need a client source; a Claude command needs a Host command or claim | Unclaimed lines fall through to a plain user prompt (`dsh-seams` R2.3, live) |
-| `dsh-ui-surfaces` answers table, Subagents row; §4 Subagent catalog | Navigable rows need a child session; whether a plugin may write them is unverified | A plugin can create them (`dsh-seams` R2.1, live) |
-| `dsh-ui-surfaces` §4 Workflow run node ("Only top-level calls through `dsh-tool-workflow` produce these records") | Implies a plugin cannot feed the node | A plugin can write the events (`dsh-seams` R2.4, live) |
-| `dsh-ui-surfaces` open Q1 and Q3 | Open | Answered by `dsh-seams` R2.1, R2.3, R2.4 |
-| `dsh-ui-surfaces` Jobs row, §3, open Q2 | Use `attachController()` | Use a pending `wait()` (§3.2) |
-| `sdk-surface` §2, `previewFormat` row | Not raw | Matching the TUI (`raw-baseline` Round 2) |
-| `sdk-surface` §6, "Workflow agents' live output" | No source found | Workflow agents can be child sessions (`dsh-seams` R2.4), but the **source** of their live output is still open (§4 item 4) |
-| `reference-ux` open Q1, Q6, Q8, Q11 | Open | Answered by `dsh-seams` §3, `sdk-surface` answer 7, `dsh-ui-surfaces` Q1, `raw-baseline` Round 2 |
-| `LOCAL_ENV.md` (local) | DSH 0.2.1-rc.5 | Notes cite 0.2.2-rc.1; `dsh-seams` re-ran on both |
+| Note and place | Stale claim | Round 2 answer | Status |
+|---|---|---|---|
+| `dsh-ui-surfaces` answers table, `/` menu row; §6 Host commands (`README.md:27` quote, R7.1 bullet) | Unknown commands are rejected; `plugin:cmd` and clashes need a client source; a Claude command needs a Host command or claim | Unclaimed lines fall through to a plain user prompt (`dsh-seams` R2.3, live) | Fixed |
+| `dsh-ui-surfaces` answers table, Subagents row; §4 Subagent catalog | Navigable rows need a child session; whether a plugin may write them is unverified | A plugin can create them (`dsh-seams` R2.1, live) | Fixed |
+| `dsh-ui-surfaces` §4 Workflow run node ("Only top-level calls through `dsh-tool-workflow` produce these records") | Implies a plugin cannot feed the node | A plugin can write the events (`dsh-seams` R2.4, live) | Fixed |
+| `dsh-ui-surfaces` open Q1 and Q3 | Open | Answered by `dsh-seams` R2.1, R2.3, R2.4 | Fixed |
+| `dsh-ui-surfaces` Jobs row, §3, open Q2 | Use `attachController()` | Use a pending `wait()` (§3.2) | Fixed |
+| `sdk-surface` §2, `previewFormat` row | Not raw | Matching the TUI (`raw-baseline` Round 2) | Fixed |
+| `sdk-surface` §6, "Workflow agents' live output" | No source found | Workflow agents can be child sessions (`dsh-seams` R2.4), but the **source** of their live output is still open (§4 item 4) | Fixed |
+| `reference-ux` open Q1, Q6, Q8, Q11 | Open | Answered by `dsh-seams` §3, `sdk-surface` answer 7, `dsh-ui-surfaces` Q1, `raw-baseline` Round 2 | Fixed |
+| `LOCAL_ENV.md` (local) | DSH 0.2.1-rc.5 | Notes cite 0.2.2-rc.1; `dsh-seams` re-ran on both | Open (local file) |
 
 ---
 

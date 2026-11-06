@@ -19,7 +19,7 @@ Evidence aliases:
 3. **Raw start options.** Use `systemPrompt: {type:'preset', preset:'claude_code'}` with no `append`. **Omitting `systemPrompt` is not raw**: the SDK then sends an empty custom system prompt (`SDK/sdk.mjs ~54175`: `if (i === void 0) f = ""`). Pass `settingSources: ['user','project','local']` (omitting it also loads all three, `SDK/sdk.d.ts:2352-2361`, but being explicit is clearer). Pass the user's env (with host Claude Code variables stripped). Do not pass `model`, `effort`, `permissionMode`, `tools`, `settings` or `thinking`. Then the only CLI flags are `--output-format stream-json --verbose --input-format stream-json --permission-prompt-tool=stdio --setting-sources=user,project,local --include-partial-messages` (probe2 A, `ps`).
 4. **What the SDK adds by itself.** Env `CLAUDE_CODE_ENTRYPOINT=sdk-ts` (only when it is not already set, so strip a host value first), `CLAUDE_AGENT_SDK_VERSION`, and `CLAUDE_CODE_SDK_READS_SESSION_STATE=1` (probe2 A). It also **sets `process.env.CLAUDE_AGENT_SDK_VERSION` in the host process** (`SDK/sdk.mjs ~54180`; live). DSH child processes then inherit it. This is harmless, but a test should expect it.
 5. **Initialize options we need.** `perTaskStopAffordance: true` (Stop spares background agents and workflows), `includePartialMessages: true` (live text), `forwardSubagentText: true` (child text and thinking for the subagent tree), `canUseTool` (approvals and AskUserQuestion), `onElicitation` (without it, MCP elicitations are **declined automatically**, `SDK/sdk.d.ts:1810-1828`). None of these change what the model sees. Leave `promptSuggestions` and `agentProgressSummaries` off by default: they make extra model calls (cheap, on the same process), so they should be user opt-ins.
-6. **Every control we need exists and works on 2.1.318.** Live-tested: `interrupt`, `stopTask`, `setPermissionMode`, `setModel`, `applyFlagSettings`, `supportedCommands`, `supportedModels`, `supportedAgents`, `mcpServerStatus`, `toggleMcpServer`, `reconnectMcpServer`, `getContextUsage`, the usage API, `askSideQuestion`, `generateSessionTitle` (works, but see answer 14), `forkSession`, `resume`, `resumeSessionAt`, `accountInfo`, and steering with `priority`. Not tested live: `onElicitation`, `backgroundTasks` (Ctrl+B), `rewindFiles`, `rate_limit_event` (Bedrock has no plan limits).
+6. **Every control we need exists and works on 2.1.318.** Live-tested: `interrupt`, `stopTask`, `setPermissionMode`, `setModel`, `applyFlagSettings`, `supportedCommands`, `supportedModels`, `supportedAgents`, `mcpServerStatus`, `toggleMcpServer`, `reconnectMcpServer`, `getContextUsage`, the usage API, `askSideQuestion`, `generateSessionTitle` (works, but see answer 14), `forkSession`, `resume`, `resumeSessionAt`, `accountInfo`, and steering with `priority`. `onElicitation` was tested live in Round 3b (form, decline, URL, interrupt). Not tested live: `backgroundTasks` (Ctrl+B), `rewindFiles`, `rate_limit_event` (Bedrock has no plan limits).
 7. **Stop.** `interrupt()` aborts the turn. The process stays alive. Background **Bash** tasks survived an interrupt with and without `perTaskStopAffordance`. A background **subagent** was killed by the interrupt without the flag, and survived and delivered its result with the flag (probe4 N vs P). With the flag, a running **workflow** and two background agents also survived an interrupt during a foreground tool (probe7 S). An interrupt during a foreground tool gives `terminal_reason: aborted_tools`. An idle interrupt returns `{still_queued: []}` and emits **no** `result`, so the plugin must not wait for one. `stopTask` on a workflow or on one background agent stops only that task (and the shells it started), with `task_notification status:"stopped"`; the other tasks keep running (probe7 S).
 8. **Background completions.** When a background task finishes while the session is idle, the CLI **starts a turn by itself**: `task_notification`, then `system/init`, `status: requesting` with no `user_message_uuids`, assistant text and a `result` (probe2 B, probe3, probe6 W). The plugin needs an "unprompted turn" path. It must not hold a DSH turn open while waiting for it.
 9. **Undocumented but present.** `workflow_progress` (an array of phases and agents on `system/task_progress`), `command_lifecycle` (per-message `queued`/`started`/`completed`), `system/session_state_changed` (on the wire, but the SDK consumes it and does not yield it), and `askSideQuestion`, `generateSessionTitle`, `getSettings`, `getStatus`, `getPlan`, `listPermissionRules`, `getHooksListing` and `getTaskOutput` on `Query` (in the bundle, not in the types). Wrap them in a thin adapter with runtime checks.
@@ -31,6 +31,10 @@ Evidence aliases:
 15. **Side questions (`/btw`).** `askSideQuestion` answers while the main turn streams and while a foreground tool runs, in under a second, with the right context (probe7 P). The CLI keeps no side-question history for SDK hosts (`threadHistory: false`), so the plugin keeps it: pass `history: [{question, response, fallback_notice?}]` with the last 20 main-thread, non-synthetic exchanges, as the TUI does (CLI 2.1.318 binary: `.slice(-20)`, filtered by agent). Live: with history the model recalled the earlier side answer; without it, it did not.
 16. **Agent teams.** With the teams flag on (here from the user's settings env), CLI 2.1.318 in SDK mode has no `TeamCreate` tool. Teammates are background `local_agent` tasks started by the `Agent` tool with `name` and `team_name`. `SendMessage` calls from a teammate arrive as forwarded child `tool_use` blocks (`to`, `message`, `recipient_kind:"name"`). A message to a finished teammate resumes it: a new `task_started` with the same `task_id`, a new `run_id`, and `prompt: "<agent-message from=\"alice\">ping</agent-message>"`. Teammate transcripts come from `listSubagents()` / `getSubagentMessages()` (probe7 M). `send_task_message` is **not** a way to message a teammate or agent: 2.1.318 answers "Unsupported control request subtype: send_task_message" (live, probe7 M and S). The user can reach a teammate only by asking the main agent.
 17. **Empty results.** After some CLI-started turns, the CLI sends an extra `result` with `num_turns: 0`, `terminal_reason: null`, empty `result` and zero usage (probe7 S, M). The plugin must skip it.
+18. **Main-thread agent (R6.4, Round 3).** The SDK `agent: '<name>'` start option adds exactly one CLI flag, `--agent=<name>`, the same flag a TUI user types (`SDK/sdk.mjs ~51357`; probe8 A `ps` args). The agent's prompt then **replaces** the `claude_code` system prompt (1134 → 27 tokens in `getContextUsage`), as `--agent` does in the TUI. So: pass it only when the user picks an agent for a new session, never by default. The user's own settings key `agent` is read by the CLI at start-up with no flag (CLI 2.1.318 binary; not live-tested). `applyFlagSettings({agent})` is the documented session-only switch (`SDK/sdk.d.ts:3038-3064`), but on 2.1.318 it **takes effect only before the first turn**. After the first turn it is accepted, `getSettings()` shows it, a transcript `agent-setting` entry is written, and yet the system prompt does not change (probe8 B, E, F). So "change the agent mid-session" is **not supported by the CLI**. Offer the picker for a new session (spawn option, or `applyFlagSettings` before the first message) and lock it after the first turn. No stream frame reports the agent, and `system/init` has no `agent` field: the plugin must remember the choice itself. See §8.1.
+19. **Live workflow-agent output (R6.5, Round 3).** Workflow agents are never forwarded on the stream, even with `forwardSubagentText` (probe6 W, probe8 W: 0 child frames). Their transcripts are written **live, one line per message**, under `<session>/subagents/workflows/<wf runId>/agent-<agentId>.jsonl`. In probe8 W each `tool_use`, `tool_result` and final text appeared in the file within one 500 ms poll. `listSubagents()` lists workflow agents and `getSubagentMessages()` reads them (it returns the user/assistant chain only). Join the `agentId` from `workflow_progress`. The folder comes from the Workflow tool result (`tool_use_result.transcriptDir` and `runId`, a `wf_…` id that differs from `task_started.run_id`). `workflow_progress` is event-driven, not timed: 7 `task_progress` frames for a 2-agent, 18 s run (one per agent start, tool call and finish), each 1.2–1.5 KB with the full list, plus usage-only frames of about 400 bytes. Text arrives as whole messages, not deltas, as for other subagents. See §8.2.
+20. **Plan approval with a mode (Round 3b).** ExitPlanMode's `can_use_tool` has no suggestions, so the host builds the TUI's choices: allow with no updates (the CLI restores the pre-plan mode, the TUI's "use auto mode"), or allow + `updatedPermissions: [{type:'setMode', mode, destination:'session'}]` for `acceptEdits` / `default` / `bypassPermissions`. One `status.permissionMode` frame follows; nothing is written to settings. "Keep planning" works when the denial carries the CLI's own rejection text and the user's feedback goes as a normal user message with `priority: 'next'`; a feedback-only denial message was ignored by the model once (Round 3b, probe-r3b C, H).
+21. **MCP elicitation (Round 3b).** With `onElicitation` set, the CLI forwards form and URL elicitations (`control_request` subtype `elicitation`; the CLI declares both modes to MCP servers). The callback's `accept` + `content`, `decline` and `cancel` reach the server unchanged. URL completion arrives as `system/elicitation_complete`. An interrupt cancels a pending elicitation (`control_cancel_request`, `signal` aborts) (probe-r3b E, I).
 
 ---
 
@@ -64,14 +68,14 @@ Telemetry: the SDK has an internal feature-event queue (`tengu_feature_ok` etc.)
 | `systemPrompt` | `{type:'preset', preset:'claude_code'}` | Omitted → `""` → `initialize.systemPrompt: [""]` (`SDK/sdk.mjs ~54175`, `~52546`). With the preset, `initialize` carries no `systemPrompt` key, so the CLI default prompt is used (probe2 B wire: `initialize` was only `{"subtype":"initialize","perTaskStopAffordance":true}`). The raw-baseline note compares the actual prompt text. |
 | `settingSources` | `['user','project','local']` | Omitted also means all sources (`SDK/sdk.d.ts:2352-2361`). `[]` disables them. |
 | `env` | The user's env minus host-session variables | With `env` given, the SDK copies it and adds only the three variables above (`SDK/sdk.mjs ~54276-54286`). |
-| `model`, `effort`, `permissionMode`, `thinking`, `tools`, `allowedTools`, `settings`, `agents`, `mcpServers` | Omit | Each one maps to a CLI flag (`SDK/sdk.mjs ~51336-51409`) or to an `initialize` field. Omitted means the user's settings decide. `permissionMode` omitted picks `permissions.defaultMode` like `claude -p` (`SDK/sdk.d.ts:2057-2062`). |
+| `model`, `effort`, `permissionMode`, `thinking`, `tools`, `allowedTools`, `settings`, `agent`, `agents`, `mcpServers` | Omit (`agent` only when the user picks a main-thread agent for a new session, answer 18) | Each one maps to a CLI flag (`SDK/sdk.mjs ~51336-51409`) or to an `initialize` field. Omitted means the user's settings decide. `permissionMode` omitted picks `permissions.defaultMode` like `claude -p` (`SDK/sdk.d.ts:2057-2062`). |
 | `canUseTool` | Set | Adds `--permission-prompt-tool=stdio`. Without it the CLI cannot ask. |
 | `includePartialMessages` | `true` | Adds `--include-partial-messages` (live stream frames). |
 | `perTaskStopAffordance` | `true` | `initialize` field (`SDK/sdk.d.ts:1866-1884`). See §4. |
 | `forwardSubagentText` | `true` | Subagent text and thinking are forwarded with `parent_tool_use_id`. Without it, only tool_use/tool_result blocks are sent (`SDK/sdk.d.ts:1940-1946`). Live: child `user` and `assistant` messages carry `parent_tool_use_id`, `agent_id`, `subagent_type` and `task_description` (probe6 W). Child **stream deltas** were not forwarded. Child text arrives as whole messages. |
 | `onElicitation` | Set | Missing means auto-decline (`SDK/sdk.d.ts:1810-1828`). Request fields: `serverName`, `message`, `mode` (`form`/`url`), `url`, `elicitationId`, `requestedSchema`, `title`, `displayName`, `description` (`SDK/sdk.d.ts:752-771`). Completion: `system/elicitation_complete`. Not tested live. |
 | `onUserDialog` + `supportedDialogKinds` | Optional | CLI-rendered blocking dialogs (for example `refusal_fallback_prompt`). Without a declared kind, the CLI never emits it and uses the no-dialog path (`SDK/sdk.d.ts:1829-1864`). |
-| `toolConfig.askUserQuestion.previewFormat` | Leave unset unless the UI needs HTML | It sets env `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which changes the tool's instructions to the model. So it is **not raw**. The default previews (plain strings) arrived live (probe6 Q). |
+| `toolConfig.askUserQuestion.previewFormat` | Set `'markdown'`, unless the user's env already sets `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` (then pass that through). Never `'html'` | It sets env `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT`, which changes the tool's instructions to the model. `'markdown'` is the TUI's own default, so setting it **matches the TUI**; leaving it unset is the SDK-mode deviation (`raw-baseline` Round 2). With it unset, plain-string previews arrived live (probe6 Q). |
 | `verbatimPrompts` | `false` | When true, it skips `@path` expansion, slash commands and the turn-start attachment pass (`SDK/sdk.d.ts:1947-1970`). That is not CLI behaviour. |
 | `promptSuggestions`, `agentProgressSummaries` | Off by default; a user opt-in | Extra model calls (`SDK/sdk.d.ts:2140-2165`). |
 | `enableFileCheckpointing` | Opt-in (rewind with file restore) | Sets `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING=true` (`SDK/sdk.mjs ~54280`). **Unverified:** whether the TUI checkpoints by default. If it does, enabling this is the raw match. |
@@ -98,7 +102,7 @@ Wire names are the `control_request.request.subtype` values. Declared means the 
 | `initializationResult()` / `reinitialize()` | `initialize` | yes | `commands`, `models`, `agents`, `account`, output styles; about 470 ms after spawn (probe2 A). | `reinitialize` redelivers pending `can_use_tool` requests after a transport gap. |
 | `supportedCommands()` | from init | yes (`:3121`) | 57 entries, the same count as `system/init.slash_commands` (probe2, probe5). Each entry has `name`, `description`, `argumentHint`, `builtin`. | Live updates: `system/commands_changed` (fired 3× during start-up as plugins and MCP loaded). `terminal_slash_commands` in init lists TUI-only ones (`doctor`, `color`, `focus`, `reload-plugins`). |
 | `supportedModels()` | from init | yes (`:3127`) | 8 models; each has `value`, `resolvedModel`, `displayName`, `description`, `supportsEffort`, `supportedEffortLevels`. | `resolvedModel` shows what an alias really runs (here `default` → the user's Opus). |
-| `supportedAgents()` | from init | yes (`:3133`) | User, plugin and built-in agents. | Matches `system/init.agents`. |
+| `supportedAgents()` | from init | yes (`:3133`) | User, project, plugin and built-in agents (probe8 A: a new project agent was listed). | Matches `system/init.agents`. Picking one for the main thread: answer 18. |
 | `mcpServerStatus()` | `mcp_status` | yes (`:3139`) | `pending` right after start, then `connected` with `serverInfo`, `config`, `scope`, `source`, `tools` (probe2, probe6 M). | `init.mcp_servers` is always `pending` at start. Poll or re-ask after a `commands_changed`. |
 | `toggleMcpServer(name, on)` | `mcp_toggle` | yes (`:3286`) | `disabled` / `connected` (probe6 M). | **Persists** `projects[cwd].disabledMcpServers` in `~/.claude.json` (live). `settings.json` was not touched. |
 | `reconnectMcpServer(name)` | `mcp_reconnect` | yes (`:3278`) | Works; an unknown name throws `Server not found: …` (probe6 M). | |
@@ -111,7 +115,7 @@ Wire names are the `control_request.request.subtype` values. Declared means the 
 | `renameSession(title)` | `rename_session` | the function is declared (`:3382`), the method is not | not tested | |
 | `getSettings()` | `get_settings` | undeclared | `{effective, sources, applied}`. Read-only. | Shows the settings layers, so "open settings.json" can show which file set a key. |
 | `getStatus()`, `getPlan()`, `listPermissionRules()`, `getHooksListing()` | `get_status`, `get_plan`, `list_permission_rules`, `get_hooks_listing` | undeclared | All answered (probe6 W). `getStatus` is the `/status` panel as sections and rows. `getPlan` is `{exists}`. The rules list includes source and editability. The hooks list has counts per event. | Read-only and useful for panels. |
-| `getTaskOutput(taskId)` | `get_task_output` | undeclared | For a workflow it gave: "no shell or Monitor task with that task_id". | Shells and Monitor only. |
+| `getTaskOutput(taskId)` | `get_task_output` | undeclared | For a workflow it gave: "no shell or Monitor task with that task_id". | Shells and Monitor only. Workflow agent output comes from transcripts (answer 19). |
 | `rewindFiles(uuid, {dryRun})` | `rewind_files` | yes (`:3249`) | not tested | Needs `enableFileCheckpointing`. |
 | `cancelAsyncMessage(uuid)` | `cancel_async_message` | undeclared | not tested | Withdraws one queued message. |
 | `setMcpServers`, `reloadPlugins`, `reloadSkills`, `reloadOutputStyles` | … | yes | not tested | `setMcpServers` adds servers, so it is not for normal use (it would add tools the user did not configure). Reloads are fine on user request. |
@@ -198,7 +202,7 @@ Foreground Bash and agents also emit `task_started` / `task_notification` with `
   "lastProgressAt":0,"tokens":14925,"toolCalls":0,"durationMs":876,"resultPreview":"alpha"}]
 ```
 
-Agent `state` went `start` → `done`. The CLI also tracks other states in its own UI code (**unverified** list). The CLI drops `task_progress` frames that have neither `summary` nor `workflow_progress` before writing them (CLI 2.1.318 binary). Workflow agent messages are **not** forwarded on the stream, even with `forwardSubagentText` (probe6 W). Live agent output needs the agent transcripts (`getSubagentMessages`, or the `transcriptDir` in the Workflow tool result). That is **unverified** for workflows.
+Agent `state` went `start` → `done`. The CLI also tracks other states in its own UI code (**unverified** list). The CLI drops `task_progress` frames that have neither `summary` nor `workflow_progress` before writing them (CLI 2.1.318 binary). Workflow agent messages are **not** forwarded on the stream, even with `forwardSubagentText` (probe6 W, probe8 W). Live agent output comes from the agent transcripts, which the CLI writes live (Round 3, §8.2). Agent states seen: `start`, `progress`, `done` (probe8 W), and `error` after a stop (probe7 S).
 
 ### Compaction, limits, misc
 
@@ -220,7 +224,8 @@ Agent `state` went `start` → `done`. The CLI also tracks other states in its o
 
 - ~~Interrupt during a running foreground tool~~: done in round 2 (`aborted_tools`, probe7 S).
 - `onElicitation`, `backgroundTasks`, `rewindFiles`, `mcpAuthenticate` and `cancelAsyncMessage` were not run live.
-- Workflow agents' live output: there are no stream frames, so the source must be found (agent transcripts?).
+- ~~Workflow agents' live output~~: answered in Round 3 (§8.2): tail `<transcriptDir>/agent-<agentId>.jsonl` (written live), as t3code does (`reference-ux` answer 3); `getSubagentMessages()` also works for workflow agents.
+- Main-thread agent mid-session: `applyFlagSettings({agent})` after the first turn is accepted but has no effect on 2.1.318 (Round 3, §8.1). A later CLI may fix it; re-test with the `getContextUsage` check in §8.1.
 - `session_state_changed` is hidden by the SDK. Confirm that `status` / `result` / `command_lifecycle` are enough to drive busy and idle, including CLI-started turns.
 - How far the user's CLI can drift ahead of, or behind, the pinned SDK before a control breaks.
 - ~~`send_task_message`~~: unsupported on 2.1.318 (round 2). A later CLI may add it; detect it by trying once and treating the error as "not supported".
@@ -290,3 +295,129 @@ The workflow agent's shell had no `parent_task_id`, as `SDK/sdk.d.ts:3859` says 
 | Same, no `history` | 0.8 s | NONE |
 
 None of the side questions reached the transcript. In the binary, the SDK handler runs in the background, uses the live messages, and drops a still-streaming assistant message from the context. The TUI keeps `btwHistory`: the last 20 exchanges, per agent, appending only non-synthetic answers. The SDK path passes `threadHistory: false`, so the host must keep and send that list. Accepted fields: `question`, `response`, optional `fallback_notice` (CLI 2.1.318 binary).
+
+---
+
+## 8. Round 3: main-thread agent and live workflow output
+
+Closes critic §6.1 items 3 (R6.4) and 4 (R6.5). Probe: `probe8` (sessions A–H for agents, W for workflows), in the local scratch folder. Same setup as round 2: the user's CLI 2.1.318, `claude-sonnet-5-5`, a scratch git repo, a clean env. The repo has two project agents, `pirate` ("Start every reply with the word ARRR") and `parrot` ("… SQUAWK"), both `model: inherit`. Total cost about $0.45.
+
+A reply that starts with ARRR is weak evidence after the first turn, because the model can copy its own earlier replies. So the clean signal is the `System prompt` category of `getContextUsage()`: 1134 tokens for the `claude_code` preset, 27 for either test agent. It needs no model call.
+
+### 8.1 Main-thread agent (R6.4)
+
+| Case | Result |
+|---|---|
+| Start with `agent: 'pirate'` (A, F) | Spawn args gain only `--agent=pirate`. System prompt 27 tokens; reply "ARRR, …". The transcript gets `{"type":"agent-setting","agentSetting":"pirate"}` entries. `system/init` has no agent field; `getSettings()` and `getStatus()` do not show it. |
+| No option; `applyFlagSettings({agent:'pirate'})` **before** the first message (C, E) | Works: 1134 → 27 tokens; both replies "ARRR". `applyFlagSettings({agent:null})` before the first message goes back to 1134 (E). |
+| No option; switch to `pirate` **after** turn 1 (B) | Accepted, no error, no stream frame. `getSettings().effective.agent` and the flag layer say `pirate`; an `agent-setting pirate` entry is written. But the next replies have no ARRR (turns 2 and 4). |
+| No option; switch to `parrot` after turn 1 (E) | Accepted; system prompt stays 1134; reply has no SQUAWK. |
+| Started with `pirate`; switch to `parrot` after turn 1 (F) | Accepted; an `agent-setting parrot` entry is written; system prompt stays 27; reply "ARRR", not SQUAWK. |
+| Started with `pirate`; `agent:null` after turn 1 (D, F) | Accepted; system prompt stays 27; reply still "ARRR". No `agent-setting` entry is written for the clear. |
+| Unknown name (B) | Rejected: `Agent "nope" not found`. |
+| `--resume` with no `agent` option (G, H) | A session **started** with an agent keeps an agent-sized prompt (27 tokens; F, C). Session B, whose only agent switch came after turn 1, resumes with the preset (1134), even though its transcript ends with `agent-setting pirate`. Which entry the CLI restores from is **unverified**. |
+
+Code evidence (CLI 2.1.318 binary):
+- Start-up reads the main-thread agent from the `--agent` flag, else from the settings key `agent` (the `Settings.agent` field, `SDK/sdk.d.ts:9527`). Seating an agent sets its prompt as the system prompt only when no custom system prompt is set, applies its `model` unless the user named a model, and queues its `initialPrompt` (frontmatter) as a first user turn. With the preset, the SDK sends no `systemPrompt`, so this is the TUI's behaviour.
+- The `apply_flag_settings` handler has an "agent switch" path (`requestedAgent`, `preAgentSystemPrompt`, error texts "agent must be a string or null", `Agent "<x>" not found`). It replaces the system prompt only when the session has no system prompt yet, or when the current one is the old agent's prompt. That fits the live result: after the first turn the switch updates the app state and the transcript, but not the prompt. Whether it changes the agent's tool limits or model mid-session was not tested (**unverified**).
+- There is no `set_agent` control and no TUI command to switch the main-thread agent (`/agents` is a hidden "(removed)" command). The TUI picks the agent only at launch (`--agent`) or from settings.
+
+**Design consequences (R6.4):**
+- List agents from `supportedAgents()` (name, description, model). It includes user, project, plugin and built-in agents.
+- Offer "agent for this session" on a **new** session only. Pass `agent` at spawn (it mirrors `claude --agent`), or call `applyFlagSettings({agent})` before the first message. Lock the picker after the first turn and say why ("Claude Code cannot change the main agent mid-session"). Do not offer the switch mid-session even though the control accepts it: it would show a choice that does nothing.
+- Default: pass nothing, so the user's settings `agent` (if any) applies, as in the TUI.
+- Remember the choice per session (no wire field reports it). On resume, pass the same `agent` again rather than rely on the transcript restore, which is unclear.
+- Show that the agent replaces the system prompt and can set the model and an `initialPrompt`. That is the user's own agent file, so it is raw.
+
+### 8.2 Live workflow-agent output (R6.5)
+
+Session W: a 1-phase workflow with two parallel agents: `w1` runs three `sleep 4; echo …` Bash calls one at a time, `w2` replies "beta". `perTaskStopAffordance` and `forwardSubagentText` on. The probe polled `listSubagents()` / `getSubagentMessages()` and the transcript folder every 500 ms.
+
+| Fact | Evidence |
+|---|---|
+| No workflow-agent `assistant`, `user` or `stream_event` frame reached the SDK stream (0 frames with `parent_tool_use_id`). | W messages |
+| The Workflow tool result (`tool_use_result`) has `status: "async_launched"`, `taskId`, `runId` (`wf_…`), `transcriptDir`, `scriptPath`. The `wf_…` run id is **not** the `task_started.run_id`. | W, probe6 W |
+| Folder layout: `<projects>/<cwd-slug>/<session>/subagents/workflows/<wf runId>/` with `journal.jsonl` (`launched`, then `started {agentId, label, phase}` and `result {agentId, result}` per agent), `agent-<agentId>.jsonl` and `agent-<agentId>.meta.json` (`agentType: "workflow-subagent"`, `description` = label, `workflowPhase`). | W, probe6 W |
+| The agent file is appended **live**, one JSON line per message. Seen per 500 ms poll: first user message at 0.5 s after launch, then each `tool_use`, `tool_result` and the final `text` within one poll of the step. The lines are whole messages (no text deltas). The file also holds bulky non-chat lines (attachments, `prompt_snapshot`, `api-request*`): 155 KB for 9 chat messages. | W poll |
+| `listSubagents(sessionId)` includes workflow agents as soon as their file exists. `getSubagentMessages(sessionId, agentId)` returns only the chain: `user`, `assistant` (text, `tool_use`), `user` (`tool_result`). It re-reads the whole file each call. | W poll; offline check on the probe6 session |
+| The first two user messages are the CLI's own workflow framing ("[Workflow harness — user request] …", "[Workflow harness — computed task] …"). | W transcript |
+| A workflow agent's Bash call also shows on the main stream as `task_started` / `task_notification` with `task_type: "local_bash"`, `is_backgrounded: false`, no `parent_task_id`, and `tool_use_id` = the agent's own `tool_use` id (found only in that agent's file). | W messages + transcript grep |
+| `workflow_progress` rate: 7 `task_progress` frames for the workflow in 18.5 s. They come on events (agent start, each tool call, agent done), not on a timer. 5 frames carried the full list (1.2–1.5 KB for 2 agents); 2 carried only `usage` and `summary` (about 400 bytes). Agent fields seen: `state` (`start` → `progress` → `done`), `agentId` (missing until the agent starts), `tokens`, `toolCalls`, `lastToolName`, `lastToolSummary` (here the shell command), `startedAt`, `lastProgressAt`, `durationMs`, `resultPreview`, `promptPreview`. | W messages |
+| `task_progress.usage` is cumulative for the whole run (`total_tokens`, `tool_uses`, `duration_ms`). | W messages |
+
+**Design consequences (R6.5):**
+- Source of live agent output: tail `<transcriptDir>/agent-<agentId>.jsonl` by byte offset (watch the folder, or poll about every 500 ms while the workflow runs), keep only `user`/`assistant` lines, and write them into the agent's DSH child session. Use `getSubagentMessages()` for a full reload (after a DSH restart, or when the file was missed). Reading these files is a file read by the plugin host, not a new process (rule 9).
+- Take `transcriptDir` and the `wf_…` run id from the Workflow tool result. Map `workflow_progress[].agentId` to the file name. `journal.jsonl` gives start and result per agent and survives a restart.
+- Drive phases, agent rows, status, tokens and tool counts from `workflow_progress` alone. Its rate is low (one frame per agent event), so no throttling is needed. Each frame carries the full list, so replace, do not merge. Ignore frames with no `workflow_progress`.
+- Attach workflow-agent shells (`local_bash` with a `tool_use_id` from an agent file) to that agent, not to the main thread.
+- Child text is per message, not per token, as for normal subagents (answer 5).
+- Still open: the ultracode keyword with `origin: human` (not tested here).
+
+---
+
+## Round 3b: plan approval and elicitation
+
+Closes critic §6.1 item 5 (R5.4, R5.5). Probe: `probe-r3b` (sessions A–I), in the local scratch folder. Same setup as round 2: the user's CLI 2.1.318, `claude-sonnet-5-5`, a fresh scratch git repo per session, a clean env. Plan sessions enter plan mode with `setPermissionMode('plan')` after start, so the pre-plan mode is the user's `defaultMode` (`auto` here). The user's settings allow `Write` and `Edit` by rule, so a file write never asks in any mode; the sessions use `rm` to show the mode's effect. Total cost about $0.55. This section supersedes the "**unverified** live" note on the ExitPlanMode row in §5 and the `onElicitation` bullet in §6.
+
+### Plan approval (ExitPlanMode)
+
+**What the CLI sends.** `can_use_tool` with `tool_name: "ExitPlanMode"`, `input {plan, planFilePath}`, `requires_user_interaction: true`, and **no** `permission_suggestions` (all 8 plan sessions). The host must build the mode choices itself.
+
+**What the TUI offers** (CLI 2.1.318 binary, the plan-approval dialog "Claude has written up a plan and is ready to execute. Would you like to proceed?"):
+
+| TUI choice | What it returns |
+|---|---|
+| "Yes, and use auto mode" (shown when the pre-plan mode was `auto` and auto is still allowed) | allow with an **empty** update list; the CLI then restores the pre-plan mode |
+| "Yes, auto-accept edits" | allow + `{type:'setMode', mode:'acceptEdits', destination:'session'}` |
+| "Yes, manually approve edits" | allow + `setMode default`, `destination: 'session'` |
+| bypass variant (only when bypass is available) | allow + `setMode bypassPermissions` |
+| "Yes, clear context … and …" variants | only with the `showClearContextOnPlanAccept` setting (default off). Not tested in SDK mode (**unverified**). |
+| "No, and tell Claude what to do differently" | reject with feedback (see "Keep planning" below) |
+
+The binary restores the pre-plan mode on plan exit only while the mode is still `plan` (`ExitPlanModeV2Tool`: `if (L.mode === "plan" …) { s = L.prePlanMode ?? "default"; … }`), and falls back to `default` when auto mode is no longer allowed.
+
+**Live results:**
+
+| Session | Reply to ExitPlanMode | `status.permissionMode` after | Next step |
+|---|---|---|---|
+| D | allow, no updates | `auto` (the user's default, restored) | `rm old.txt` ran with no ask |
+| A, F | allow + `setMode acceptEdits` (session) | `acceptEdits`, 3 ms after the reply | F: `rm old.txt` ran with no ask |
+| B, G | allow + `setMode default` (session) | `default`, 3 ms after the reply | G: `rm old.txt` asked through `canUseTool`, with suggestions `addRules` (localSettings), `addDirectories` (session), `setMode acceptEdits` (session) |
+| C (2nd call) | `setPermissionMode('acceptEdits')` inside the callback, then allow with no updates | `acceptEdits` (the restore was skipped because the mode was no longer `plan`) | write ran |
+
+- Each approval emits exactly one `system/status {status:null, permissionMode}` frame, so the picker follows the CLI with no extra work (R5.1).
+- `setMode` with `destination: 'session'` is session-only: `getSettings().effective.permissions.defaultMode` stayed `auto`, the settings file mtimes did not change, and no `.claude/` folder appeared in the project. Never use another destination for a plan choice: `userSettings`, `projectSettings` and `localSettings` are settings files.
+- The ExitPlanMode `tool_result` text is the CLI's own ("User has approved your plan. You can now start coding. …", plus the plan path and the plan). It is the same for every mode choice. `tool_result_meta.permission_decision` is `{decision: "accept", source: "user_temporary"}`.
+- Prefer `updatedPermissions` over a `setPermissionMode` call inside the callback. Both work, but `updatedPermissions` is the TUI's own path and is applied by the CLI together with the approval.
+
+**Keep planning with feedback:**
+
+| Session | Reply | What the model did |
+|---|---|---|
+| C (1st call) | `deny` with the user's feedback as `message` ("Keep planning: the file must contain two lines, hi and then bye.") | The CLI put the message verbatim in an error `tool_result` (`tool_result_meta: {decision: "reject", source: "user_reject"}`). The model **ignored** it: "That didn't come from you, so I ignored it and resubmitted the plan unchanged." (n = 1; whether this user's CLAUDE.md made the model suspicious is **unverified**.) |
+| H | `deny` with the CLI's own rejection text ("The user doesn't want to proceed with this tool use. The tool use was rejected … STOP what you are doing and wait for the user to tell you how to proceed."), and at the same moment the user's feedback sent as a normal user message (`priority: 'next'`, `origin: {kind:'human'}`) | The feedback was folded into the same turn: `command_lifecycle` `queued` → `started` right after the denial `tool_result`, and the turn's `user_message_uuids` listed both messages. Plan mode stayed on (no `status` frame). The model revised the plan to "hi, then bye" and called ExitPlanMode again; approval with `setMode acceptEdits` gave `hi\nbye`. |
+
+- The rejection text in H is the CLI's own constant. The same text appears for rejected tool uses in this user's own earlier transcripts.
+- Which text the TUI sends when the user also **types** feedback on "No" was not found in the binary in the time spent (**unverified**). So the H path is the safe raw choice: the denial text is the CLI's, and the feedback is text the user typed, sent as a user message. A plain "No" with no feedback is the same denial with no extra message.
+
+### MCP elicitation through `onElicitation`
+
+Server: a tiny stdio MCP server (MCP SDK 1.32.2) with two tools, `ask_color` (form mode) and `open_login` (URL mode, then `notifications/elicitation/complete`). It was configured **only** in the probe, through the SDK `mcpServers` option (that adds `--mcp-config <json>` to the spawn args). Nothing was added to any user settings file. The tool calls themselves never reached `canUseTool`: the user's `auto` mode allowed them (`tool_result_meta.permission_decision.reason_type: "classifier"`). The tool permission and the elicitation are separate steps.
+
+| Fact | Evidence |
+|---|---|
+| CLI 2.1.318 declares MCP client capabilities `elicitation: {form: {}, url: {}}` and `roots: {listChanged: true}`; client name `claude-code`. | server log, session E |
+| Wire: `control_request {subtype: "elicitation", mcp_server_name, message, mode: "form", requested_schema, property_order: ["color","note"]}`. URL mode: `mode: "url", url, elicitation_id`. | E wire |
+| `onElicitation(req, {signal, requestId})` gets `serverName`, `message`, `mode`, `requestedSchema` (form) or `url`, `elicitationId` (URL). `property_order` is **not** passed to the callback. `requestId` equals the wire `request_id`. | E notes |
+| Form accept: the server received exactly `{action: "accept", content: {color: "green", note: "from probe"}}`. Decline: `{action: "decline"}`. URL accept: `{action: "accept"}`. The tool's text reached the model unchanged. The CLI added nothing to the content and did not check it against the schema in this run (**unverified** for invalid content). | E server log, E `tool_result` |
+| After the URL accept, the server's completion notice arrived as `system/elicitation_complete {mcp_server_name, elicitation_id}` about 0.5 s later, before the tool's `tool_result`. The SDK yields it. | E messages |
+| Round trip with an instant handler: 4–11 ms from the server's request to its result. | E server log |
+| Interrupt while an elicitation waits (session I): the CLI sends `control_cancel_request` for the elicitation's `request_id`, and the SDK aborts `signal` (`AbortError`). A reply sent after the abort is still written to the wire. The server got `{action: "cancel"}` (whether from the CLI or from the late reply is **unverified**). The `tool_result` is the CLI's "stopped while running" text, the `result` is `error_during_execution` with `terminal_reason: aborted_tools`, and the message's `command_lifecycle` is `cancelled`. | I wire, I server log |
+| On the wire, `session_state_changed` goes to `requires_action` during each elicitation and permission ask, then back to `running`. The SDK does not yield it (§5). | E, G, I wire |
+| User `Elicitation` / `ElicitationResult` hooks run around this path and can answer first (`ElicitationHookInput` at `SDK/sdk.d.ts:730`, `ElicitationResultHookInput` at `:782`; `onElicitation` runs only when no hook handles the request, `:1810-1828`). Not tested. | SDK types |
+
+**Design consequences (R5.5):**
+- Always pass `onElicitation`. Render `requestedSchema` (form) or `url` (URL mode) in the plugin's interaction surface (`dsh-ui-surfaces` Round 2 Q3), and return the user's `accept` + `content`, `decline` or `cancel` as-is.
+- Close the form when `signal` aborts (Stop, interrupt), and do not send a reply after that.
+- For URL mode, keep the card open after `accept` until `system/elicitation_complete` with the same `elicitation_id` arrives, or until the tool's result arrives.
+- Field order: JS object key order is kept, so `requestedSchema.properties` order is enough. The wire's `property_order` is not exposed.
