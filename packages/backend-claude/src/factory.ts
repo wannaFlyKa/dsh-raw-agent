@@ -1,9 +1,22 @@
 // The Claude Code backend factory (D80). Pre-spawn capabilities are static data here (r4).
 
-import { accessSync, constants, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  accessSync,
+  closeSync,
+  constants,
+  existsSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import type {
   AgentBackendFactory,
+  AgentRef,
+  BackendEvent,
   AgentBackendSession,
   ConfigFileInfo,
   FactoryCapabilities,
@@ -29,6 +42,7 @@ import { createSpawner } from './spawn.js';
 import { ALLOW_BYPASS_OPTION, buildStartOptions } from './start-options.js';
 import { readSettingsDefaults } from './settings-defaults.js';
 import { readTrustState } from './trust.js';
+import { readSessionMainAgent, transcriptEvents, type TranscriptMessage } from './transcripts.js';
 
 export const CLAUDE_KIND = 'claude-code';
 
@@ -118,8 +132,39 @@ export interface ClaudeFactoryOptions {
    */
   env?: () => Readonly<Record<string, string | undefined>>;
   /** Test seam for the no-process reads. */
-  fs?: { readText(p: string): string | undefined; realpath(p: string): string; exists(p: string): boolean };
+  fs?: {
+    readText(p: string): string | undefined;
+    realpath(p: string): string;
+    exists(p: string): boolean;
+    readHead?(p: string, maxBytes: number): string | undefined;
+    listDir?(p: string): string[];
+  };
   homedir?: string;
+  /** Test seam for `readAgentTranscript`; defaults to the SDK's `getSubagentMessages` (a file read). */
+  subagentMessages?: (sessionId: string, agentId: string, cwd: string) => Promise<TranscriptMessage[]>;
+}
+
+/** The first `maxBytes` of a file, without reading the rest (transcripts can be large). */
+export function readFileHead(p: string, maxBytes: number): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(p, 'r');
+    const buf = Buffer.alloc(Math.max(0, maxBytes));
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n).toString('utf8');
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function listDir(p: string): string[] {
+  try {
+    return readdirSync(p);
+  } catch {
+    return [];
+  }
 }
 
 const nodeFs = {
@@ -144,7 +189,7 @@ const nodeFs = {
 
 export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): AgentBackendFactory {
   const readEnv = () => buildClaudeEnv(factoryOptions.env ? factoryOptions.env() : process.env).env;
-  const fs = factoryOptions.fs ?? nodeFs;
+  const fs: NonNullable<ClaudeFactoryOptions['fs']> = factoryOptions.fs ?? nodeFs;
   const home = () => factoryOptions.homedir ?? homedir();
   const readDefaults = async (cwd: string): Promise<SettingsDefaults> => {
     const env = readEnv();
@@ -170,6 +215,27 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     },
     async trustState(cwd: string): Promise<TrustState> {
       return readTrustState(cwd, { env: readEnv(), platform: process.platform, homedir: home(), ...fs });
+    },
+    // D15 (r4): the agent the session was started with, so a resume passes the same `agent`.
+    async sessionMainAgent(sessionId: string, cwd: string): Promise<string | undefined> {
+      return readSessionMainAgent(sessionId, cwd, {
+        env: readEnv(),
+        platform: process.platform,
+        homedir: home(),
+        realpath: (p) => fs.realpath(p),
+        exists: (p) => fs.exists(p),
+        readHead: fs.readHead ?? readFileHead,
+        listDir: fs.listDir ?? listDir,
+      });
+    },
+    // D49, D50: a child's transcript (SDK `getSubagentMessages`, a file read; no process).
+    async readAgentTranscript(sessionId: string, ref: AgentRef, cwd: string): Promise<BackendEvent[]> {
+      if (ref.kind !== 'child') return [];
+      const read =
+        factoryOptions.subagentMessages ??
+        (async (sid: string, agentId: string, dir: string) =>
+          (await (await loadSdk()).getSubagentMessages(sid, agentId, { dir })) as unknown as TranscriptMessage[]);
+      return transcriptEvents(ref, await read(sessionId, ref.id, cwd), Date.now());
     },
 
     async open(o: OpenSessionOptions): Promise<AgentBackendSession> {
@@ -198,7 +264,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         canBypass: () => ref.session?.canBypass ?? bypassOption,
         newId: newRequestId,
         prePlanMode: () => ref.session?.asks.prePlanMode,
-        agentLabel: (id) => ref.session?.asks.agentLabel(id),
+        agentLabel: (id) => ref.session?.agentLabel(id),
         elicitationAgent: (server) => ref.session?.asks.elicitationAgent(server),
         rememberElicitation: (eid, id) => ref.session?.asks.rememberElicitation(eid, id),
         forgetElicitation: (eid) => ref.session?.asks.forgetElicitation(eid),

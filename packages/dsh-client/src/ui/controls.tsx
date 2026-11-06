@@ -5,6 +5,7 @@
 
 import * as React from 'react';
 import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
+import { agentSelect } from '../agents-model.js';
 import { SETTINGS, type RawAgentApi } from '../api.js';
 import { restoreReturnedDrafts, type DraftTarget } from '../drafts.js';
 import type { SessionControlStore } from '../session-store.js';
@@ -102,6 +103,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   const model = modelSelect(info);
   const effort = effortSelect(info);
   const mode = modeSelect(info);
+  const agent = agentSelect(info);
   const draftNote =
     dropped > 0
       ? `The stopped message had ${dropped === 1 ? 'an attachment' : `${dropped} attachments`} that cannot go back into the composer; attach ${dropped === 1 ? 'it' : 'them'} again.`
@@ -144,6 +146,18 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
         disabled={snap.busy}
         onPick={(value) => value !== mode.value && choose({ mode: value })}
       />
+      {agent && (
+        <Picker
+          testId="agent"
+          label={`${name} main-thread agent for this new session`}
+          model={agent}
+          disabled={snap.busy || agent.locked}
+          onPick={(value) => {
+            if (value === START_OPTION) void store.start();
+            else if (value !== agent.value) choose({ agent: value === SETTINGS ? null : value });
+          }}
+        />
+      )}
       <button
         type="button"
         style={css.button}

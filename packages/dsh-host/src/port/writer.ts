@@ -40,6 +40,8 @@ export const WRITER_EVENT_TYPES: readonly string[] = Object.freeze([
   // D44: DSH's log-only approval audit pair (`P/dsh-user-approval/lib/types/types.d.ts:25-52`).
   'approval/asked',
   'approval/decided',
+  // D26 (M3): the visible trigger of a wake turn, a native step event that is never sent to the agent.
+  'developer/message',
 ]);
 
 /** DSH's closed approval outcomes that this writer records (D44). */
@@ -154,6 +156,7 @@ export class TurnLog {
   #started = new Set<number>();
   /** D44: audit ids asked in this turn without a decision yet. */
   readonly #approvals = new Set<string>();
+  #triggered = false;
 
   constructor(session: DshSession, live: LiveChannel, turn: number, opts: WriterOptions) {
     this.#session = session;
@@ -463,6 +466,33 @@ export class TurnLog {
     }
     this.#append('step/end', { turn: this.#turn, step: this.#step });
     this.#stepOpen = false;
+  }
+
+  /**
+   * D26 (M3): the visible trigger of a wake turn: DSH's native `developer/message`, inside the open
+   * step (a step event, `P/dsh-session-format-v3-to-v4/lib/index.js:492-496, 742`), with a
+   * producer-owned source and the `notice` form, so DSH's chat shows its one-line summary
+   * (`P/dsh-client-ui-chat/lib/client.js:5690-5697`). Not a `user/message` (D22, rule 3): the
+   * agent is never sent it, and no host model runs in these sessions (D2). Once per turn.
+   */
+  trigger(text: string, sourceKind: string, items?: readonly string[]): void {
+    if (!this.#stepOpen) throw new WriterAssertError('refused developer/message outside an open step');
+    if (this.#triggered) return;
+    if (text.trim() === '') throw new WriterAssertError('refused an empty wake trigger');
+    const message = {
+      id: randomUUID(),
+      role: 'developer',
+      content: [{ type: 'text', text }],
+      source: {
+        kind: sourceKind,
+        form: 'notice',
+        summary: text.slice(0, 200),
+        // The plugin's trigger card lists what ended (D26); DSH's own row shows the summary.
+        ...(items && items.length > 0 ? { items: items.slice(-20).map((i) => i.slice(0, 300)) } : {}),
+      },
+    };
+    this.#append('developer/message', { turn: this.#turn, step: this.#step, message }, { surfaceOp: 'append' });
+    this.#triggered = true;
   }
 
   /**

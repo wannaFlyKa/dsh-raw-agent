@@ -25,6 +25,10 @@ export interface SessionSnapshot {
   answering?: string;
   /** Why the last answer to an ask was refused (the card shows it; the ask stays open). */
   askError?: { id: string; text: string };
+  /** Child agents and tasks whose Stop is in flight (D46, D47), by id. */
+  stopping?: readonly string[];
+  /** Why the last Stop of one child or task failed. */
+  stopError?: { id: string; text: string };
 }
 
 export interface PollTimings {
@@ -149,6 +153,15 @@ export class SessionControlStore {
           ...(line.state ? { state: line.state } : {}),
           ...(line.live ? { live: line.live } : {}),
         };
+        if (line.agents) {
+          // R6.1-R6.3: the agent rows ride the channel, so child output shows at once.
+          if (line.agents.children.length > 0) view.children = line.agents.children;
+          else delete view.children;
+          if (line.agents.team) view.team = line.agents.team;
+          else delete view.team;
+          if (line.agents.tasks.length > 0) view.tasks = line.agents.tasks;
+          else delete view.tasks;
+        }
         next.info = { ...info, view };
         ++this.#generation; // a poll that started before this line is older
       }
@@ -183,7 +196,10 @@ export class SessionControlStore {
     const s = this.#snapshot;
     const v = s.info?.view;
     const asking = (v?.asks?.length ?? 0) > 0 && s.channel !== 'open';
-    const active = v !== undefined && (v.state.turn || v.state.process === 'starting' || asking);
+    // A running child changes its row often; without the channel, poll as during a turn.
+    const childRunning =
+      s.channel !== 'open' && (v?.children ?? []).some((c) => c.status === 'running' || c.status === 'starting');
+    const active = v !== undefined && (v.state.turn || v.state.process === 'starting' || asking || childRunning);
     const ms =
       s.status === 'ready'
         ? active
@@ -294,6 +310,36 @@ export class SessionControlStore {
     if (next === undefined) return false;
     void this.choose({ mode: next });
     return true;
+  }
+
+  /**
+   * D46: stop one child agent (the user's click). The others and the main turn keep running. The
+   * Host waits up to 2 s for the agent's own end; a later end arrives with the next read.
+   */
+  async stopChild(childId: string): Promise<boolean> {
+    return this.#stopOne(childId, () => this.#api.stopChild(this.sessionId, childId));
+  }
+
+  /** D47: stop one background task from the plugin's task list (the user's click). */
+  async stopTask(taskId: string): Promise<boolean> {
+    return this.#stopOne(taskId, () => this.#api.stopTask(this.sessionId, taskId));
+  }
+
+  async #stopOne(id: string, call: () => Promise<{ ok: boolean; error?: string }>): Promise<boolean> {
+    const busy = this.#snapshot.stopping ?? [];
+    if (busy.includes(id)) return false;
+    this.#set({ stopping: [...busy, id], stopError: undefined });
+    let ok = false;
+    try {
+      const r = await call();
+      ok = r.ok;
+      if (!r.ok) this.#set({ stopError: { id, text: r.error ?? 'the stop was refused' } });
+    } catch (e) {
+      this.#set({ stopError: { id, text: String((e as Error)?.message ?? e) } });
+    }
+    this.#set({ stopping: (this.#snapshot.stopping ?? []).filter((x) => x !== id) });
+    await this.refresh();
+    return ok;
   }
 
   /** "Start <displayName>" (D4): spawn without a message, for controls that need a process. */

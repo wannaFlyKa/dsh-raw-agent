@@ -28,6 +28,7 @@ import { SessionRegistry, SESSIONS_SERVICE, isSessionRegistry, type ReturnedDraf
 import { modeCommandDescription, runModeCommand } from '../mode-command.js';
 import { SETTINGS_MODEL } from './catalog.js';
 import { startJob } from './jobs.js';
+import { childPreStep, createChildSession } from './children.js';
 import {
   DSH_IMAGE_MEDIA_TYPES,
   type CordisContext,
@@ -186,6 +187,7 @@ function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext): TurnSink {
     closeStep: () => log.closeStep(),
     approvalAsked: (info) => log.approvalAsked(info),
     approvalDecided: (id, outcome) => log.approvalDecided(id, outcome),
+    trigger: (text, items) => log.trigger(text, WAKE_SOURCE_KIND, items),
   };
 }
 
@@ -352,6 +354,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   const counters = new WeakMap<DshAgent, { revision: number; attempt: number }>();
   const warn = (note: string, detail?: unknown) => ctx.logger?.warn(`[raw-agent] ${note}`, detail ?? '');
   const jobs = () => ctx.get('jobs') as DshJobs | undefined;
+  const presetId = o.presetId ?? presetIdFor(factory.kind);
 
   // D47: our own scoped controller; this context serves exactly the agents of our preset.
   const j = jobs();
@@ -376,10 +379,19 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     selectModel(model) {
       agent.model.select({ provider: factory.kind, model });
     },
-    startJob(task, stop) {
+    startJob(task, stop, onTeardown) {
       const registry = jobs();
-      return registry ? startJob(registry, agent.session.id, task, stop, warn) : undefined;
+      return registry ? startJob(registry, agent.session.id, task, stop, warn, onTeardown) : undefined;
     },
+    // D45: child agents become one-shot host child sessions of this session.
+    createChild: (spec, runner) =>
+      createChildSession(
+        ctx,
+        agent,
+        { factory, presetId, warn, ...(o.writer ? { writer: o.writer } : {}) },
+        spec,
+        runner,
+      ),
     warn,
     returnDraft(messageId) {
       // D25: the steer goes back to the composer; the recorded `outcome: 'canceled'` is the truth.
@@ -482,8 +494,8 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   ctx.on('agent/pre-step', (async (p: PreStepPayload, _next: () => Promise<PreStepDecision>) => {
     const { agent, messages, turn, signal } = p;
     if (messages.length === 0) return { kind: 'enter', messages: [] };
-    // D45: a child session never spawns or sends (children are a later milestone).
-    if (agent.session.header.origin === 'subagent') return { kind: 'enter', messages: [] };
+    // D45: a child session never spawns or sends. A live child runs its writer; a cold one nothing.
+    if (agent.session.header.origin === 'subagent') return (await childPreStep(p)) ?? { kind: 'enter', messages: [] };
     const human = messages.filter((m) => m.source.kind === 'user');
     const wake = messages.some((m) => m.source.kind === WAKE_SOURCE_KIND);
     // D22: every other claimed message (inject()ed DSH notices) is dropped, never sent.
@@ -620,7 +632,6 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   // `agent/created` to this mount. The rebind emits `tools/change`
   // (`P/dsh-agent-preset-registry/lib/index.js` `recompose`); attach every live root agent now
   // bound to our preset, so the controls and "Start" work before the first message (D4).
-  const presetId = o.presetId ?? presetIdFor(factory.kind);
   const adoptRebound = () => {
     let agents: readonly DshAgent[];
     let presets: DshAgentPresets | undefined;

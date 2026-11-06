@@ -4,6 +4,7 @@ export {
   CLAUDE_STATIC_CAPABILITIES,
   ID_NAMESPACE,
   questionPreviewFormat,
+  readFileHead,
   type ClaudeFactoryOptions,
 } from './factory.js';
 export {
@@ -33,6 +34,16 @@ export {
   type StartOptionsInput,
   type ClaudeStartOptions,
 } from './start-options.js';
+export { ChildAgents, AGENT_TOOLS, SEND_MESSAGE_TOOL, agentMessageSender } from './children.js';
+export {
+  readSessionMainAgent,
+  firstAgentSetting,
+  transcriptEvents,
+  transcriptPaths,
+  projectSlug,
+  type TranscriptReadDeps,
+  type TranscriptMessage,
+} from './transcripts.js';
 export { ClaudeMessageMapper, canonicalModel, convertBlock, convertToolResultContent } from './mapper.js';
 export { ClaudeBackendSession, toSdkUserMessage, fileReference, type QueryFn } from './session.js';
 export {

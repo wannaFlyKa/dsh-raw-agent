@@ -821,9 +821,16 @@ describe('port: pending interaction, takeover and Shift+Tab', () => {
     };
     mountClient(ctx as never, { fetch: async () => ({ status: 404, ok: false, json: async () => ({}) }) });
     for (const e of effects) e();
-    expect(registered.map((r) => r.name)).toEqual(['conversation.composer', 'conversation.input.left']);
+    expect(registered.map((r) => r.name)).toEqual([
+      'conversation.composer',
+      'conversation.session.header.actions',
+      'conversation.input.left',
+    ]);
+    // DSH tries composer chain entries in ascending priority; ui-subagent's one-shot read-only
+    // composer is at -10, so ours must come first or a child's ask never takes over (M3 live).
+    expect(registered[0]!.options.priority).toBeLessThan(-10);
     expect(fixed).toEqual([MODE_SHORTCUT_ID]);
-    const inject = registered[1]!.options.inject as (id: string) => { asksInComposer: () => boolean };
+    const inject = registered[2]!.options.inject as (id: string) => { asksInComposer: () => boolean };
     expect(inject('s1').asksInComposer()).toBe(true);
   });
 });

@@ -358,10 +358,15 @@ describe.skipIf(dsh === undefined)(`DSH round trip (installed DSH ${dsh?.version
       'turn/start',
       'agent/inbox/spliced',
       'step/start',
+      'developer/message', // D26 (M3): the visible wake trigger, never sent to the agent
       'assistant/message',
       'step/end',
       'turn/end',
     ]);
+    const trigger = wakeTurn.find((e: any) => e.type === 'developer/message');
+    expect(trigger.data.message.source).toMatchObject({ kind: 'raw-agent-wake', form: 'notice' });
+    expect(trigger.data.message.content[0].text).toMatch(/continued on its own after: background shell ".*" finished/);
+    expect(s.record.sent).toHaveLength(2); // the trigger text never reached the agent
     const interrupted = c.events.find((e: any) => e.type === 'assistant/message' && e.data.interrupted === true);
     expect(interrupted).toBeDefined();
     expect(c.events.some((e: any) => e.type === 'job/registered')).toBe(true);

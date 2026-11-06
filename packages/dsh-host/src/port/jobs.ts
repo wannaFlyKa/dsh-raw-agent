@@ -4,11 +4,24 @@
 // (`P/dsh-tool-jobs/lib/index.js:366`). Job kill → the backend's per-task stop.
 
 import type { TaskKind, TaskStatus } from '@dsh-raw-agent/core';
-import type { JobLink } from '../driver.js';
+import type { JobLink, JobRefusal } from '../driver.js';
 import type { DshJobHandle, DshJobOutcome, DshJobs } from './types.js';
 
 export const JOB_WAIT_MS = 60 * 60 * 1000;
 export const JOB_REWAIT_MS = 30 * 60 * 1000;
+let waitMs = JOB_WAIT_MS;
+let rewaitMs = JOB_REWAIT_MS;
+
+/**
+ * Test-only: shorter job waits, so a live suite can run a task that outlives one wait (S2). The
+ * re-wait interval is half the wait, so two waits still overlap. `undefined` restores the defaults.
+ */
+export function setJobWaitForTests(ms: number | undefined): void {
+  const ok = ms !== undefined && Number.isFinite(ms) && ms >= 50;
+  waitMs = ok ? Math.floor(ms) : JOB_WAIT_MS;
+  rewaitMs = ok ? Math.max(25, Math.floor(ms / 2)) : JOB_REWAIT_MS;
+}
+
 /** After a kill, how long the job waits for the task's own end before it settles anyway. */
 export const JOB_KILL_GRACE_MS = 5000;
 
@@ -21,6 +34,14 @@ export const JOB_KILL_GRACE_MS = 5000;
  */
 export const TEARDOWN_REASONS: readonly string[] = Object.freeze(['owner disposed', 'jobs service disposed']);
 
+/**
+ * DSH's per-owner limit refusal (`P/dsh-jobs-local/lib/index.js:419`: "background job limit reached
+ * for this owner"). Its text names DSH's model tool `job_kill`, so it is never shown (D47 r4).
+ */
+export function isJobLimitError(message: string): boolean {
+  return /job limit reached/i.test(message);
+}
+
 export function jobKind(kind: TaskKind): string {
   return `raw-agent-${kind}`;
 }
@@ -31,7 +52,8 @@ export function startJob(
   task: { taskId: string; kind: TaskKind; label: string },
   stop: () => void,
   warn: (note: string, detail?: unknown) => void,
-): JobLink | undefined {
+  onTeardown?: () => void,
+): JobLink | JobRefusal {
   let finish!: (o: DshJobOutcome) => void;
   let settled = false;
   const done = new Promise<DshJobOutcome>((r) => {
@@ -55,6 +77,11 @@ export function startJob(
           cancel(reason?: string) {
             if (reason !== undefined && TEARDOWN_REASONS.includes(reason)) {
               finish({ status: 'killed', detail: reason });
+              try {
+                onTeardown?.();
+              } catch (error) {
+                warn('job teardown hook failed', String(error));
+              }
               return;
             }
             stop();
@@ -69,16 +96,19 @@ export function startJob(
       },
     });
   } catch (error) {
-    // D47 (r4): the per-owner limit or a missing controller. The plugin task list is a later milestone.
-    warn('could not start a job for a background task', String((error as Error)?.message ?? error));
-    return undefined;
+    // D47 (r4): the per-owner limit or a missing controller: the plugin's task list shows it.
+    const message = String((error as Error)?.message ?? error);
+    warn('could not start a job for a background task', message);
+    return isJobLimitError(message) ? { refused: message, limit: true } : { refused: message };
   }
+  // Overlapping waits (D47): a 1 h wait, a new one every 30 min. A wait must still be pending when
+  // the job settles (that is what keeps a Host-level tool-jobs silent), and it resolves then.
   const wait = () => {
     if (settled) return;
-    jobs.wait(id, JOB_WAIT_MS, owner).catch(() => {});
+    jobs.wait(id, waitMs, owner).catch(() => {});
   };
   wait();
-  const rewait = setInterval(wait, JOB_REWAIT_MS);
+  const rewait = setInterval(wait, rewaitMs);
   rewait.unref?.();
   return {
     progress(line: string) {

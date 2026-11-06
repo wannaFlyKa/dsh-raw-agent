@@ -26,6 +26,8 @@ export type ToolResultContent =
 
 export type TaskKind = 'shell' | 'monitor' | 'agent' | 'workflow';
 export type TaskStatus = 'completed' | 'failed' | 'stopped';
+/** What kind of child agent a child session holds (D45, D50). */
+export type AgentRole = 'subagent' | 'teammate' | 'workflow-agent';
 
 export type BackendEvent =
   | { type: 'session-info'; model?: string; mode?: string; version?: string }
@@ -79,6 +81,57 @@ export type BackendEvent =
       error?: string;
       pendingInputs: number;
     }
+  /**
+   * A child agent starts (D45), or a finished one runs again (`resumed`: a teammate woken by a
+   * message, D50). Comes before any event of that child and before its `task-start`. `parent`
+   * is the agent whose tool call started it (nesting follows the CLI's spawn depth).
+   */
+  | {
+      type: 'agent-start';
+      ref: AgentRef;
+      parent: AgentRef;
+      /** The parent's tool call that started the child (Claude: the `Agent` call). */
+      parentCallId?: string;
+      label: string;
+      role: AgentRole;
+      background: boolean;
+      taskId?: string;
+      /** The text the child starts on: the parent's prompt, or the message that woke it. */
+      taskPrompt: string;
+      /** The agent type the parent asked for (Claude: `subagent_type`). */
+      agentType?: string;
+      /** An addressable name (Claude: the `Agent` call's `name`; a teammate's name). */
+      name?: string;
+      /** The team, for a teammate (Claude: `team_name`). */
+      team?: string;
+      /** 1 for a child of the main agent, 2 for its child, and so on. */
+      depth?: number;
+      /** true: this child ran before in this process and was woken again. */
+      resumed?: boolean;
+      /** For a resumed teammate: who sent the message that woke it. */
+      wokenBy?: string;
+      at: number;
+    }
+  /** A child agent finished or was stopped (D45, D46). Its open step, if any, closes. */
+  | { type: 'agent-end'; ref: AgentRef; status: TaskStatus; summary?: string }
+  /**
+   * Text the agent itself delivered to a running child that is not a tool result: a message
+   * from another agent at its next tool round, or the agent's own reminder. Never human text.
+   */
+  | { type: 'agent-input'; ref: AgentRef; text: string; at: number }
+  /**
+   * One agent sent a message to another (D50; Claude: a `SendMessage` call). Comes after the
+   * `step-message` that holds the call. `from` is the sender's name ('main' for the main agent).
+   */
+  | {
+      type: 'team-message';
+      from: string;
+      to: string;
+      text: string;
+      agent: AgentRef;
+      callId?: string;
+      summary?: string;
+    }
   | { type: 'task-start'; taskId: string; kind: TaskKind; label: string; agent?: AgentRef }
   | {
       type: 'task-progress';
@@ -95,8 +148,8 @@ export type BackendEvent =
   | { type: 'interaction-cancel'; id: string }
   | { type: 'exit'; error?: string };
 
-// Not in the spike yet (added in place later, §7.2): agent-start, agent-end, workflow-start,
-// workflow-snapshot, workflow-end, team-message, title,
+// Not in the spike yet (added in place later, §7.2): workflow-start,
+// workflow-snapshot, workflow-end, title,
 // usage, context, compaction, limits, retry, commands.
 
 export type BackendEventType = BackendEvent['type'];

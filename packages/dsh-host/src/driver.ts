@@ -4,6 +4,7 @@
 
 import type {
   AgentBackendFactory,
+  AgentInfo,
   OpenSessionOptions,
   AgentBackendSession,
   BackendEvent,
@@ -20,6 +21,15 @@ import type {
 } from '@dsh-raw-agent/core';
 import { offeredPermissionModes } from '@dsh-raw-agent/core';
 import { AskDesk, type AskReply, type AskResult, type AskView, type AuditInfo, type AuditOutcome } from './asks.js';
+import {
+  ChildHub,
+  type ChildHandle,
+  type ChildRunner,
+  type ChildSpec,
+  type ChildStatus,
+  type ChildView,
+  type TeamView,
+} from './children.js';
 
 /** What the driver writes into one open host turn. Implemented by the port writer. */
 export interface TurnSink {
@@ -58,6 +68,11 @@ export interface TurnSink {
   approvalAsked?(info: AuditInfo): string | undefined;
   /** D44: the outcome of an audited ask. "Always" is `allowed-once` (the rule is the agent's). */
   approvalDecided?(auditId: string, outcome: AuditOutcome): void;
+  /**
+   * D26 (M3): the visible, native trigger of a wake turn, written once inside its first step.
+   * Log-only for the agent: the backend is never sent it (D22), and no host model runs (D2).
+   */
+  trigger?(text: string, items?: readonly string[]): void;
 }
 
 /** Tool-result content as the sink writes it: a stored image is an opaque host ref (D85). */
@@ -96,6 +111,30 @@ export interface JobLink {
   end(status: TaskStatus, summary?: string): void;
 }
 
+/** The host refused a job (D47 r4): the task gets a row in the plugin's own task list instead. */
+export interface JobRefusal {
+  refused: string;
+  /** The host's per-owner job limit was reached (the note names its config key). */
+  limit?: boolean;
+}
+
+/** One background task as the plugin's task list shows it (D47). */
+export interface TaskView {
+  taskId: string;
+  kind: TaskKind;
+  label: string;
+  status: 'running' | TaskStatus;
+  progress?: string;
+  /** A host job mirrors it; false: only the plugin row does (limit reached, or no controller). */
+  job: boolean;
+  note?: string;
+  /** The child agent this task runs, for a background agent. */
+  agent?: string;
+}
+
+/** The host's per-owner job limit key, named in the fallback note (D47 r4). */
+export const JOB_LIMIT_CONFIG_KEY = 'maxConcurrentJobsPerOwner';
+
 /** The host session as the driver sees it. Implemented by the port. */
 export interface HostSessionPort {
   readonly hostSessionId: string;
@@ -111,7 +150,17 @@ export interface HostSessionPort {
    * never saves the host's default model.
    */
   selectModel?(model: string): void;
-  startJob(task: { taskId: string; kind: TaskKind; label: string }, stop: () => void): JobLink | undefined;
+  /**
+   * D47: mirror a background task as a host job. `onTeardown`: the host dropped the job without a
+   * user's kill (its owner was disposed); the task keeps running and is linked again on attach.
+   */
+  startJob(
+    task: { taskId: string; kind: TaskKind; label: string },
+    stop: () => void,
+    onTeardown?: () => void,
+  ): JobLink | JobRefusal | undefined;
+  /** D45: create a host child session under this session for a child agent. */
+  createChild?(spec: ChildSpec, runner: ChildRunner): Promise<ChildHandle>;
   warn(note: string, detail?: unknown): void;
   /**
    * D25: a steer the agent dropped on Stop goes back to the user: remove it from the host inbox
@@ -140,6 +189,8 @@ export interface LiveInfo {
   version?: string;
   /** The last line the agent showed the user outside the conversation (`notice` event). */
   notice?: { level: string; text: string; at: number };
+  /** D15: the main-thread agent the process was started with (passed at spawn, or read on resume). */
+  agent?: string;
 }
 
 /** The session-only choices (D35-D38) and what reached the live process. */
@@ -162,6 +213,13 @@ export interface ChoiceView {
    * was given (D35 exact reset), so the process restarts with resume when it is idle.
    */
   resetPending: boolean;
+  /** D15, D51: the main-thread agent picked for this new session; undefined = none. */
+  agent?: string;
+  /**
+   * The main-thread agent can no longer change: the session had a turn (the agent's CLI cannot
+   * switch it after turn 1), or the backend has no such picker.
+   */
+  agentLocked: boolean;
 }
 
 /** Everything the plugin's session controls show. */
@@ -174,6 +232,14 @@ export interface SessionView {
   cwd?: string;
   /** Asks waiting for the user's answer (permission, question, plan, trust). Never auto-answered. */
   asks?: AskView[];
+  /** Child agents of this process (D45, D46): the tree and per-child rows. */
+  children?: ChildView[];
+  /** The team roster model (D50). */
+  team?: TeamView;
+  /** Background tasks of this process (D47), with the plugin-only fallback rows. */
+  tasks?: TaskView[];
+  /** D51: the agents the live process lists for the main-thread picker (no process: absent). */
+  agents?: AgentInfo[];
 }
 
 /** The result of one choice: what happened, in words for the UI. */
@@ -222,6 +288,13 @@ class EventBox {
 }
 
 const TURN_EVENTS = new Set(['turn-start', 'step-start', 'delta', 'step-message', 'tool-result']);
+
+/** An event that belongs to a child agent, not to this session's own turn (D45, D50). */
+export function isChildEvent(e: BackendEvent): boolean {
+  if (e.type === 'agent-start' || e.type === 'agent-end' || e.type === 'agent-input' || e.type === 'team-message')
+    return true;
+  return TURN_EVENTS.has(e.type) && 'agent' in e && e.agent?.kind === 'child';
+}
 /** How long Stop waits for the agent to end its turn before the driver closes it itself. */
 export const STOP_GRACE_MS = 10_000;
 
@@ -287,6 +360,27 @@ export class SessionRuntime {
   #lateStopped = false;
   readonly #jobs = new Map<string, JobLink>();
   #tasks = new Set<string>();
+  /** What each background task is, for the plugin task list and for re-linking jobs (D47). */
+  readonly #taskInfo = new Map<string, TaskView>();
+  /** Live child agents (D45). */
+  readonly #hub: ChildHub;
+  /** Background work that ended since the last turn: named by the next wake trigger (D26). */
+  #wakeNotes: string[] = [];
+  /** The trigger text of the wake turn waiting to open (D26). */
+  #wakeText: string | undefined;
+  /** The wake notes the waiting wake text was built from (the trigger card's list, D26). */
+  #wakeItems: string[] | undefined;
+  /** The open wake turn still needs its visible trigger, written in its first step. */
+  #triggerPending: string | undefined;
+  #triggerItems: string[] = [];
+  /** D15, D51: the main-thread agent picked for a new session, passed at the next spawn. */
+  #agentChoice: string | undefined;
+  /** The main-thread agent the live process was started with. */
+  #mainAgent: string | undefined;
+  /** D51: the agent list the live process reported. */
+  #agents: AgentInfo[] | undefined;
+  /** This runtime ran a turn (the main agent is fixed from then on, D15). */
+  #hadTurn = false;
   readonly #sent = new Map<string, SentEntry>();
   #earlySteers: UserInput[] = [];
   #chain: string[] = [];
@@ -307,8 +401,8 @@ export class SessionRuntime {
   readonly #desk: AskDesk;
   /** The writer of the open host turn, for the D44 audit pair. */
   #sink: TurnSink | undefined;
-  /** Audited asks of the open turn: ask id → audit id (D44). */
-  readonly #audits = new Map<string, string>();
+  /** Audited asks: ask id → audit id and the writer of the turn it is in (D44; root or child). */
+  readonly #audits = new Map<string, { id: string; sink: TurnSink }>();
   /** The mode choice was read back from the host log once (D24). */
   #modeRestored = false;
   readonly #listeners = new Set<(view: SessionView) => void>();
@@ -324,6 +418,23 @@ export class SessionRuntime {
       opened: (view, info) => this.#auditOpened(view, info),
       closed: (id, outcome) => this.#auditClosed(id, outcome),
     });
+    this.#hub = new ChildHub({
+      now: this.#now,
+      warn: (n, d) => this.#warn(n, d),
+      notify: () => this.#notify(),
+      createRootChild: (spec, runner) => {
+        const create = this.#port?.createChild;
+        if (!create) return Promise.reject(new Error('the host session cannot hold child sessions'));
+        return create(spec, runner);
+      },
+      stopTask: (taskId) => {
+        const stop = this.#backend?.controls.stopTask;
+        if (!stop) return Promise.reject(new Error(`${factory.displayName} is not running`));
+        return stop(taskId);
+      },
+      teamMessaging: () => this.#backend?.capabilities.teamMessaging === true,
+      imageText: (mediaType) => imageUnavailableText(mediaType, 'child result images are not stored'),
+    });
   }
 
   /**
@@ -332,22 +443,30 @@ export class SessionRuntime {
    * subagent's ask waits for child sessions (D45) and is not audited in the parent's log.
    */
   #auditOpened(view: AskView, info: AuditInfo): void {
-    const sink = this.#sink;
-    if (!sink?.approvalAsked || !this.#turnActive || view.agent !== 'main') return;
+    // A child's ask goes into that child's log while its turn is open (D44, D45).
+    const sink =
+      view.agent === 'main'
+        ? this.#turnActive
+          ? this.#sink
+          : undefined
+        : view.agentId !== undefined
+          ? this.#hub.openSink(view.agentId)
+          : undefined;
+    if (!sink?.approvalAsked) return;
     try {
       const id = sink.approvalAsked(info);
-      if (id !== undefined) this.#audits.set(view.id, id);
+      if (id !== undefined) this.#audits.set(view.id, { id, sink });
     } catch (error) {
       this.#warn('could not record the approval audit', String((error as Error)?.message ?? error));
     }
   }
 
   #auditClosed(askId: string, outcome: AuditOutcome): void {
-    const id = this.#audits.get(askId);
-    if (id === undefined) return;
+    const a = this.#audits.get(askId);
+    if (a === undefined) return;
     this.#audits.delete(askId);
     try {
-      this.#sink?.approvalDecided?.(id, outcome);
+      a.sink.approvalDecided?.(a.id, outcome);
     } catch (error) {
       this.#warn('could not record the approval outcome', String((error as Error)?.message ?? error));
     }
@@ -355,7 +474,8 @@ export class SessionRuntime {
 
   /** D74: an audited ask still open when the turn ends is `cancelled` in the host log. */
   #closeAudits(): void {
-    for (const id of [...this.#audits.keys()]) this.#auditClosed(id, 'cancelled');
+    const sink = this.#sink;
+    for (const [id, a] of [...this.#audits]) if (a.sink === sink) this.#auditClosed(id, 'cancelled');
   }
 
   /**
@@ -456,11 +576,56 @@ export class SessionRuntime {
   /** Bind a new host agent (D87: after an eviction). A turn the agent started meanwhile wakes now. */
   attach(port: HostSessionPort): void {
     this.#port = port;
+    // D47: tasks whose job the host dropped with the evicted agent keep running; link them again.
+    for (const taskId of this.#tasks) if (!this.#jobs.has(taskId)) this.#linkJob(taskId);
     if (this.#wakePending && this.#wakeBuffer !== undefined) {
       this.#wakePending = false;
-      port.wake(`${this.#factory.displayName} continued on its own`);
+      port.wake(this.#wakeText ?? this.#wakeSummary());
     }
     this.#notify();
+  }
+
+  /** D26: the wake trigger's text: what ended in the background since the last turn. */
+  #wakeSummary(): string {
+    const name = this.#factory.displayName;
+    const notes = this.#wakeNotes;
+    if (notes.length === 0) return `${name} continued on its own`;
+    const shown = notes.slice(-3).join('; ');
+    const more = notes.length > 3 ? ` (and ${notes.length - 3} more)` : '';
+    return `${name} continued on its own after: ${shown}${more}`;
+  }
+
+  /** D47: mirror one running task as a host job, or give it a plugin-only row. */
+  #linkJob(taskId: string): void {
+    const info = this.#taskInfo.get(taskId);
+    const port = this.#port;
+    if (!info || !port) return;
+    const backend = this.#backend;
+    const stop = () => {
+      void backend?.controls.stopTask?.(taskId).catch((err) => this.#warn('stopTask failed', String(err)));
+    };
+    let link: ReturnType<HostSessionPort['startJob']>;
+    try {
+      link = port.startJob({ taskId, kind: info.kind, label: info.label }, stop, () => {
+        // Teardown (D47): the host dropped the row; the task keeps running and is linked again.
+        if (this.#jobs.get(taskId) === current) this.#jobs.delete(taskId);
+        const i = this.#taskInfo.get(taskId);
+        if (i && i.status === 'running') i.job = false;
+      });
+    } catch (error) {
+      link = { refused: String((error as Error)?.message ?? error) };
+    }
+    const current = link !== undefined && !('refused' in link) ? link : undefined;
+    if (current) {
+      this.#jobs.set(taskId, current);
+      info.job = true;
+      delete info.note;
+      return;
+    }
+    info.job = false;
+    if (link && 'refused' in link && link.limit)
+      info.note = `The host's background job limit is reached (${JOB_LIMIT_CONFIG_KEY} in the profile config), so this task shows only here.`;
+    else if (link && 'refused' in link) info.note = 'The host did not take this task as a job, so it shows only here.';
   }
 
   /** The host agent went away; the process and its background tasks keep running (rules 6, 7). */
@@ -477,7 +642,8 @@ export class SessionRuntime {
   /** What the plugin's session controls show (D35-D38, D4). */
   view(): SessionView {
     this.#restoreMode();
-    const choice: ChoiceView = { applied: {}, resetPending: this.#resetPending };
+    const choice: ChoiceView = { applied: {}, resetPending: this.#resetPending, agentLocked: this.#agentLocked() };
+    if (this.#agentChoice !== undefined) choice.agent = this.#agentChoice;
     const model = this.#port?.modelChoice?.();
     if (model !== undefined) choice.model = model;
     if (this.#effortChoice !== undefined) choice.effort = this.#effortChoice;
@@ -490,7 +656,43 @@ export class SessionRuntime {
     if (this.#port) v.cwd = this.#port.cwd;
     const asks = this.#desk.list();
     if (asks.length > 0) v.asks = asks;
+    if (this.#hub.size > 0) v.children = this.#hub.views();
+    const team = this.#hub.team();
+    if (team) v.team = team;
+    if (this.#taskInfo.size > 0) v.tasks = [...this.#taskInfo.values()].map((t) => ({ ...t }));
+    if (this.#agents) v.agents = this.#agents.map((a) => ({ ...a }));
     return v;
+  }
+
+  /**
+   * D15: the main-thread agent is fixed once the session had a turn (here, or before a restart:
+   * the host log then holds a binding), and for a backend without the picker.
+   */
+  #agentLocked(): boolean {
+    if (this.#factory.staticCapabilities.mainAgentPicker === 'none') return true;
+    if (this.#factory.staticCapabilities.mainAgentPicker === 'any-time') return false;
+    return this.#hadTurn || this.#turnActive || this.#port?.latestBinding() !== undefined;
+  }
+
+  /**
+   * D46: stop one child agent (its task); the others and the main turn keep running. Waits up to
+   * 2 s for the agent's own end, then reports "stopping".
+   */
+  stopChild(childId: string): Promise<{ ok: boolean; status: ChildStatus | 'stopping' | 'unknown'; error?: string }> {
+    return this.#hub.stop(childId);
+  }
+
+  /** D47: stop one background task from the plugin task list (a fallback row, or any task). */
+  async stopTask(taskId: string): Promise<{ ok: boolean; error?: string }> {
+    const backend = this.#backend;
+    if (!this.#tasks.has(taskId)) return { ok: false, error: 'no such running task' };
+    if (!backend?.controls.stopTask) return { ok: false, error: `${this.#factory.displayName} cannot stop one task` };
+    try {
+      await backend.controls.stopTask(taskId);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, error: String((error as Error)?.message ?? error) };
+    }
   }
 
   /** The user answered one ask in the UI. False when it is gone or the choice is not offered. */
@@ -559,6 +761,13 @@ export class SessionRuntime {
     const effortId = req.effort === null || req.effort === SETTINGS_CHOICE ? null : req.effort;
     if (typeof effortId === 'string' && !(caps.efforts ?? []).some((e) => e.id === effortId))
       return fail(`unknown effort: ${effortId}`);
+    const agentId = req.agent === null || req.agent === SETTINGS_CHOICE ? null : req.agent;
+    if (req.agent !== undefined && this.#agentLocked())
+      return fail(
+        caps.mainAgentPicker === 'none'
+          ? `${this.#factory.displayName} has no main-thread agent picker`
+          : 'the main-thread agent can only be picked before the first message of a new session',
+      );
     if (req.model !== undefined) {
       if (!this.#port?.selectModel) return fail('the session is not open');
       this.#port.selectModel(req.model);
@@ -572,7 +781,21 @@ export class SessionRuntime {
       this.#pendingMode = req.mode;
       this.#modeChosen = true;
     }
+    let agentNote: string | undefined;
+    if (req.agent !== undefined && (agentId ?? undefined) !== this.#agentChoice) {
+      this.#agentChoice = agentId ?? undefined;
+      // D15: the agent is a start option. A process the user started with "Start" before the
+      // first message runs without it, so it ends now (idle, no turn yet) and the next message
+      // starts it again with the agent.
+      if (this.#backend && (agentId ?? undefined) !== this.#mainAgent) agentNote = await this.#restartForAgent();
+      else agentNote = `applies when ${this.#factory.displayName} starts`;
+    }
     const backend = this.#backend;
+    if (agentNote !== undefined && req.model === undefined && req.effort === undefined && req.mode === undefined) {
+      this.#notify();
+      return { ok: true, note: agentNote, view: this.view() };
+    }
+    if (agentNote !== undefined) notes.push(agentNote);
     if (this.#resetPending) notes.push(await this.#resetIfIdle());
     else if (backend) {
       const error = await this.#applyChoices(backend);
@@ -592,6 +815,29 @@ export class SessionRuntime {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * D15: a main-agent pick after "Start" and before the first message. The process has no turn yet;
+   * it ends (nothing runs) and the next message starts it again with the agent as a start option.
+   */
+  async #restartForAgent(): Promise<string> {
+    const b = this.#backend;
+    if (!b) return `applies when ${this.#factory.displayName} starts`;
+    if (this.#starting !== undefined || this.#tasks.size > 0 || this.#jobs.size > 0 || this.#turnActive)
+      return `${this.#factory.displayName} is busy; the agent applies at its next start`;
+    await this.#end(false);
+    if (this.#backend === b) {
+      this.#backend = undefined;
+      this.#backendAbort = undefined;
+    }
+    this.#carryMode();
+    this.#appliedModel = undefined;
+    this.#refusedModel = undefined;
+    this.#appliedEffort = undefined;
+    this.#live = {};
+    this.#mainAgent = undefined;
+    return `${this.#factory.displayName} starts again with this agent at the next message`;
   }
 
   /** D35 exact reset: restart with resume and no choices, but only when nothing runs. */
@@ -647,6 +893,18 @@ export class SessionRuntime {
       )
         start = { kind: 'resume', sessionId: derived };
       else start = derived !== undefined ? { kind: 'new', sessionId: derived } : { kind: 'new' };
+      // D15: a new session gets the picked main agent; a resumed one the agent it was started
+      // with (read from the agent's own files, no process, D83). A fork keeps the CLI's own restore.
+      let mainAgent: string | undefined;
+      if (start.kind === 'new' || (start.kind === 'resume' && !this.#agentLocked())) mainAgent = this.#agentChoice;
+      else if (start.kind === 'resume' && f.sessionMainAgent) {
+        try {
+          mainAgent = await f.sessionMainAgent(start.sessionId, port.cwd);
+        } catch (error) {
+          this.#warn('reading the main agent failed', String((error as Error)?.message ?? error));
+        }
+      }
+      if (mainAgent !== undefined) start.mainAgent = mainAgent;
       let trustNotice: string | undefined;
       const trustAccepted = await this.#trustFor(port.cwd, (text) => (trustNotice = text));
       const abort = new AbortController();
@@ -674,13 +932,18 @@ export class SessionRuntime {
       this.#appliedEffort = undefined;
       this.#resetPending = false;
       this.#live = {};
+      this.#mainAgent = mainAgent;
+      if (mainAgent !== undefined) this.#live.agent = mainAgent;
+      this.#agents = undefined;
       if (trustNotice !== undefined) this.#live.notice = { level: 'warning', text: trustNotice, at: this.#now() };
       this.#lastExit = undefined;
       this.#sent.clear();
       this.#tasks = new Set();
+      this.#taskInfo.clear();
       if (!this.#turnActive) this.#idleSince = this.#now();
       void this.#pump(backend);
       this.#loadModels(backend);
+      this.#loadAgents(backend);
       return backend;
     })();
     this.#notify();
@@ -708,35 +971,58 @@ export class SessionRuntime {
 
   #route(e: BackendEvent, from: AgentBackendSession): void {
     if (from !== this.#backend) return; // a process we already replaced or ended
+    // D45: child agents get their own child sessions (the live-child registry, ./children.ts).
+    // Their events never reach this session's log (a child step would break the main step, D17).
+    if (isChildEvent(e)) {
+      this.#hub.handle(e);
+      this.#notify();
+      return;
+    }
     switch (e.type) {
       case 'task-start': {
         this.#tasks.add(e.taskId);
-        const link = this.#port?.startJob({ taskId: e.taskId, kind: e.kind, label: e.label }, () => {
-          void from.controls.stopTask?.(e.taskId).catch((err) => this.#warn('stopTask failed', String(err)));
-        });
-        if (link) this.#jobs.set(e.taskId, link);
+        const info: TaskView = { taskId: e.taskId, kind: e.kind, label: e.label, status: 'running', job: false };
+        if (e.agent?.kind === 'child') info.agent = e.agent.id;
+        this.#taskInfo.set(e.taskId, info);
+        this.#linkJob(e.taskId);
         this.#notify();
         return;
       }
-      case 'task-progress':
+      case 'task-progress': {
         if (e.summary) this.#jobs.get(e.taskId)?.progress(e.summary);
+        const info = this.#taskInfo.get(e.taskId);
+        if (info && e.summary) info.progress = e.summary;
+        if (this.#hub.progress(e.taskId, e.usage) || info) this.#notify();
         return;
-      case 'task-end':
+      }
+      case 'task-end': {
         this.#tasks.delete(e.taskId);
         this.#jobs.get(e.taskId)?.end(e.status, e.summary);
         this.#jobs.delete(e.taskId);
+        const info = this.#taskInfo.get(e.taskId);
+        if (info) {
+          this.#taskInfo.delete(e.taskId);
+          // D26: the next wake trigger names what ended in the background.
+          const word = e.status === 'completed' ? 'finished' : e.status;
+          this.#wakeNotes.push(`background ${info.kind} "${info.label}" ${word}`);
+          if (this.#wakeNotes.length > 20) this.#wakeNotes = this.#wakeNotes.slice(-20);
+        }
         this.#touchIdle();
         this.#notify();
         return;
-      case 'tasks-snapshot':
-        // The full list (D47): it corrects drift for the reaping check.
+      }
+      case 'tasks-snapshot': {
+        // The full list (D47): it corrects drift for the reaping check and the task list.
         this.#tasks = new Set(e.taskIds);
+        for (const id of [...this.#taskInfo.keys()]) if (!this.#tasks.has(id)) this.#taskInfo.delete(id);
         return;
+      }
       case 'exit':
         this.#exit(e, from);
         return;
       case 'session-info':
         this.#live = this.#live.notice ? { notice: this.#live.notice } : {};
+        if (this.#mainAgent !== undefined) this.#live.agent = this.#mainAgent;
         if (e.model !== undefined) this.#live.model = e.model;
         if (e.mode !== undefined) this.#live.mode = e.mode;
         if (e.version !== undefined) this.#live.version = e.version;
@@ -786,8 +1072,10 @@ export class SessionRuntime {
     } else if (TURN_EVENTS.has(e.type)) {
       // D26: the agent started a turn by itself; a log-only notice opens a host turn for it.
       this.#wakeBuffer = [e];
+      this.#wakeText = this.#wakeSummary();
+      this.#wakeItems = [...this.#wakeNotes];
       const port = this.#port;
-      if (port) port.wake(`${this.#factory.displayName} continued on its own`);
+      if (port) port.wake(this.#wakeText);
       else this.#wakePending = true;
     }
   }
@@ -815,6 +1103,10 @@ export class SessionRuntime {
     for (const [, link] of this.#jobs) link.end('failed', e.error ?? `${this.#factory.displayName} ended`);
     this.#jobs.clear();
     this.#tasks = new Set();
+    this.#taskInfo.clear();
+    // D74: every live child closes its open step and ends its turn, before the root turn ends.
+    if (intended) this.#hub.endAll('stopped', `${this.#factory.displayName} was stopped`);
+    else this.#hub.endAll('failed', crashMessage(this.#factory.displayName, e.error));
     // A new process has none of this process's inputs: an unclaimed steer is sent again (D22).
     this.#sent.clear();
     this.#earlySteers = [];
@@ -891,6 +1183,19 @@ export class SessionRuntime {
         this.#notify();
       },
       (error) => this.#warn('reading the model list failed', String(error)),
+    );
+  }
+
+  /** D51: the live process's agent list for the main-thread picker (no extra process, rule 9). */
+  #loadAgents(backend: AgentBackendSession): void {
+    if (!backend.controls.agents) return;
+    backend.controls.agents().then(
+      (list) => {
+        if (backend !== this.#backend) return;
+        this.#agents = list;
+        this.#notify();
+      },
+      (error) => this.#warn('reading the agent list failed', String(error)),
     );
   }
 
@@ -980,6 +1285,7 @@ export class SessionRuntime {
     if (fresh.length === 0 && waiting.length === 0 && !wake)
       return input.userInputs.length > 0 ? { kind: 'completed' } : { kind: 'nothing' };
     this.#turnActive = true;
+    this.#hadTurn = true;
     this.#idleSince = undefined;
     let backend: AgentBackendSession;
     // Stop while the process starts: a trust question waiting for the user is declined (D73).
@@ -1008,6 +1314,12 @@ export class SessionRuntime {
     for (const e of this.#wakeBuffer ?? []) box.push(e);
     this.#wakeBuffer = undefined;
     this.#wakePending = false;
+    // D26: a wake turn shows what woke it, once, in its first step (log-only for the agent).
+    this.#triggerPending = wake ? (this.#wakeText ?? this.#wakeSummary()) : undefined;
+    this.#triggerItems = wake ? (this.#wakeItems ?? [...this.#wakeNotes]).slice(-20) : [];
+    this.#wakeText = undefined;
+    this.#wakeItems = undefined;
+    this.#wakeNotes = [];
     this.#notify();
 
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1085,6 +1397,9 @@ export class SessionRuntime {
       if (current) for (const e of rest) this.#route(e, current);
       this.#notify();
     }
+    this.#triggerPending = undefined;
+    // D74: children closed by a crash, force stop or interrupt end their turns before this one.
+    if (outcome!.kind !== 'completed') await this.#hub.quiesce(1500);
     if (sendError !== undefined && outcome!.kind === 'completed') return { kind: 'error', message: sendError };
     return outcome!;
   }
@@ -1123,13 +1438,28 @@ export class SessionRuntime {
     });
   }
 
+  /** Open a step; the first step of a wake turn carries the turn's visible trigger (D26). */
+  #openStep(sink: TurnSink): void {
+    sink.openStep();
+    const text = this.#triggerPending;
+    if (text === undefined) return;
+    this.#triggerPending = undefined;
+    const items = this.#triggerItems;
+    this.#triggerItems = [];
+    try {
+      sink.trigger?.(text, items);
+    } catch (error) {
+      this.#warn('could not write the wake trigger', String((error as Error)?.message ?? error));
+    }
+  }
+
   #handle(sink: TurnSink, e: Item, prepared?: SinkResultContent[]): TurnOutcome | undefined {
     try {
       switch (e.type) {
         case 'step-start':
           if (sink.stepOpen) sink.closeStep(); // stale step: attempt or repairs, then step/end (D18)
           this.#claimConsumed(sink);
-          sink.openStep();
+          this.#openStep(sink);
           return undefined;
         case 'delta':
           sink.delta(e.kind, e.blockIndex, e.text, e.at);
@@ -1139,7 +1469,7 @@ export class SessionRuntime {
           const continued = sink.stepOpen && sink.hasMessage;
           if (!sink.stepOpen) {
             this.#claimConsumed(sink);
-            sink.openStep();
+            this.#openStep(sink);
           }
           const m: Parameters<TurnSink['commit']>[0] = { blocks: e.blocks, binding: this.#binding() };
           if (e.usage) m.usage = e.usage;
@@ -1177,7 +1507,10 @@ export class SessionRuntime {
           for (const entry of this.#sent.values()) entry.consumed = true; // the agent has nothing pending
           this.#claimConsumed(sink);
           if (e.outcome === 'error') return { kind: 'error', message: e.error ?? 'the agent reported an error' };
-          if (e.outcome === 'interrupted') return { kind: 'interrupted' };
+          if (e.outcome === 'interrupted') {
+            this.#hub.endForeground(); // D74: foreground children end with the main turn
+            return { kind: 'interrupted' };
+          }
           return { kind: 'completed' };
         case 'ended':
           return { kind: 'interrupted' };
@@ -1190,6 +1523,7 @@ export class SessionRuntime {
           // Steers it never took go back to the user rather than run unseen later (D25).
           const unconsumed = [...this.#sent].filter(([, s]) => s.steer && !s.consumed).map(([id]) => id);
           this.#returnSteers(unconsumed);
+          this.#hub.endForeground(); // D74
           return { kind: 'interrupted' };
         }
         default:
@@ -1239,6 +1573,7 @@ export class SessionRuntime {
     this.#desk.dropAll();
     await this.#end(false);
     this.#box?.push({ type: 'ended' }); // a running turn ends as stopped, not as a crash
+    await this.#hub.dispose(); // D74: child turns closed, child sessions released
     this.#backend = undefined;
     this.#port = undefined;
     // Close every interaction channel of this session: the session is gone (D39).

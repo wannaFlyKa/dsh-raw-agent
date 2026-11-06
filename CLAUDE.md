@@ -68,6 +68,11 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Workspace trust:** in SDK mode without `workspaceTrust` the CLI ignores the project's `permissions` rules (hooks, env and CLAUDE.md still apply). Ask the TUI's trust question first and pass `workspaceTrust` only after the user accepts; the CLI writes its own trust record.
 - **SDK import side effect:** SDK 0.3.318 sets `NoDefaultCurrentDirectoryInExePath=1` in `process.env` at import, on every OS. Load the SDK lazily and restore the env (D7).
 - **DSH terminal tab** (`sidebarRight.openTabIn(session, 'terminal')`) opens only in the session folder; it cannot start in another folder.
+- **DSH composer chain order:** DSH tries `conversation.composer` entries in ascending priority. ui-subagent's read-only child composer is at -10, so our child ask composer must sit below it (-20) and match only our own kind.
+- **Child asks:** a child session has its own (empty) client store. Keep asks published on a child in a separate map, or the child's store removes the parent's publication on every poll.
+- **Child usage numbers:** the last `task_progress` comes early. Use the `task_notification`'s final `usage`, and never show a finished child's run time below its wall time.
+- **SIGKILL of DSH leaves the CLI running** while a background task runs (it re-parents to pid 1 and may run one wake turn by itself). A normal stop or restart is clean. Open: D75 pid check.
+- **DSH's job-list Stop needs two presses** (arm, then confirm). A live driver that presses once only arms it.
 - **Track an input only after its SDK message is built.** A send that throws after `tracker.sent()` leaves a pending id, and every later turn end then waits for it forever.
 
 ## 5. Development workflow
@@ -121,4 +126,6 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Ignore rules** are anchored (`/research/`, `/.dsh-dev/`) so that `docs/research/` is tracked.
 - **Bypass in live tests:** `bypassPermissions` needs the plugin option `allowDangerouslySkipPermissions: true` (in the dev profile's `cordis.patch.yml`, row `raw-agent`, `config.options`). Restore the patch afterwards.
 - **Live MCP elicitation tests:** a scratch stdio MCP server times out its request after 60 s, so drive the card quickly.
+- **Live job tests:** set `DSH_RAW_AGENT_TEST_JOB_WAIT_MS=20000` on the test DSH process to shorten job waits (default 1 h), so a task can outlive a wait. Test only; never set it for users.
+- **Live team tests:** set `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` on the test DSH process only (the plugin never sets it).
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

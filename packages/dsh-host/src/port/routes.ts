@@ -97,6 +97,12 @@ export function mountConfigRoutes(ctx: CordisContext, factories: readonly AgentB
 export const START_ROUTE = '/api/raw-agent/start';
 export const FORCE_STOP_ROUTE = '/api/raw-agent/force-stop';
 export const STATE_ROUTE = '/api/raw-agent/state';
+/** D46: stop one child agent (`?session=…&child=…`); the others keep running. */
+export const CHILD_STOP_ROUTE = '/api/raw-agent/child-stop';
+/** D47: stop one background task from the plugin task list (`?session=…&task=…`). */
+export const TASK_STOP_ROUTE = '/api/raw-agent/task-stop';
+/** D45: which of our sessions holds this host child session (`?session=<child host id>`). */
+export const CHILD_OF_ROUTE = '/api/raw-agent/child-of';
 
 /**
  * The lifecycle routes over the Host registry (D87). A session id names only a runtime the
@@ -152,6 +158,54 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
         return { status: 200, body: { state: r.state(), returnedDrafts: registry.takeDrafts(id) } };
       }),
     },
+    {
+      path: CHILD_STOP_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        const child = url.searchParams.get('child');
+        if (!id || !child) return json(400, { error: 'missing session or child' });
+        const r = registry.get(id);
+        if (!r) return json(missing.status, missing.body);
+        try {
+          const result = await r.stopChild(child);
+          return json(result.ok ? 200 : result.status === 'unknown' ? 404 : 409, result);
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: TASK_STOP_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      async fetch(request) {
+        const url = new URL(request.url);
+        const id = url.searchParams.get('session');
+        const task = url.searchParams.get('task');
+        if (!id || !task) return json(400, { error: 'missing session or task' });
+        const r = registry.get(id);
+        if (!r) return json(missing.status, missing.body);
+        try {
+          const result = await r.stopTask(task);
+          return json(result.ok ? 200 : 409, result);
+        } catch (e) {
+          return json(500, { error: String((e as Error)?.message ?? e) });
+        }
+      },
+    },
+    {
+      path: CHILD_OF_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: handler(async (id) => {
+        const found = registry.findChild?.(id);
+        if (!found) return { status: 404, body: { error: 'not a child session of this plugin' } };
+        return { status: 200, body: found };
+      }),
+    },
     ...(controls ? sessionControlRoutes(registry, controls) : []),
   ];
 }
@@ -192,7 +246,12 @@ export function parseChoice(body: unknown): SessionChoiceRequest | string {
     if (typeof b.mode !== 'string' || !MODEL_ID.test(b.mode)) return 'bad mode';
     out.mode = b.mode;
   }
-  if (out.model === undefined && out.effort === undefined && out.mode === undefined) return 'nothing to choose';
+  if (b.agent !== undefined) {
+    if (b.agent !== null && (typeof b.agent !== 'string' || !MODEL_ID.test(b.agent))) return 'bad agent';
+    out.agent = b.agent as string | null;
+  }
+  if (out.model === undefined && out.effort === undefined && out.mode === undefined && out.agent === undefined)
+    return 'nothing to choose';
   return out;
 }
 
@@ -239,9 +298,21 @@ export function parseAnswer(body: unknown): ({ ask: string } & AskReply) | strin
   return out;
 }
 
-/** One line of the interaction channel: the open asks and the process state (D39). */
+/**
+ * One line of the interaction channel: the open asks and the process state (D39), plus the
+ * child rows, team roster and task list (R6.1-R6.3), so live child output shows without a poll.
+ */
 export function channelLine(view: SessionView): string {
-  return `${JSON.stringify({ type: 'asks', asks: view.asks ?? [], state: view.state, live: view.live })}\n`;
+  const line = {
+    type: 'asks',
+    asks: view.asks ?? [],
+    state: view.state,
+    live: view.live,
+    children: view.children ?? [],
+    team: view.team ?? null,
+    tasks: view.tasks ?? [],
+  };
+  return `${JSON.stringify(line)}\n`;
 }
 
 /**
@@ -335,6 +406,8 @@ export function sessionControlRoutes(registry: SessionRegistry, deps: SessionCon
     if (!runtime || !factory) return undefined;
     const view = runtime.view();
     const live = view.models ?? registry.lastModels(factory.kind);
+    // D51: the agent list of this process, else of a recent process in the same folder.
+    const agentList = view.agents ?? registry.lastAgents?.(factory.kind, view.cwd);
     const models = [...(live ?? [])];
     for (const seed of deps.seedModels ?? [])
       if (!models.some((m) => m.value === seed)) models.push({ value: seed, displayName: seed });
@@ -385,6 +458,9 @@ export function sessionControlRoutes(registry: SessionRegistry, deps: SessionCon
       needsProcess: factory.staticCapabilities.needsProcess,
       models,
       modelsFrom: live ? (view.models ? 'session' : 'recent') : 'none',
+      mainAgentPicker: factory.staticCapabilities.mainAgentPicker,
+      agents: [...(agentList ?? [])],
+      agentsFrom: agentList ? (view.agents ? 'session' : 'recent') : 'none',
       settings,
       trust,
       view,

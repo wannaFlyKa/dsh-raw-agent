@@ -14,6 +14,7 @@ import {
   TEARDOWN_REASONS,
   crashMessage,
   lifecycleRoutes,
+  setJobWaitForTests,
   startJob,
   type HostSessionPort,
   type RuntimeState,
@@ -497,6 +498,51 @@ describe('job teardown (D47)', () => {
     expect(k.stopped()).toBe(1);
     k.link!.end('stopped');
     expect((await k.done).status).toBe('killed');
+  });
+});
+
+describe('job waits (D47, test-only override)', () => {
+  it('a shorter test wait keeps two overlapping waits pending until the job settles', async () => {
+    const waits: number[] = [];
+    let finish!: Promise<{ status: string }>;
+    const jobs = {
+      start(spec: { run(h: unknown): { cancel(r?: string): void; done: Promise<{ status: string }> } }) {
+        finish = spec.run({ id: 'j', append() {}, updateProgress() {} }).done;
+        return 'j';
+      },
+      wait: async (_id: string, ms: number) => void waits.push(ms),
+      attachController: () => () => {},
+    };
+    setJobWaitForTests(100);
+    try {
+      const link = startJob(
+        jobs as never,
+        'o',
+        { taskId: 't', kind: 'shell', label: 'l' },
+        () => {},
+        () => {},
+      );
+      await new Promise((r) => setTimeout(r, 170));
+      expect(waits.length).toBeGreaterThanOrEqual(3);
+      expect(new Set(waits)).toEqual(new Set([100]));
+      link!.end('completed');
+      expect((await finish).status).toBe('completed');
+      const n = waits.length;
+      await new Promise((r) => setTimeout(r, 120));
+      expect(waits.length).toBe(n);
+    } finally {
+      setJobWaitForTests(undefined);
+    }
+    const jobs2 = { ...jobs, start: jobs.start };
+    waits.length = 0;
+    startJob(
+      jobs2 as never,
+      'o',
+      { taskId: 't2', kind: 'shell', label: 'l' },
+      () => {},
+      () => {},
+    );
+    expect(waits).toEqual([60 * 60 * 1000]);
   });
 });
 

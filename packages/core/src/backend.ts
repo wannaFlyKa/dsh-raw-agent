@@ -28,6 +28,17 @@ export interface AgentBackendFactory {
    * and permission mode. For display only; the agent applies its own settings itself.
    */
   settingsDefaults?(cwd: string): Promise<SettingsDefaults>;
+  /**
+   * D49, D50: a child agent's own transcript as backend events (steps, tool results and the
+   * agent's inputs, all with `agent: ref`), read from the agent's files. For a cold child view
+   * after a restart and for teammate transcripts. No `agent-start` / `agent-end`.
+   */
+  readAgentTranscript?(sessionId: string, ref: AgentRef, cwd: string): Promise<BackendEvent[]>;
+  /**
+   * D15 (r4): the main-thread agent a session was started with, read from the agent's own
+   * files, so a resume after a restart passes the same agent again. Undefined: none found.
+   */
+  sessionMainAgent?(sessionId: string, cwd: string): Promise<string | undefined>;
 
   /** Only when ids === 'host-chosen' (D5): deterministic, no storage. */
   sessionIdFor?(hostSessionId: string): string;
@@ -136,6 +147,18 @@ export interface BackendControls {
   agents?(): Promise<AgentInfo[]>;
   commands?(): Promise<CommandInfo[]>;
   contextUsage?(detail: 'summary' | 'full'): Promise<ContextUsage>;
+  /** The end of a background shell or monitor task's output (Claude: `getTaskOutput`). */
+  taskOutput?(taskId: string): Promise<TaskOutput>;
+  /** Send a message to a running teammate (D50). Absent when the agent has no such control. */
+  messageTeammate?(ref: AgentRef, text: string): Promise<void>;
+}
+
+export interface TaskOutput {
+  /** Plain text as the command wrote it (escape sequences included); render it as text. */
+  output: string;
+  totalBytes: number;
+  /** true: `output` is only the end of a longer output. */
+  truncated: boolean;
 }
 
 export type AgentRef = { kind: 'main' } | { kind: 'child'; id: string };
@@ -333,6 +356,8 @@ export interface ModelInfo {
 export interface AgentInfo {
   name: string;
   description?: string;
+  /** The agent's own model choice as the agent reports it ('inherit' = the parent's model). */
+  model?: string;
 }
 
 export interface CommandInfo {
@@ -419,4 +444,9 @@ export interface SessionChoiceRequest {
   model?: string;
   effort?: string | null;
   mode?: string;
+  /**
+   * D15, D51: the main-thread agent for a new session (a pending choice, passed at spawn). `null`
+   * or 'settings' means "no agent" (the agent's own settings decide). Refused after the first turn.
+   */
+  agent?: string | null;
 }

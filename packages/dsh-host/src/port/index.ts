@@ -41,6 +41,9 @@ export {
   START_ROUTE,
   FORCE_STOP_ROUTE,
   STATE_ROUTE,
+  CHILD_STOP_ROUTE,
+  TASK_STOP_ROUTE,
+  CHILD_OF_ROUTE,
   SESSION_ROUTE,
   CHOICE_ROUTE,
   ANSWER_ROUTE,
@@ -53,7 +56,16 @@ export {
   parseAnswer,
   type SessionControlDeps,
 } from './routes.js';
-export { startJob, jobKind, JOB_WAIT_MS, JOB_REWAIT_MS, TEARDOWN_REASONS } from './jobs.js';
+export {
+  startJob,
+  jobKind,
+  isJobLimitError,
+  setJobWaitForTests,
+  JOB_WAIT_MS,
+  JOB_REWAIT_MS,
+  TEARDOWN_REASONS,
+} from './jobs.js';
+export { createChildSession, childPreStep, liveChildCount, type ChildPortOptions } from './children.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);

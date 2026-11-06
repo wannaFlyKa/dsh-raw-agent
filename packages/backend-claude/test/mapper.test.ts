@@ -404,8 +404,10 @@ describe('mapper edge cases', () => {
     expect(run([{ type: 'system', subtype: 'informational', content: '  ' }])).toEqual([]);
   });
 
-  it('ignores child messages and foreground tasks in the spike', () => {
-    expect(run([{ ...assistant('m1', 'u1', { type: 'text', text: 'x' }), parent_tool_use_id: 'toolu_x' }])).toEqual([]);
+  it('maps child messages only as child events, never into the main turn; no job for a foreground task', () => {
+    const ev = run([{ ...assistant('m1', 'u1', { type: 'text', text: 'x' }), parent_tool_use_id: 'toolu_x' }]);
+    expect(ev.map((e) => e.type)).toEqual(['agent-start', 'step-start', 'step-message']);
+    expect(ev.every((e) => e.type === 'agent-start' || ('agent' in e && e.agent.kind === 'child'))).toBe(true);
     expect(
       run([{ type: 'system', subtype: 'task_started', task_id: 't', task_type: 'local_bash', is_backgrounded: false }]),
     ).toEqual([]);

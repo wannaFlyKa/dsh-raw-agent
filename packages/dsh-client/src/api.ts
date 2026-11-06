@@ -3,6 +3,7 @@
 // come from the Host.
 
 import type {
+  AgentInfo,
   ConfigFileInfo,
   EffortInfo,
   ModelInfo,
@@ -31,7 +32,14 @@ export interface SessionViewWire {
     waiting?: number;
     lastExit?: { error?: string; at: number; duringTurn: boolean };
   };
-  live: { model?: string; mode?: string; version?: string; notice?: { level: string; text: string; at: number } };
+  live: {
+    model?: string;
+    mode?: string;
+    version?: string;
+    notice?: { level: string; text: string; at: number };
+    /** D15: the main-thread agent the process runs with. */
+    agent?: string;
+  };
   choice: {
     model?: string;
     effort?: string;
@@ -39,11 +47,94 @@ export interface SessionViewWire {
     applied: { model?: string; effort?: string };
     refused?: { model: string };
     resetPending: boolean;
+    /** D15, D51: the main-thread agent picked for this new session. */
+    agent?: string;
+    /** The main-thread agent cannot change any more (the session had a turn). */
+    agentLocked?: boolean;
   };
   models?: ModelInfo[];
   cwd?: string;
   /** Asks waiting for the user's answer; the Host never answers them itself. */
   asks?: AskWire[];
+  /** Child agents of this session (D45, D46): the tree and per-child rows. */
+  children?: ChildWire[];
+  /** The team roster (D50). */
+  team?: TeamWire;
+  /** Background tasks (D47), including the plugin-only rows past the host's job limit. */
+  tasks?: TaskWire[];
+  /** D51: the agents the live process lists. */
+  agents?: AgentInfo[];
+}
+
+export type ChildStatusWire = 'starting' | 'running' | 'completed' | 'failed' | 'stopped';
+
+/** One child agent row (mirrors dsh-host `ChildView`). */
+export interface ChildWire {
+  id: string;
+  /** `'main'` or the parent child's id. */
+  parent: string;
+  label: string;
+  role: 'subagent' | 'teammate' | 'workflow-agent';
+  status: ChildStatusWire;
+  background: boolean;
+  depth: number;
+  agentType?: string;
+  name?: string;
+  team?: string;
+  hostSessionId?: string;
+  tokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+  startedAt: number;
+  endedAt?: number;
+  summary?: string;
+  wakes: number;
+  wokenBy?: string;
+  inputs: number;
+  stopping?: boolean;
+  noSession?: boolean;
+  /** The parent's tool call that started the child (D77). */
+  callId?: string;
+  /** The child's latest output line (R6.1). */
+  last?: { kind: 'text' | 'reasoning' | 'tool'; text: string; at: number };
+}
+
+export interface TeamMessageWire {
+  from: string;
+  to: string;
+  text: string;
+  summary?: string;
+  /** `'main'` or a child id. */
+  sender: string;
+  at: number;
+}
+
+/** The team roster model (mirrors dsh-host `TeamView`). */
+export interface TeamWire {
+  teams: Array<{ name: string; members: string[] }>;
+  messages: TeamMessageWire[];
+  /** The agent takes messages from the user to a teammate (D50). */
+  messaging: boolean;
+}
+
+/** One background task row (mirrors dsh-host `TaskView`). */
+export interface TaskWire {
+  taskId: string;
+  kind: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  progress?: string;
+  /** A host job mirrors it; false: only this row does. */
+  job: boolean;
+  note?: string;
+  /** The child agent this task runs. */
+  agent?: string;
+}
+
+/** What `GET api/raw-agent/child-of` answers for a host child session (D45). */
+export interface ChildLinkWire {
+  parentSession: string;
+  childId: string;
 }
 
 /** One choice of an ask (mirrors dsh-host `AskChoice`). */
@@ -143,7 +234,14 @@ export interface UnavailableModeWire extends PermissionModeInfo {
 
 /** One line of `GET api/raw-agent/interactions` (D39). */
 export type ChannelLine =
-  | { type: 'asks'; asks: AskWire[]; state?: SessionViewWire['state']; live?: SessionViewWire['live'] }
+  | {
+      type: 'asks';
+      asks: AskWire[];
+      state?: SessionViewWire['state'];
+      live?: SessionViewWire['live'];
+      /** Present when the Host sends the agent rows on the channel (R6.1-R6.3). */
+      agents?: { children: ChildWire[]; team?: TeamWire; tasks: TaskWire[] };
+    }
   | { type: 'ping' };
 
 /** `GET api/raw-agent/session` */
@@ -158,6 +256,11 @@ export interface SessionInfo {
   needsProcess: string[];
   models: ModelInfo[];
   modelsFrom: 'session' | 'recent' | 'none';
+  /** D15, D51: when the main-thread agent can be picked. */
+  mainAgentPicker?: 'new-session-only' | 'any-time' | 'none';
+  /** D51: the agents to pick from (the live process's list, or a recent one for this folder). */
+  agents?: AgentInfo[];
+  agentsFrom?: 'session' | 'recent' | 'none';
   settings?: SettingsDefaults;
   /** Present when the agent does not trust the session folder yet (R1.2, D73). */
   trust?: { state: string; directory: string; effect?: string };
@@ -239,6 +342,12 @@ export interface RawAgentApi {
    * `onLine`. Rejects with a RouteError for a non-200 answer.
    */
   interactions(sessionId: string, signal: AbortSignal, onLine: (line: ChannelLine) => void): Promise<void>;
+  /** D46: stop one child agent; the others keep running. */
+  stopChild(sessionId: string, childId: string): Promise<{ ok: boolean; status?: string; error?: string }>;
+  /** D47: stop one background task. */
+  stopTask(sessionId: string, taskId: string): Promise<{ ok: boolean; error?: string }>;
+  /** D45: which of our sessions holds this host child session; undefined when none does. */
+  childOf(childSessionId: string): Promise<ChildLinkWire | undefined>;
   configFiles(sessionId: string): Promise<{ backend: string; files: ConfigFileItem[] }>;
   configFile(sessionId: string, scope: string): Promise<ConfigFilePreviewWire>;
   reveal(sessionId: string, scope: string, index: number): Promise<{ index: number; key?: string; value: string }>;
@@ -308,6 +417,32 @@ export function createApi(fetchFn: FetchFn): RawAgentApi {
         if (line) onLine(line);
       });
     },
+    async stopChild(id, child) {
+      const r = await fetchFn(`${BASE}/child-stop?${q(id)}&child=${encodeURIComponent(child)}`, post());
+      const body = (await r.json().catch(() => undefined)) as
+        { ok?: boolean; status?: string; error?: string } | undefined;
+      if (r.ok) return { ok: body?.ok !== false, ...(body?.status ? { status: body.status } : {}) };
+      return {
+        ok: false,
+        error: body?.error ?? `request failed (${r.status})`,
+        ...(body?.status ? { status: body.status } : {}),
+      };
+    },
+    async stopTask(id, task) {
+      const r = await fetchFn(`${BASE}/task-stop?${q(id)}&task=${encodeURIComponent(task)}`, post());
+      const body = (await r.json().catch(() => undefined)) as { ok?: boolean; error?: string } | undefined;
+      if (r.ok) return { ok: body?.ok !== false };
+      return { ok: false, error: body?.error ?? `request failed (${r.status})` };
+    },
+    async childOf(id) {
+      const r = await fetchFn(`${BASE}/child-of?${q(id)}`);
+      if (r.status === 404) return undefined;
+      const body = (await r.json().catch(() => undefined)) as (Partial<ChildLinkWire> & { error?: string }) | undefined;
+      if (!r.ok) throw new RouteError(r.status, body?.error ?? `request failed (${r.status})`);
+      if (typeof body?.parentSession !== 'string' || typeof body.childId !== 'string')
+        throw new RouteError(r.status, 'the answer names no parent session');
+      return { parentSession: body.parentSession, childId: body.childId };
+    },
     configFiles: (id) => read(fetchFn, `${BASE}/config-files?${q(id)}`),
     configFile: (id, scope) => read(fetchFn, `${BASE}/config-file?${q(id)}&scope=${encodeURIComponent(scope)}`),
     reveal: (id, scope, index) =>
@@ -342,6 +477,25 @@ export function parseChannelLine(text: string): ChannelLine | undefined {
   // The live line (mode, notice): a command's answer shows without waiting for the next read.
   const live = (v as { live?: unknown }).live;
   if (typeof live === 'object' && live !== null && !Array.isArray(live)) line.live = live as SessionViewWire['live'];
+  // The agent rows (R6.1-R6.3): all three or none, so an older Host line keeps the polled rows.
+  const rows = v as { children?: unknown; team?: unknown; tasks?: unknown };
+  if (Array.isArray(rows.children) && Array.isArray(rows.tasks)) {
+    const children = rows.children.filter(
+      (c): c is ChildWire =>
+        typeof c === 'object' &&
+        c !== null &&
+        typeof (c as ChildWire).id === 'string' &&
+        typeof (c as ChildWire).label === 'string',
+    );
+    const tasks = rows.tasks.filter(
+      (t): t is TaskWire => typeof t === 'object' && t !== null && typeof (t as TaskWire).taskId === 'string',
+    );
+    const team =
+      typeof rows.team === 'object' && rows.team !== null && Array.isArray((rows.team as TeamWire).teams)
+        ? (rows.team as TeamWire)
+        : undefined;
+    line.agents = { children, tasks, ...(team ? { team } : {}) };
+  }
   return line;
 }
 

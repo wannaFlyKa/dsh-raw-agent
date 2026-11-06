@@ -40,7 +40,9 @@ function scrubString(s) {
     .replace(UUID_RE, uuid)
     .replace(/\/tmp\/claude-\d+\//g, '/tmp/claude-UID/')
     .replace(/-tmp-dsh-raw-p1-[a-z-]+/g, '-tmp-scratch')
-    .replace(/\/tmp\/dsh-raw-p1-[a-z-]+/g, '/tmp/scratch');
+    .replace(/\/tmp\/dsh-raw-p1-[a-z-]+/g, '/tmp/scratch')
+    .replace(/-tmp-raw-[a-z0-9-]+/g, '-tmp-scratch')
+    .replace(/\/tmp\/raw-[a-z0-9-]+/g, '/tmp/scratch');
   if (process.env.HOME) out = out.split(process.env.HOME).join('/home/user');
   for (const id of taskIds) out = out.split(id).join(renumber('task', id, (n) => `task_${String(n).padStart(2, '0')}`));
   return out;

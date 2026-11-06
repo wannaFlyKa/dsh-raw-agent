@@ -9,8 +9,10 @@ import {
   type BackendCapabilities,
   type BackendControls,
   type BackendEvent,
+  type AgentInfo,
   type ContextUsage,
   type ModelInfo,
+  type TaskOutput,
   type UserInput,
 } from '@dsh-raw-agent/core';
 import { ClaudeMessageMapper } from './mapper.js';
@@ -160,6 +162,14 @@ export class ClaudeBackendSession implements AgentBackendSession {
     return this.#cliVersion;
   }
 
+  /**
+   * D77: the label of a child agent for an ask: the child's name or task description from the
+   * spawning call (a teammate's name), else the frame's `subagent_type: task_description`.
+   */
+  agentLabel(agentId: string): string | undefined {
+    return this.#mapper.children.label(agentId) ?? this.#asks.agentLabel(agentId);
+  }
+
   /** What the interaction adapter reads about the live session (D42, D43, D44, D77). */
   get asks(): AskContext {
     return this.#asks;
@@ -287,7 +297,12 @@ export class ClaudeBackendSession implements AgentBackendSession {
       },
       agents: async () => {
         const list = await q.supportedAgents();
-        return list.map((a) => (a.description ? { name: a.name, description: a.description } : { name: a.name }));
+        return list.map((a) => {
+          const info: AgentInfo = { name: a.name };
+          if (a.description) info.description = a.description;
+          if (typeof a.model === 'string' && a.model !== '') info.model = a.model;
+          return info;
+        });
       },
       commands: async () => {
         const list = await q.supportedCommands();
@@ -297,6 +312,18 @@ export class ClaudeBackendSession implements AgentBackendSession {
           if (c.argumentHint) info.argumentHint = c.argumentHint;
           return info;
         });
+      },
+      // The end of a background shell or Monitor output, as the TUI's /tasks view reads it
+      // (undeclared `getTaskOutput`, D9; live M3 probe B). Read-only, no model turn.
+      taskOutput: async (taskId) => {
+        const r = await optionalControl<Loose>(q, 'getTaskOutput', taskId);
+        if (r === undefined) throw new Error('this Claude Code version cannot read task output');
+        const out: TaskOutput = {
+          output: typeof r.output === 'string' ? r.output : '',
+          totalBytes: typeof r.total_bytes === 'number' ? r.total_bytes : 0,
+          truncated: r.truncated === true,
+        };
+        return out;
       },
       contextUsage: async (detail) => {
         const r = (await optionalControl<Loose>(q, 'getContextUsage', { detail })) ?? {};

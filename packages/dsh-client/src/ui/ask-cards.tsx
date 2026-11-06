@@ -863,13 +863,15 @@ export function AskPanel(props: {
   actions: HostActions;
   /** The ask to show first (the pending interaction the composer elected). */
   askId?: string;
+  /** Show only these asks (a child's own view shows the asks of that child, R6.1). */
+  only?: (ask: AskWire) => boolean;
 }): React.ReactElement | null {
-  const { store, actions } = props;
+  const { store, actions, only } = props;
   const snap = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [picked, setPicked] = React.useState<string | undefined>();
   const info = snap.info;
   if (!info) return null;
-  const asks = [...(info.view.asks ?? [])].sort((a, b) => a.at - b.at);
+  const asks = [...(info.view.asks ?? [])].filter((a) => !only || only(a)).sort((a, b) => a.at - b.at);
   if (asks.length === 0) return null;
   const ask = asks.find((a) => a.id === picked) ?? asks.find((a) => a.id === props.askId) ?? asks[0]!;
   const others = asks.filter((a) => a !== ask);

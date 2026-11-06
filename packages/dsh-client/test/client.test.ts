@@ -367,7 +367,7 @@ describe('port', () => {
     const ctx = {
       slots: {
         inject: (key: string, cb: () => unknown) => {
-          expect(key).toBe(CONTROLS_SLOT);
+          expect([CONTROLS_SLOT, 'conversation.session.header.actions']).toContain(key);
           cb();
           return () => {};
         },
@@ -380,10 +380,14 @@ describe('port', () => {
       effect: (fn: () => () => void) => void effects.push(fn),
     };
     const stores = mountClient(ctx as never, { fetch: fakeFetch(() => ({ status: 404, body: {} })).fetchFn });
-    expect(registered).toHaveLength(1);
-    expect(registered[0]!.options).toMatchObject({ name: 'conversation.input.left', id: 'raw-agent-session-controls' });
-    expect(registered[0]!.component).toBe(SessionControls);
-    const injected = (registered[0]!.options.inject as (id: string) => { store: SessionControlStore })('s9');
+    expect(registered).toHaveLength(2);
+    expect(registered[0]!.options).toMatchObject({
+      name: 'conversation.session.header.actions',
+      id: 'raw-agent-agents',
+    });
+    expect(registered[1]!.options).toMatchObject({ name: 'conversation.input.left', id: 'raw-agent-session-controls' });
+    expect(registered[1]!.component).toBe(SessionControls);
+    const injected = (registered[1]!.options.inject as (id: string) => { store: SessionControlStore })('s9');
     expect(injected.store).toBe(stores.get('s9'));
     expect(effects).toHaveLength(1);
   });

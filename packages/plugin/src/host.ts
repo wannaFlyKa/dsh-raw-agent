@@ -5,7 +5,13 @@
 // (`dsh-raw-agent/agent`, src/agent.ts) is mounted by the preset row in cordis.patch.yml.
 
 import { createClaudeFactory } from '@dsh-raw-agent/backend-claude';
-import { createRawAgentHost, readUserConfig, type HostContext, type RawUserConfig } from '@dsh-raw-agent/dsh-host';
+import {
+  createRawAgentHost,
+  readUserConfig,
+  setJobWaitForTests,
+  type HostContext,
+  type RawUserConfig,
+} from '@dsh-raw-agent/dsh-host';
 
 export const name = 'dsh-raw-agent';
 
@@ -15,6 +21,11 @@ const seedModels = (process.env.DSH_RAW_AGENT_TEST_MODELS ?? '')
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
+
+// Test-only: `DSH_RAW_AGENT_TEST_JOB_WAIT_MS=<ms>` shortens the job waits (D47) so a live suite can
+// run a task longer than one wait. Unset in normal use (1 h waits).
+const testJobWait = Number(process.env.DSH_RAW_AGENT_TEST_JOB_WAIT_MS ?? '');
+if (testJobWait > 0) setJobWaitForTests(testJobWait);
 
 // The Host entry's config (D87): `executablePath` and backend `options` (Claude: the bypass
 // switch, D14). Read at every spawn, never cached. No Schemastery schema is exported yet (S7), so

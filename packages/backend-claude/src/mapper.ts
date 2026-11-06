@@ -1,9 +1,10 @@
 // SDK message → BackendEvent mapper (architecture §6, D18, D20, D21, D26, D27, D57, D69, D71, D72,
 // D84, D86).
 //
-// Phase 3 spike scope: the main thread (text, thinking, tool_use, tool_result, result, interrupt,
-// synthetic messages, whole responses without a stream) and background tasks (task_* frames).
-// Child messages (`parent_tool_use_id` set) are not mapped yet (D45, D68: later milestone).
+// Scope: the main thread (text, thinking, tool_use, tool_result, result, interrupt, synthetic
+// messages, whole responses without a stream), background tasks (task_* frames), and child
+// agents: subagents, nested subagents and teammates (`parent_tool_use_id` set; D45, D50, D68,
+// in `children.ts`). Workflow agents are not on the stream (D49).
 //
 // Guarantees the DSH writer relies on (§7.2):
 // - every `step-message` follows its `step-start`;
@@ -37,6 +38,7 @@ import {
   type WireStreamEvent,
   type WireUser,
 } from './wire.js';
+import { ChildAgents } from './children.js';
 
 type ToolResultEvent = Extract<BackendEvent, { type: 'tool-result' }>;
 
@@ -189,11 +191,18 @@ export class ClaudeMessageMapper {
   /** The open whole-response step (D84): its message id, and whether its usage was sent. */
   #whole: { id: string; usageSent: boolean } | undefined;
   readonly #background = new Map<string, TaskKind>();
+  readonly #children: ChildAgents;
 
   constructor(tracker: SentInputTracker, options: MapperOptions = {}) {
     this.#tracker = tracker;
     this.#now = options.now ?? Date.now;
     this.#debug = options.debug ?? (() => {});
+    this.#children = new ChildAgents({ debug: this.#debug });
+  }
+
+  /** Child agents seen on this stream (labels for asks, D77). */
+  get children(): ChildAgents {
+    return this.#children;
   }
 
   /** The session calls this right before `interrupt()`, so the next error result maps to `interrupted`. */
@@ -211,7 +220,7 @@ export class ClaudeMessageMapper {
     const out: BackendEvent[] = [];
     switch (msg.type) {
       case 'system':
-        this.#system(msg, out);
+        this.#system(msg, at, out);
         break;
       case 'command_lifecycle':
         this.#lifecycle(msg, out);
@@ -223,7 +232,8 @@ export class ClaudeMessageMapper {
         this.#assistant(msg as WireAssistant, at, out);
         break;
       case 'user':
-        this.#user(msg as WireUser, out);
+        if (msg.parent_tool_use_id) this.#children.user(msg, at, out);
+        else this.#user(msg as WireUser, out);
         break;
       case 'result':
         this.#result(msg as WireResult, out);
@@ -244,6 +254,7 @@ export class ClaudeMessageMapper {
     this.#whole = undefined;
     this.#buffered = [];
     this.#turnOpen = false;
+    this.#children.exit(out, error ?? 'Claude Code ended');
     out.push(error === undefined ? { type: 'exit' } : { type: 'exit', error });
     return out;
   }
@@ -284,7 +295,7 @@ export class ClaudeMessageMapper {
 
   // ---- system frames ----
 
-  #system(msg: WireMessage, out: BackendEvent[]): void {
+  #system(msg: WireMessage, at: number, out: BackendEvent[]): void {
     switch (msg.subtype) {
       case 'init': {
         const e: Extract<BackendEvent, { type: 'session-info' }> = { type: 'session-info' };
@@ -306,34 +317,46 @@ export class ClaudeMessageMapper {
       }
       case 'task_started': {
         const taskId = str(msg.task_id);
-        if (taskId === undefined || msg.is_backgrounded !== true) break; // foreground tasks are not jobs (D47)
+        if (taskId === undefined) break;
         const kind = taskKind(str(msg.task_type));
+        // D45: every child agent, foreground or background, gets a child session.
+        const agent = kind === 'agent' ? this.#children.taskStarted(msg, at, out) : undefined;
+        if (msg.is_backgrounded !== true || this.#background.has(taskId)) break; // foreground tasks are not jobs (D47)
         this.#background.set(taskId, kind);
-        out.push({ type: 'task-start', taskId, kind, label: str(msg.description) ?? taskId });
+        const e: Extract<BackendEvent, { type: 'task-start' }> = {
+          type: 'task-start',
+          taskId,
+          kind,
+          label: (agent && this.#children.label(taskId)) ?? str(msg.description) ?? taskId,
+        };
+        if (agent !== undefined) e.agent = agent;
+        out.push(e);
         break;
       }
       case 'task_progress': {
         const taskId = str(msg.task_id);
-        if (taskId === undefined || !this.#background.has(taskId)) break;
+        // Background jobs, and child agents (their rows show tokens and tool uses, D46).
+        if (taskId === undefined || (!this.#background.has(taskId) && !this.#children.isAgentTask(taskId))) break;
         const e: Extract<BackendEvent, { type: 'task-progress' }> = { type: 'task-progress', taskId };
         const summary = str(msg.summary) ?? str(msg.description);
         if (summary !== undefined) e.summary = summary;
-        if (isObject(msg.usage)) {
-          const usage: NonNullable<typeof e.usage> = {};
-          const tokens = num(msg.usage.total_tokens);
-          const toolUses = num(msg.usage.tool_uses);
-          const durationMs = num(msg.usage.duration_ms);
-          if (tokens !== undefined) usage.tokens = tokens;
-          if (toolUses !== undefined) usage.toolUses = toolUses;
-          if (durationMs !== undefined) usage.durationMs = durationMs;
-          e.usage = usage;
-        }
+        const usage = taskUsage(msg.usage);
+        if (usage !== undefined) e.usage = usage;
         out.push(e);
         break;
       }
       case 'task_notification': {
         const taskId = str(msg.task_id);
-        if (taskId === undefined || !this.#background.has(taskId)) break;
+        if (taskId === undefined) break;
+        // The notification carries the task's final usage; the last task_progress can be much
+        // older (one frame per tool use), so the row would keep stale tokens and run time.
+        const finalUsage = taskUsage(msg.usage);
+        if (finalUsage !== undefined && (this.#background.has(taskId) || this.#children.isAgentTask(taskId)))
+          out.push({ type: 'task-progress', taskId, usage: finalUsage });
+        // The child's own end first, then its job (D45, D47).
+        if (this.#children.isAgentTask(taskId))
+          this.#children.taskEnded(taskId, str(msg.status), str(msg.summary), out);
+        if (!this.#background.has(taskId)) break;
         this.#background.delete(taskId);
         const s = str(msg.status);
         const status = s === 'completed' ? 'completed' : s === 'stopped' || s === 'killed' ? 'stopped' : 'failed';
@@ -452,7 +475,7 @@ export class ClaudeMessageMapper {
 
   #assistant(msg: WireAssistant, at: number, out: BackendEvent[]): void {
     if (msg.parent_tool_use_id) {
-      this.#debug('child assistant message (not mapped in the spike)', msg);
+      this.#children.assistant(msg, at, out); // D68
       return;
     }
     const uuid = str(msg.uuid);
@@ -461,6 +484,8 @@ export class ClaudeMessageMapper {
       this.#seenUuids.add(uuid);
     }
     const content = Array.isArray(msg.message?.content) ? msg.message.content : [];
+    // `task_started` can come before this step's `message_stop` (live): remember the calls now.
+    this.#children.noteCalls(content, MAIN);
     const id = str(msg.message?.id) ?? uuid ?? `msg-${at}`;
     const step = this.#step;
     const inStreamedStep = step !== undefined && step.id === id && step.streamed;
@@ -553,6 +578,7 @@ export class ClaudeMessageMapper {
       if (uuid !== undefined) e.lastChainId = uuid;
       out.push(e);
       for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
+      this.#children.teamMessages(blocks, MAIN, out);
     }
     this.#flushResults(out);
   }
@@ -622,6 +648,7 @@ export class ClaudeMessageMapper {
     out.push(e);
     for (const b of blocks) if (b.type === 'tool-call') this.#advertised.add(b.id);
     this.#flushResults(out);
+    this.#children.teamMessages(blocks, MAIN, out);
   }
 
   #flushResults(out: BackendEvent[]): void {
@@ -631,7 +658,6 @@ export class ClaudeMessageMapper {
   }
 
   #user(msg: WireUser, out: BackendEvent[]): void {
-    if (msg.parent_tool_use_id) return; // children: later
     const uuid = str(msg.uuid);
     if (uuid !== undefined) {
       if (this.#seenUuids.has(uuid)) return;
@@ -698,7 +724,21 @@ export class ClaudeMessageMapper {
     if (reason !== undefined) e.reason = reason;
     if (error !== undefined) e.error = error;
     out.push(e);
+    this.#children.mainTurnEnded(outcome, out);
     this.#turnOpen = false;
     this.#interruptRequested = false;
   }
+}
+
+/** `usage` of a task_progress or task_notification frame: total tokens, tool uses, run time. */
+function taskUsage(raw: unknown): { tokens?: number; toolUses?: number; durationMs?: number } | undefined {
+  if (!isObject(raw)) return undefined;
+  const usage: { tokens?: number; toolUses?: number; durationMs?: number } = {};
+  const tokens = num(raw.total_tokens);
+  const toolUses = num(raw.tool_uses);
+  const durationMs = num(raw.duration_ms);
+  if (tokens !== undefined) usage.tokens = tokens;
+  if (toolUses !== undefined) usage.toolUses = toolUses;
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+  return usage;
 }

@@ -1,6 +1,7 @@
 // What the UI may ask of DSH. Implemented by ./port (D79); fakes in tests.
 
 import type * as React from 'react';
+import type { ChildAddress } from '../agents-model.js';
 
 export interface HostActions {
   /** Open a file read-only in DSH's preview sidebar (unmasked; the user's explicit click). */
@@ -29,4 +30,8 @@ export interface HostActions {
    * offers it while a turn runs. False when DSH offers no way to stop from here.
    */
   stopTurn?(sessionId: string): boolean;
+  /** R6.1: open a child agent's session in the main view (DSH's own child navigation). */
+  openChild?(address: ChildAddress): boolean;
+  /** R6.1: open a child agent's session beside this one, in the right sidebar. */
+  openChildAside?(address: ChildAddress): boolean;
 }

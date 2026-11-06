@@ -49,6 +49,11 @@ describe('client bundle (module-loader format)', () => {
       get: () => undefined,
       effect: () => {},
     });
-    expect(slots).toEqual(['conversation.input.left', 'register conversation.input.left']);
+    expect(slots).toEqual([
+      'conversation.session.header.actions',
+      'register conversation.session.header.actions',
+      'conversation.input.left',
+      'register conversation.input.left',
+    ]);
   });
 });

@@ -17,6 +17,19 @@ JSON replaced by one delta with the final input):
   whole response, D84), a signed empty thinking frame, then a `<synthetic>` API-error message with
   `error: invalid_request` and an `is_error` result (D69). Tool text replaced by neutral text.
 
+Recorded in M3 (CLI 2.1.318, the plugin's own start options: `perTaskStopAffordance`,
+`forwardSubagentText`, partial messages; same scrubbing, task and agent ids renumbered `task_NN`):
+
+- `subagent.jsonl`: a foreground subagent that runs one Bash call (D45, D68).
+- `nested-subagent.jsonl`: a subagent that starts its own subagent (`spawn_depth` 2,
+  `parent_task_id`); both are forwarded on the stream.
+- `background-agent-shell.jsonl`: two background shells and a background agent in one call; one
+  shell is stopped with `stopTask`; the CLI's wake turns (D47, D26).
+- `team.jsonl`: two teammates (`Agent` with `name`, `team_name`) exchanging ping/pong with
+  `SendMessage`; each is woken again by the other's message (same task id, D50).
+- `main-agent.jsonl`: a session started with `agent: 'pirate'` (a project agent). The stream
+  carries no agent field (D15).
+
 Hand-built (shapes from the CLI 2.1.318 binary and the SDK types; not yet seen on a real wire):
 
 - `resend-tool-use.jsonl`: a re-sent `tool_use` frame before `message_stop` and a cumulative text

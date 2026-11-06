@@ -6,6 +6,19 @@ import { mountClient, type ClientContext, type MountClientOptions } from './port
 export * from './api.js';
 export * from './view-model.js';
 export * from './asks-model.js';
+export * from './agents-model.js';
+export { ChildLinks, ChildLinkStore, CHILD_LINK_RETRY_MS, type ChildLinkSnapshot } from './child-links.js';
+export {
+  AgentsPanel,
+  AgentsButton,
+  AgentsHeader,
+  ChildRow,
+  ChildStrip,
+  TeamRoster,
+  type AgentsHeaderProps,
+  type ChildRowProps,
+} from './ui/agents-panel.js';
+export { WakeTriggerCard } from './ui/wake-card.js';
 export { restoreReturnedDrafts, type DraftTarget, type RestoreResult } from './drafts.js';
 export {
   SessionControlStore,
@@ -45,6 +58,15 @@ export {
   MODE_SHORTCUT_ID,
   TOOL_CALL_ATTR,
   TOOL_WAITING_ATTR,
+  AGENTS_SLOT,
+  AGENTS_ENTRY_ID,
+  CHILD_CHAT_ADDRESS,
+  CHILD_CHAT_TAB_KIND,
+  childChatAddress,
+  WAKE_NODE_KIND,
+  WAKE_DEFINITION_KIND,
+  wakeDefinition,
+  WakeNode,
   type AskInteraction,
   type ComposerOwner,
   type FixedInput,

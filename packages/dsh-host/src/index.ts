@@ -65,7 +65,27 @@ export {
   type RegisteredRuntime,
 } from './registry.js';
 export {
+  ChildHub,
+  CHILD_STOP_WAIT_MS,
+  TEAM_MESSAGES_KEPT,
+  CHILD_LAST_CHARS,
+  lastOutput,
+  type ChildSpec,
+  type ChildHandle,
+  type ChildRunner,
+  type ChildOutcome,
+  type ChildStatus,
+  type ChildView,
+  type TeamView,
+  type TeamMessageView,
+  type ChildHubDeps,
+} from './children.js';
+export {
   SessionRuntime,
+  JOB_LIMIT_CONFIG_KEY,
+  type JobLink,
+  type JobRefusal,
+  type TaskView,
   SETTINGS_CHOICE,
   STOP_GRACE_MS,
   crashMessage,

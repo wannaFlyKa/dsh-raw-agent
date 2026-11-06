@@ -9,7 +9,7 @@
 // D6: no idle reaping by default. When the user sets a timeout, a process with no turn, no
 // background task and no pending wake is ended after that idle time; the next message resumes it.
 
-import type { BackendUserConfig, ModelInfo } from '@dsh-raw-agent/core';
+import type { AgentInfo, BackendUserConfig, ModelInfo } from '@dsh-raw-agent/core';
 import type { RuntimeState, SessionRuntime } from './driver.js';
 
 /** Cordis service name of the Host entry's registry. */
@@ -55,6 +55,8 @@ export type RegisteredRuntime = Pick<
   | 'respond'
   | 'subscribe'
   | 'showNotice'
+  | 'stopChild'
+  | 'stopTask'
 >;
 
 export class SessionRegistry {
@@ -110,6 +112,32 @@ export class SessionRegistry {
       if (m && m.length > 0) found = m;
     }
     return found;
+  }
+
+  /**
+   * D51: the last agent list a process of this kind reported for the same folder (project agents
+   * differ per folder), so the main-agent picker can list agents before this session's spawn.
+   */
+  lastAgents(kind: string, cwd: string | undefined): AgentInfo[] | undefined {
+    let found: AgentInfo[] | undefined;
+    for (const e of this.#runtimes.values()) {
+      if (e.kind !== kind) continue;
+      const v = e.runtime.view();
+      if (v.cwd === cwd && v.agents && v.agents.length > 0) found = v.agents;
+    }
+    return found;
+  }
+
+  /**
+   * The parent session and child id of one host child session (D45), so a child's own view can
+   * show its row, its Stop and its asks. Only children of registry sessions are found.
+   */
+  findChild(childHostSessionId: string): { parentSession: string; childId: string } | undefined {
+    for (const [id, e] of this.#runtimes) {
+      const child = e.runtime.view().children?.find((c) => c.hostSessionId === childHostSessionId);
+      if (child) return { parentSession: id, childId: child.id };
+    }
+    return undefined;
   }
 
   state(hostSessionId: string): RuntimeState | undefined {

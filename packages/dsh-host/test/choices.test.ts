@@ -160,7 +160,7 @@ describe('session choices (D35-D38)', () => {
     await tick();
     const v = r.view();
     expect(v.live).toEqual({ model: 'm-from-settings', mode: 'default', version: '9' });
-    expect(v.choice).toEqual({ applied: {}, resetPending: false });
+    expect(v.choice).toEqual({ applied: {}, resetPending: false, agentLocked: true });
     expect(v.models?.map((m) => m.value)).toEqual(['m-small']);
   });
 

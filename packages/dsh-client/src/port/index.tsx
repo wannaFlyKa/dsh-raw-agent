@@ -4,11 +4,15 @@
 
 import * as React from 'react';
 import { createPortal } from 'react-dom';
+import { wakeTriggerOf, type ChildAddress, type WakeTrigger } from '../agents-model.js';
 import { createApi, type FetchFn, type RawAgentApi } from '../api.js';
+import { ChildLinks } from '../child-links.js';
 import { SessionStores, type SessionControlStore } from '../session-store.js';
 import type { HostActions } from '../ui/actions.js';
+import { AgentsHeader } from '../ui/agents-panel.js';
 import { AskPanel } from '../ui/ask-cards.js';
 import { SessionControls } from '../ui/controls.js';
+import { WakeTriggerCard } from '../ui/wake-card.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);
@@ -161,7 +165,21 @@ export interface AskInteraction {
   readonly kind: typeof ASK_INTERACTION_KIND;
   readonly sessionId: string;
   readonly askId: string;
+  /**
+   * The session whose store holds the ask, when it differs from `sessionId`: a subagent's ask is
+   * also published on the subagent's own child session (R6.1), but it lives in the parent's store.
+   */
+  readonly storeSessionId?: string;
 }
+
+/**
+ * Our `conversation.composer` chain priority. DSH tries chain entries in ASCENDING priority order
+ * (the slot catalog: "Entries are tried in ascending order; the first non-null result wins").
+ * ui-subagent's read-only one-shot composer sits at -10 and matches every one-shot child view,
+ * so with a larger value our card never took over a child's composer (seen live, M3). Our
+ * selector matches only our own interaction kind, so going first changes nothing else.
+ */
+export const ASK_COMPOSER_PRIORITY = -20;
 
 export type PublishInteraction = (interaction: AskInteraction, delegate: () => Promise<void>) => () => void;
 
@@ -172,8 +190,51 @@ export type PublishInteraction = (interaction: AskInteraction, delegate: () => P
  */
 export function publishAsks(stores: SessionStores, publish: PublishInteraction): () => void {
   const live = new Map<string, { key: string; remove(): void }>();
+  /**
+   * Child-session publications, apart from `live`: a child session has its own (absent) store, and
+   * its sync must not remove the ask its parent's store published on it (seen live: it churned).
+   */
+  const childLive = new Map<string, { key: string; remove(): void }>();
   const offs: Array<() => void> = [];
+  /** Child sessions with a published ask, per parent store (R6.1: the ask shows on the child). */
+  const childKeys = new Map<string, Set<string>>();
+  const syncChildren = (store: SessionControlStore) => {
+    const snap = store.getSnapshot();
+    if (snap.status === 'error' || snap.status === 'loading') return;
+    const view = snap.status === 'ready' ? snap.info?.view : undefined;
+    const wanted = new Map<string, { key: string; askId: string }>();
+    const asks = [...(view?.asks ?? [])].sort((a, b) => a.at - b.at);
+    for (const a of asks) {
+      if (a.agent !== 'child' || a.agentId === undefined) continue;
+      const host = view?.children?.find((c) => c.id === a.agentId)?.hostSessionId;
+      if (host === undefined || wanted.has(host)) continue;
+      wanted.set(host, { key: `${a.id}${a.state === 'waiting' ? ':waiting' : ''}@child`, askId: a.id });
+    }
+    const mine = childKeys.get(store.sessionId) ?? new Set<string>();
+    for (const host of [...mine]) {
+      const cur = childLive.get(host);
+      if (wanted.get(host)?.key === cur?.key) continue;
+      cur?.remove();
+      childLive.delete(host);
+      mine.delete(host);
+    }
+    for (const [host, w] of wanted) {
+      if (childLive.has(host)) continue;
+      try {
+        const remove = publish(
+          { key: w.key, kind: ASK_INTERACTION_KIND, sessionId: host, askId: w.askId, storeSessionId: store.sessionId },
+          async () => {},
+        );
+        childLive.set(host, { key: w.key, remove });
+        mine.add(host);
+      } catch {
+        // A DSH without this seam: the child's header strip offers the card.
+      }
+    }
+    childKeys.set(store.sessionId, mine);
+  };
   const sync = (store: SessionControlStore) => {
+    syncChildren(store);
     const snap = store.getSnapshot();
     const id = store.sessionId;
     // Keep the card through a failed read; drop it when the session has no asks or is not ours.
@@ -203,8 +264,9 @@ export function publishAsks(stores: SessionStores, publish: PublishInteraction):
   );
   return () => {
     for (const off of offs.splice(0)) off();
-    for (const p of live.values()) p.remove();
+    for (const p of [...live.values(), ...childLive.values()]) p.remove();
     live.clear();
+    childLive.clear();
   };
 }
 
@@ -229,7 +291,14 @@ export function AskComposer(props: {
 }): React.ReactElement {
   return (
     <div data-raw-agent="ask-composer" style={{ padding: '4px 0' }}>
-      <AskPanel store={props.stores.get(props.matched.sessionId)} actions={props.actions} askId={props.matched.askId} />
+      <AskPanel
+        store={props.stores.get(props.matched.storeSessionId ?? props.matched.sessionId)}
+        actions={props.actions}
+        askId={props.matched.askId}
+        {...(props.matched.storeSessionId !== undefined
+          ? { only: (a: { id: string }) => a.id === props.matched.askId }
+          : {})}
+      />
     </div>
   );
 }
@@ -360,6 +429,93 @@ interface UiSessionService {
 interface SidebarRight {
   openResourceIn?(sessionId: string, address: string): void;
   openTabIn?(sessionId: string, kind: string): void;
+  openResource?(address: string, options?: { kind?: string; preferNewPane?: boolean }): void;
+}
+
+// --- R6.1: child sessions, DSH's own navigation ---------------------------------------------------
+
+/**
+ * The right-sidebar chat address of one child session, exactly as DSH's subagent catalog builds it
+ * (`P/dsh-client-ui-subagent/lib/client.js` `subagentChatAddress`, tab kind `subagentchat`).
+ */
+export const CHILD_CHAT_ADDRESS = 'dsh-resource://subagentchat/session/';
+export const CHILD_CHAT_TAB_KIND = 'subagentchat';
+
+export function childChatAddress(address: ChildAddress): string {
+  const query = new URLSearchParams({ parent: address.parentSessionId, mode: address.mode });
+  return `${CHILD_CHAT_ADDRESS}${encodeURIComponent(address.childSessionId)}?${query.toString()}`;
+}
+
+/** Title-adjacent session actions of the session header (`P/dsh-client-ui-conversation` slots). */
+export const AGENTS_SLOT = 'conversation.session.header.actions';
+export const AGENTS_ENTRY_ID = 'raw-agent-agents';
+
+// --- D26: the wake trigger in the chat ----------------------------------------------------------
+
+/** Our chat node kind (a keyed `conversation.chat.node` entry; no DSH package uses this key). */
+export const WAKE_NODE_KIND = 'raw-agent-wake';
+export const WAKE_DEFINITION_KIND = 'raw-agent-wake-trigger';
+
+/** What our conversation Definition gets from DSH's assembler (structural, D65). */
+interface WakeContext {
+  key: string;
+  id: string;
+  state?: WakeTrigger;
+  start?: { location?: unknown };
+  matches: Array<{ location?: unknown }>;
+}
+
+/**
+ * A Chat-target event Definition (`ctx.uiConversation.events.register`, P/dsh-client-ui-conversation
+ * README "Definitions"). It claims (`exclusive: true`) only the Host's wake `developer/message`, so
+ * DSH's own context row does not draw it twice, and builds one node of our kind in the turn's
+ * input group (`groupTree: 'input'`, as DSH's own turn trigger), so it shows outside the turn's
+ * process fold. Every other event is left to DSH.
+ */
+export function wakeDefinition(): Record<string, unknown> {
+  return {
+    kind: WAKE_DEFINITION_KIND,
+    target: 'chat',
+    match: (event: { type: string; seq: number; time: number; data: unknown }) => {
+      if (event.type !== 'developer/message') return null;
+      const t = wakeTriggerOf(event);
+      if (!t) return null;
+      const id = (event.data as { message?: { id?: unknown } } | undefined)?.message?.id;
+      return { id: typeof id === 'string' && id !== '' ? id : `seq-${event.seq}`, role: 'start', exclusive: true };
+    },
+    start: (_context: unknown, match: { event: { type: string; seq: number; time: number; data: unknown } }) =>
+      wakeTriggerOf(match.event) ?? { seq: match.event.seq, time: match.event.time, text: '', items: [] },
+    update: (context: WakeContext) => context.state,
+    buildViewNode: (context: WakeContext) => {
+      if (context.state === undefined) return null;
+      return {
+        key: context.key,
+        kind: WAKE_NODE_KIND,
+        id: context.id,
+        target: 'chat',
+        anchorSeq: context.state.seq,
+        location: context.start?.location ?? context.matches[0]?.location ?? { kind: 'unresolved' },
+        visibility: 'visible',
+        groupTree: 'input',
+        data: context.state,
+      };
+    },
+  };
+}
+
+/** The keyed chat renderer of our node. */
+export function WakeNode(props: { node?: { data?: WakeTrigger } }): React.ReactElement | null {
+  const data = props.node?.data;
+  if (!data) return null;
+  return <WakeTriggerCard trigger={data} />;
+}
+
+interface UiConversationService {
+  events?: { register(definition: Record<string, unknown>): () => void };
+}
+
+interface UiWorkspaceService {
+  openSession?(address: ChildAddress): void;
 }
 
 /**
@@ -439,6 +595,19 @@ export function hostActions(ctx: ClientContext): HostActions {
       const body = globalThis.document?.body;
       return body ? createPortal(node, body) : node;
     },
+    openChild(address) {
+      // DSH's catalog row click (`ctx.uiWorkspace.openSession(address)`, P/dsh-client-ui-subagent).
+      const ws = ctx.get('uiWorkspace') as UiWorkspaceService | undefined;
+      if (typeof ws?.openSession !== 'function') return false;
+      ws.openSession(address);
+      return true;
+    },
+    openChildAside(address) {
+      const s = sidebar();
+      if (typeof s?.openResource !== 'function') return false;
+      s.openResource(childChatAddress(address), { kind: CHILD_CHAT_TAB_KIND, preferNewPane: true });
+      return true;
+    },
   };
 }
 
@@ -455,8 +624,15 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
     ((input, init) => globalThis.fetch(input, { credentials: 'same-origin', ...init }) as ReturnType<FetchFn>);
   const api = options.api ?? createApi(fetchFn);
   const stores = new SessionStores(api);
+  const links = new ChildLinks(api);
   const actions = hostActions(ctx);
-  ctx.effect?.(() => () => stores.dispose(), 'raw-agent: session stores');
+  ctx.effect?.(
+    () => () => {
+      stores.dispose();
+      links.dispose();
+    },
+    'raw-agent: session stores',
+  );
   // D39: with DSH's session service, each open ask becomes a pending interaction and its card
   // takes over the composer; without it the cards show in the controls row.
   const takeover = { on: false };
@@ -485,7 +661,7 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       scope.slots.register(
         {
           name: 'conversation.composer',
-          priority: 1,
+          priority: ASK_COMPOSER_PRIORITY,
           select: selectAsk,
           inject: () => ({ stores, actions }),
         },
@@ -526,6 +702,31 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       };
     }, 'raw-agent: Shift+Tab mode key');
   });
+  // D26: the wake trigger card, where DSH's conversation registry lets a plugin add a Definition.
+  withService('uiConversation', (svc, scope) => {
+    const conv = svc as UiConversationService | undefined;
+    if (typeof conv?.events?.register !== 'function') return;
+    const events = conv.events;
+    scope.effect?.(() => events.register(wakeDefinition()), 'raw-agent: wake trigger');
+    scope.slots.inject('conversation.chat.node', () =>
+      scope.slots.register(
+        { name: 'conversation.chat.node', key: WAKE_NODE_KIND },
+        WakeNode as React.ComponentType<never>,
+      ),
+    );
+  });
+  // R6.1-R6.3: the agents button in our sessions' header, and the child strip in a child session.
+  ctx.slots.inject(AGENTS_SLOT, () =>
+    ctx.slots.register(
+      {
+        name: AGENTS_SLOT,
+        id: AGENTS_ENTRY_ID,
+        order: 20,
+        inject: (sessionId: string) => ({ sessionId, stores, links, actions }),
+      },
+      AgentsHeader as React.ComponentType<never>,
+    ),
+  );
   ctx.slots.inject(CONTROLS_SLOT, () =>
     ctx.slots.register(
       {
