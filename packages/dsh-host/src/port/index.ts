@@ -7,6 +7,7 @@ export type { CordisContext as HostContext } from './types.js';
 export type * from './types.js';
 export {
   mountAgent,
+  PERMISSION_COMMAND,
   presetIdFor,
   WAKE_SOURCE_KIND,
   AttachmentInputError,
@@ -43,6 +44,10 @@ export {
   SESSION_ROUTE,
   CHOICE_ROUTE,
   ANSWER_ROUTE,
+  INTERACTIONS_ROUTE,
+  INTERACTIONS_PING_MS,
+  interactionsRoute,
+  channelLine,
   sessionControlRoutes,
   parseChoice,
   parseAnswer,

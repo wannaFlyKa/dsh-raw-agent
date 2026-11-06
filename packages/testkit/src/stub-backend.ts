@@ -158,6 +158,7 @@ export function createStubFactory(
           },
           async setPermissionMode(mode) {
             record.controls.push(['setPermissionMode', mode]);
+            q.push({ type: 'mode', mode }); // as the CLI's status frame
           },
         },
       };

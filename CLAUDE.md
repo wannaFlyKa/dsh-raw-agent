@@ -59,7 +59,12 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Host session variables:** a DSH started from inside a Claude Code session inherits `CLAUDE*` variables (see rule 5).
 - **DSH's model seat and `/model` save the profile default** (`agentDefaultModel.saveSelection`). Our catalog lists no model rows, so they cannot pick our provider; our own pickers live in `conversation.input.left` and call `agent.model.select` (session only) plus `setModel`.
 - **Single DSH slots** (`conversation.input.model`, `conversation.input.permission`) cannot be replaced per session. To hide the permission seat in our sessions only, mark the ancestor that holds `[data-slot="conversation.input.permission"]`. The seat wrapper is `display: contents`, so a visibility probe must look at its children.
-- **DSH `/permission`** changes only DSH's approval policy, which Claude ignores, but it is still offered in our sessions and shows a level that is not applied (open, S4).
+- **DSH `/permission`** changes only DSH's approval policy, which Claude ignores. Our preset registers its own `/permission` (shows or switches the Claude mode). DSH's client still opens its preset popup from a decoration keyed by name, so our client marks that decoration unavailable in our sessions. This reads a DSH client internal (`commandUi.live.decorations`); re-check it on every DSH upgrade. DSH shows no command result in the chat, so we show the answer in our status line.
+- **A mode set before the CLI reports one** (for example plan picked before the first message) produces a `status` frame before `init`. Seed the process start mode first (start option, else the settings `defaultMode`, else `default`), or the plan card loses "use auto mode".
+- **The mode choice persists in the binding** (`source.rawAgent.mode`, written only after a user choice) and is restored after a DSH restart. Restore only the session's own binding, so a DSH fork starts in the settings mode.
+- **Stop answers only main-thread permission, question and plan asks** (with the CLI's Esc answer). Never answer a child ask or an elicitation on Stop, and never answer an ask on a timer.
+- **DSH's `approval/decided` has no "always" outcome.** Record "always" as `allowed-once`; the rule itself is in the CLI's settings write.
+- **The choice route's answer is built before the CLI's `status` frame**, so do not trust its `live.mode`; the picker can lag one poll (4 s) after a mode switch (known, not fixed).
 - **Workspace trust:** in SDK mode without `workspaceTrust` the CLI ignores the project's `permissions` rules (hooks, env and CLAUDE.md still apply). Ask the TUI's trust question first and pass `workspaceTrust` only after the user accepts; the CLI writes its own trust record.
 - **SDK import side effect:** SDK 0.3.318 sets `NoDefaultCurrentDirectoryInExePath=1` in `process.env` at import, on every OS. Load the SDK lazily and restore the env (D7).
 - **DSH terminal tab** (`sidebarRight.openTabIn(session, 'terminal')`) opens only in the session folder; it cannot start in another folder.
@@ -114,4 +119,6 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Push:** this machine's git has no credential helper. Push with
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`.
 - **Ignore rules** are anchored (`/research/`, `/.dsh-dev/`) so that `docs/research/` is tracked.
+- **Bypass in live tests:** `bypassPermissions` needs the plugin option `allowDangerouslySkipPermissions: true` (in the dev profile's `cordis.patch.yml`, row `raw-agent`, `config.options`). Restore the patch afterwards.
+- **Live MCP elicitation tests:** a scratch stdio MCP server times out its request after 60 s, so drive the card quickly.
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

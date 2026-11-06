@@ -102,6 +102,7 @@ function fake(models: ModelInfo[] = [{ value: 'm-small', displayName: 'Small', e
           setPermissionMode: async (m) => {
             if (m === 'plan' && rec.calls.includes('refuse-plan')) throw new Error('not allowed');
             rec.calls.push(`mode ${m}`);
+            q.push({ type: 'mode', mode: m }); // the CLI's status frame (R5.1: the truth)
           },
           models: async () => models,
         },
@@ -316,6 +317,38 @@ describe('session choices (D35-D38)', () => {
     expect((await on.choose({ mode: 'bypass' })).ok).toBe(true);
   });
 
+  it('before a spawn, the mode the settings pick is accepted, as the picker lists it (M1 verify 3-2 item 3)', async () => {
+    const f = fake();
+    (f.factory.staticCapabilities as { permissionModes: unknown }).permissionModes = [
+      { id: 'default', label: 'Ask' },
+      { id: 'bypass', label: 'Bypass', requiresOption: 'allowBypass' },
+    ];
+    f.factory.settingsDefaults = async () => ({ permissionMode: 'bypass', sources: { permissionMode: 'user' } });
+    const { p } = port();
+    const r = new SessionRuntime(f.factory, p, { env: {} });
+    const res = await r.choose({ mode: 'bypass' });
+    expect(res.ok).toBe(true);
+    expect(res.view.choice.pendingMode).toBe('bypass');
+  });
+
+  it('the live mode follows the agent report, not the requested mode (R5.1)', async () => {
+    const f = fake();
+    const { p } = port();
+    const r = new SessionRuntime(f.factory, p, { env: {} });
+    await r.start();
+    // This agent reports another mode than the one asked for (for example a downgrade).
+    f.sessions[0]!.q.push({ type: 'mode', mode: 'default' });
+    const ctl = f.sessions[0]!;
+    const orig = ctl.calls;
+    expect(orig).toEqual([]);
+    await r.choose({ mode: 'plan' });
+    await new Promise((res) => setTimeout(res, 5));
+    expect(r.view().live.mode).toBe('plan'); // from the fake's `mode` event after the call
+    ctl.q.push({ type: 'mode', mode: 'default' });
+    await new Promise((res) => setTimeout(res, 5));
+    expect(r.view().live.mode).toBe('default');
+  });
+
   it('refuses unknown modes and efforts, and reports a control error', async () => {
     const f = fake();
     const { p } = port();
@@ -370,6 +403,33 @@ describe('session control routes (D36, D62)', () => {
     const refused = await choice!.fetch(post('/api/raw-agent/choice?session=h1', { mode: 'yolo' }));
     expect(refused.status).toBe(409);
     expect((await choice!.fetch(post('/api/raw-agent/choice?session=x', { mode: 'plan' }))).status).toBe(404);
+  });
+
+  it('lists the modes the session cannot pick with their option, and the mode ring (R5.1, D38)', async () => {
+    const f = fake();
+    const caps = f.factory.staticCapabilities;
+    const factory: AgentBackendFactory = {
+      ...f.factory,
+      staticCapabilities: {
+        ...caps,
+        permissionModes: [...caps.permissionModes, { id: 'bypass', label: 'Bypass', requiresOption: 'allowBypass' }],
+        userOptions: [{ key: 'allowBypass', type: 'boolean', label: 'Allow bypass' }],
+        permissionModeCycle: ['default', 'plan', 'bypass'],
+      },
+    };
+    const registry = new SessionRegistry();
+    registry.set('h1', 'k', new SessionRuntime(factory, port().p, { env: {} }));
+    const [session] = sessionControlRoutes(registry, { factories: [factory] });
+    const body = (await (await session!.fetch(get('/api/raw-agent/session?session=h1'))).json()) as {
+      permissionModes: Array<{ id: string }>;
+      unavailableModes: Array<{ id: string; optionLabel?: string }>;
+      permissionModeCycle: string[];
+    };
+    expect(body.permissionModes.map((m) => m.id)).toEqual(['default', 'plan']);
+    expect(body.unavailableModes).toEqual([
+      { id: 'bypass', label: 'Bypass', requiresOption: 'allowBypass', optionLabel: 'Allow bypass' },
+    ]);
+    expect(body.permissionModeCycle).toEqual(['default', 'plan', 'bypass']);
   });
 
   it('the model list comes from the session, else from another session of the same kind (D34)', async () => {

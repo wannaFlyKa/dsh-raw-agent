@@ -19,7 +19,7 @@ import type {
   ContentBlock,
 } from '@dsh-raw-agent/core';
 import { offeredPermissionModes } from '@dsh-raw-agent/core';
-import { AskDesk, type AskView } from './asks.js';
+import { AskDesk, type AskReply, type AskResult, type AskView, type AuditInfo, type AuditOutcome } from './asks.js';
 
 /** What the driver writes into one open host turn. Implemented by the port writer. */
 export interface TurnSink {
@@ -51,6 +51,13 @@ export interface TurnSink {
    * the human message. False when it is no longer pending.
    */
   claim(hostMessageId: string): boolean;
+  /**
+   * D44: the host's native, log-only audit of an ask shown while this turn is open. Returns the
+   * audit id for `approvalDecided`. Absent when the host has no such record.
+   */
+  approvalAsked?(info: AuditInfo): string | undefined;
+  /** D44: the outcome of an audited ask. "Always" is `allowed-once` (the rule is the agent's). */
+  approvalDecided?(auditId: string, outcome: AuditOutcome): void;
 }
 
 /** Tool-result content as the sink writes it: a stored image is an opaque host ref (D85). */
@@ -76,6 +83,11 @@ export interface HostBinding {
   hostSessionId?: string;
   /** The last backend chain entry at or before the cut (D29). */
   chainId?: string;
+  /**
+   * D24: the permission mode the user chose in this session, as the agent last reported it. Only
+   * written after a choice; a new process after a host restart applies it again (R1.4).
+   */
+  mode?: string;
 }
 
 /** A host job that mirrors one background task (D47). */
@@ -293,13 +305,108 @@ export class SessionRuntime {
   #lastExit: RuntimeState['lastExit'];
   /** Asks held until the user answers (rules 3, 4): nothing is ever answered for the user. */
   readonly #desk: AskDesk;
+  /** The writer of the open host turn, for the D44 audit pair. */
+  #sink: TurnSink | undefined;
+  /** Audited asks of the open turn: ask id → audit id (D44). */
+  readonly #audits = new Map<string, string>();
+  /** The mode choice was read back from the host log once (D24). */
+  #modeRestored = false;
+  readonly #listeners = new Set<(view: SessionView) => void>();
+  /** Told once when the runtime is disposed, so open channels close (D39). */
+  readonly #endListeners = new Set<() => void>();
 
   constructor(factory: AgentBackendFactory, port: HostSessionPort, opts: SessionRuntimeOptions) {
     this.#factory = factory;
     this.#port = port;
     this.#opts = opts;
     this.#now = opts.now ?? Date.now;
-    this.#desk = new AskDesk(() => this.#notify(), this.#now);
+    this.#desk = new AskDesk(() => this.#notify(), this.#now, {
+      opened: (view, info) => this.#auditOpened(view, info),
+      closed: (id, outcome) => this.#auditClosed(id, outcome),
+    });
+  }
+
+  /**
+   * D44: an ask of the main thread shown while its host turn is open gets the host's native
+   * audit pair. An ask outside a turn writes nothing (the pair must be turn-enclosed); a
+   * subagent's ask waits for child sessions (D45) and is not audited in the parent's log.
+   */
+  #auditOpened(view: AskView, info: AuditInfo): void {
+    const sink = this.#sink;
+    if (!sink?.approvalAsked || !this.#turnActive || view.agent !== 'main') return;
+    try {
+      const id = sink.approvalAsked(info);
+      if (id !== undefined) this.#audits.set(view.id, id);
+    } catch (error) {
+      this.#warn('could not record the approval audit', String((error as Error)?.message ?? error));
+    }
+  }
+
+  #auditClosed(askId: string, outcome: AuditOutcome): void {
+    const id = this.#audits.get(askId);
+    if (id === undefined) return;
+    this.#audits.delete(askId);
+    try {
+      this.#sink?.approvalDecided?.(id, outcome);
+    } catch (error) {
+      this.#warn('could not record the approval outcome', String((error as Error)?.message ?? error));
+    }
+  }
+
+  /** D74: an audited ask still open when the turn ends is `cancelled` in the host log. */
+  #closeAudits(): void {
+    for (const id of [...this.#audits.keys()]) this.#auditClosed(id, 'cancelled');
+  }
+
+  /**
+   * Live updates for the interaction channel (D39): the listener gets the whole view after every
+   * change (asks, state). Returns the unsubscribe function.
+   */
+  /**
+   * Show one line to the user outside the conversation (the plugin's status line), for example
+   * the answer of our `/permission` command: DSH does not show a command's result in the chat.
+   */
+  showNotice(level: 'info' | 'warning', text: string): void {
+    if (this.#disposed) return;
+    this.#live.notice = { level, text, at: this.#now() };
+    this.#notify();
+  }
+
+  subscribe(listener: (view: SessionView) => void, onEnd?: () => void): () => void {
+    if (this.#disposed) {
+      onEnd?.();
+      return () => {};
+    }
+    this.#listeners.add(listener);
+    if (onEnd) this.#endListeners.add(onEnd);
+    return () => {
+      this.#listeners.delete(listener);
+      if (onEnd) this.#endListeners.delete(onEnd);
+    };
+  }
+
+  /**
+   * D24, R1.4: after a host restart the user's mode choice is read back from the binding in the
+   * host log (written only after a choice) and becomes a pending choice, applied right after the
+   * next spawn (D4). Once per runtime; a choice made in this run wins. Only the session's own
+   * binding counts: a DSH fork inherits the parent's binding, but the parent's choice was for the
+   * parent, so a fork starts in the user's settings mode (rule 4). What the TUI does on a fork is **unverified**.
+   */
+  #restoreMode(): void {
+    if (this.#modeRestored || !this.#port) return;
+    this.#modeRestored = true;
+    if (this.#modeChosen) return;
+    let mode: string | undefined;
+    try {
+      const b = this.#port.latestBinding();
+      const inherited = b?.hostSessionId !== undefined && b.hostSessionId !== this.#port.hostSessionId;
+      mode = inherited ? undefined : b?.mode;
+    } catch {
+      mode = undefined;
+    }
+    if (mode === undefined || !this.#factory.staticCapabilities.permissionModes.some((m) => m.id === mode)) return;
+    this.#pendingMode = mode;
+    this.#modeChosen = true;
   }
 
   get backend(): AgentBackendSession | undefined {
@@ -335,6 +442,15 @@ export class SessionRuntime {
     } catch (error) {
       this.#warn('state listener failed', String(error));
     }
+    if (this.#listeners.size === 0) return;
+    const view = this.view();
+    for (const listener of [...this.#listeners]) {
+      try {
+        listener(view);
+      } catch (error) {
+        this.#warn('interaction listener failed', String(error));
+      }
+    }
   }
 
   /** Bind a new host agent (D87: after an eviction). A turn the agent started meanwhile wakes now. */
@@ -360,6 +476,7 @@ export class SessionRuntime {
 
   /** What the plugin's session controls show (D35-D38, D4). */
   view(): SessionView {
+    this.#restoreMode();
     const choice: ChoiceView = { applied: {}, resetPending: this.#resetPending };
     const model = this.#port?.modelChoice?.();
     if (model !== undefined) choice.model = model;
@@ -379,6 +496,11 @@ export class SessionRuntime {
   /** The user answered one ask in the UI. False when it is gone or the choice is not offered. */
   answer(askId: string, choiceId: string): boolean {
     return this.#desk.answer(askId, choiceId);
+  }
+
+  /** The user's full answer (feedback, question form, elicitation content). First answer wins. */
+  respond(askId: string, reply: AskReply): AskResult {
+    return this.#desk.respond(askId, reply);
   }
 
   /**
@@ -419,6 +541,7 @@ export class SessionRuntime {
    * before the spawn is applied right after it (D4). Nothing is ever written to settings files.
    */
   async choose(req: SessionChoiceRequest): Promise<ChoiceResult> {
+    this.#restoreMode();
     const caps = this.#factory.staticCapabilities;
     const notes: string[] = [];
     const fail = (error: string): ChoiceResult => ({ ok: false, error, view: this.view() });
@@ -426,9 +549,11 @@ export class SessionRuntime {
       return fail(`unknown mode: ${req.mode}`);
     if (
       req.mode !== undefined &&
-      !offeredPermissionModes(caps.permissionModes, this.#opts.userConfig?.().options, [this.#live.mode]).some(
-        (m) => m.id === req.mode,
-      )
+      !offeredPermissionModes(caps.permissionModes, this.#opts.userConfig?.().options, [
+        this.#live.mode,
+        // The same list the picker shows (routes): the settings mode is offered before a spawn too.
+        await this.#settingsMode(),
+      ]).some((m) => m.id === req.mode)
     )
       return fail(`${req.mode} is not available in this session (it needs a ${this.#factory.displayName} option)`);
     const effortId = req.effort === null || req.effort === SETTINGS_CHOICE ? null : req.effort;
@@ -456,6 +581,17 @@ export class SessionRuntime {
     } else notes.push(`applies when ${this.#factory.displayName} starts`);
     this.#notify();
     return { ok: true, note: notes.filter(Boolean).join('; '), view: this.view() };
+  }
+
+  /** The mode the user's settings pick (display read, no process, D83); undefined when unknown. */
+  async #settingsMode(): Promise<string | undefined> {
+    const cwd = this.#port?.cwd;
+    if (cwd === undefined || !this.#factory.settingsDefaults) return undefined;
+    try {
+      return (await this.#factory.settingsDefaults(cwd)).permissionMode;
+    } catch {
+      return undefined;
+    }
   }
 
   /** D35 exact reset: restart with resume and no choices, but only when nothing runs. */
@@ -489,6 +625,7 @@ export class SessionRuntime {
     if (this.#backend) return this.#backend;
     const port = this.#port;
     if (!port) throw new Error(`${this.#factory.displayName} cannot start: the session is not open`);
+    this.#restoreMode();
     this.#starting ??= (async () => {
       const f = this.#factory;
       const binding = port.latestBinding();
@@ -613,6 +750,13 @@ export class SessionRuntime {
         return;
       case 'conversation-reset':
         return;
+      case 'interaction-done':
+        // D43: a URL elicitation completed; its waiting card closes.
+        this.#desk.done(e.id);
+        return;
+      case 'interaction-cancel':
+        this.#desk.cancel(e.id);
+        return;
       case 'notice':
         // Not a conversation event: the agent keeps it in its own transcript. Shown in the UI.
         this.#live.notice = { level: e.level, text: e.text, at: this.#now() };
@@ -728,7 +872,7 @@ export class SessionRuntime {
       try {
         await backend.controls.setPermissionMode(mode);
         this.#pendingMode = undefined;
-        this.#live.mode = mode;
+        // No local copy: the agent's own mode report (`mode` event) is the truth (R5.1, D38).
       } catch (error) {
         this.#pendingMode = undefined;
         failed('setPermissionMode', error);
@@ -769,6 +913,11 @@ export class SessionRuntime {
     };
     const chain = this.#lastChainId;
     if (chain !== undefined) b.lastChainId = chain;
+    // D24: the user's mode choice rides in the binding, so a host restart can apply it again.
+    if (this.#modeChosen) {
+      const mode = this.#live.mode ?? this.#pendingMode;
+      if (mode !== undefined) b.mode = mode;
+    }
     return b;
   }
 
@@ -854,6 +1003,7 @@ export class SessionRuntime {
     }
     const box = new EventBox();
     this.#box = box;
+    this.#sink = sink;
     this.#lateStopped = false; // a new turn takes what comes; a late turn end has pendingInputs > 0
     for (const e of this.#wakeBuffer ?? []) box.push(e);
     this.#wakeBuffer = undefined;
@@ -873,7 +1023,9 @@ export class SessionRuntime {
       // its terminal app: Stop is the user's action, never the plugin's. A subagent's ask is left
       // alone: a background agent keeps running and its ask waits for the user (rule 6); the
       // agent itself cancels the ask of a subagent the interrupt ends.
-      this.#desk.stop(undefined, ['main']);
+      // Elicitations are never answered by Stop: the agent itself cancels the one its interrupt
+      // ends (its abort signal closes the card), and one from a background agent stays open.
+      this.#desk.stop(['permission', 'question', 'plan'], ['main']);
       timer = setTimeout(() => box.push({ type: 'stop-timeout' }), this.#opts.stopGraceMs ?? STOP_GRACE_MS);
     };
 
@@ -917,6 +1069,8 @@ export class SessionRuntime {
       signal.removeEventListener('abort', onAbort);
       if (timer) clearTimeout(timer);
       this.#box = undefined;
+      this.#closeAudits(); // D74: before the turn ends
+      this.#sink = undefined;
       try {
         sink.closeStep(); // D74: every open step is closed before the turn ends
         this.#claimConsumed(sink);
@@ -1087,5 +1241,16 @@ export class SessionRuntime {
     this.#box?.push({ type: 'ended' }); // a running turn ends as stopped, not as a crash
     this.#backend = undefined;
     this.#port = undefined;
+    // Close every interaction channel of this session: the session is gone (D39).
+    const ends = [...this.#endListeners];
+    this.#endListeners.clear();
+    this.#listeners.clear();
+    for (const end of ends) {
+      try {
+        end();
+      } catch (error) {
+        this.#warn('interaction channel close failed', String(error));
+      }
+    }
   }
 }

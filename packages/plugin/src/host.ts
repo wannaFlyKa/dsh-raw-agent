@@ -5,7 +5,7 @@
 // (`dsh-raw-agent/agent`, src/agent.ts) is mounted by the preset row in cordis.patch.yml.
 
 import { createClaudeFactory } from '@dsh-raw-agent/backend-claude';
-import { createRawAgentHost, type HostContext } from '@dsh-raw-agent/dsh-host';
+import { createRawAgentHost, readUserConfig, type HostContext, type RawUserConfig } from '@dsh-raw-agent/dsh-host';
 
 export const name = 'dsh-raw-agent';
 
@@ -16,8 +16,18 @@ const seedModels = (process.env.DSH_RAW_AGENT_TEST_MODELS ?? '')
   .map((s) => s.trim())
   .filter(Boolean);
 
-const host = createRawAgentHost({ factories: [createClaudeFactory()], seedModels });
+// The Host entry's config (D87): `executablePath` and backend `options` (Claude: the bypass
+// switch, D14). Read at every spawn, never cached. No Schemastery schema is exported yet (S7), so
+// the loader hands the row's plain config; an edit through DSH's config surface remounts the entry.
+let entryConfig: RawUserConfig | undefined;
 
-export function apply(ctx: HostContext): void {
+const host = createRawAgentHost({
+  factories: [createClaudeFactory()],
+  seedModels,
+  userConfig: () => readUserConfig(entryConfig),
+});
+
+export function apply(ctx: HostContext, config?: RawUserConfig): void {
+  entryConfig = config;
   host.apply(ctx);
 }

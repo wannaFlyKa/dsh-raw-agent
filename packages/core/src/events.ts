@@ -89,10 +89,14 @@ export type BackendEvent =
   | { type: 'task-end'; taskId: string; status: TaskStatus; summary?: string }
   | { type: 'tasks-snapshot'; taskIds: string[] }
   | { type: 'mode'; mode: string }
+  /** An interaction finished on the agent's side (D43: a URL elicitation completed). */
+  | { type: 'interaction-done'; id: string }
+  /** The agent withdrew an interaction (its abort signal also fires). */
+  | { type: 'interaction-cancel'; id: string }
   | { type: 'exit'; error?: string };
 
 // Not in the spike yet (added in place later, §7.2): agent-start, agent-end, workflow-start,
-// workflow-snapshot, workflow-end, team-message, interaction-done, interaction-cancel, title,
+// workflow-snapshot, workflow-end, team-message, title,
 // usage, context, compaction, limits, retry, commands.
 
 export type BackendEventType = BackendEvent['type'];

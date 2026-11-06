@@ -1,11 +1,14 @@
 // Pure view logic for the session controls and the settings preview. No React, no DSH.
 
+import { nextPermissionMode } from '@dsh-raw-agent/core';
 import { SETTINGS, type SessionInfo } from './api.js';
 
 export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** Tooltip: the agent's description, and why the option is greyed out. */
+  hint?: string;
 }
 
 export interface SelectModel {
@@ -71,26 +74,74 @@ export function effortSelect(info: SessionInfo): SelectModel | undefined {
   return { value: v.choice.effort ?? SETTINGS, options, title: 'Effort for this session only.' };
 }
 
+/** The mode the picker shows: a pending choice, else the agent's own report (R5.1). */
+export function currentMode(info: SessionInfo): string {
+  const v = info.view;
+  return v.choice.pendingMode ?? v.live.mode ?? info.settings?.permissionMode ?? info.permissionModes[0]?.id ?? '';
+}
+
+/** The model the session runs or will run (for the auto-mode check, D38). */
+function activeModel(info: SessionInfo) {
+  const v = info.view;
+  const id =
+    v.choice.model !== undefined && v.choice.model !== SETTINGS
+      ? v.choice.model
+      : (v.live.model ?? info.settings?.model);
+  return info.models.find((m) => m.value === id || m.displayName === id);
+}
+
 /**
- * The six-mode picker (D38). It shows the agent's own mode once it reports one. The mode the
+ * Why a listed mode cannot be picked now, or undefined. D38: auto is greyed out when the model
+ * says it has no auto mode; a mode that needs a backend option names that option.
+ */
+export function modeBlocked(info: SessionInfo, id: string): string | undefined {
+  const off = info.unavailableModes?.find((m) => m.id === id);
+  if (off)
+    return off.optionLabel !== undefined
+      ? `Needs the plugin option “${off.optionLabel}”.`
+      : 'Not available in this session.';
+  if (id === 'auto' && activeModel(info)?.supportsAutoMode === false && currentMode(info) !== id)
+    return `${info.backend.displayName} says this model has no auto mode.`;
+  return undefined;
+}
+
+/** The mode the agent's "next mode" key picks (Claude: Shift+Tab), or undefined. */
+export function nextModeFor(info: SessionInfo): string | undefined {
+  const cycle = info.permissionModeCycle;
+  if (!cycle || cycle.length === 0) return undefined;
+  const offered = new Set(info.permissionModes.map((m) => m.id));
+  return nextPermissionMode(cycle, currentMode(info), (id) => offered.has(id) && modeBlocked(info, id) === undefined);
+}
+
+/**
+ * The six-mode picker (D38, R5.1). It shows the agent's own mode once it reports one. The mode the
  * user's settings pick is marked "(your settings)", as the model and effort pickers name theirs,
- * so the user can tell a settings mode from a choice. The Host lists only the modes the session
- * may use (D38 r4: bypass only when allowed).
+ * so the user can tell a settings mode from a choice. Every mode of the backend is listed; one the
+ * session cannot pick now (bypass without its option, auto on a model without it) is greyed out
+ * with its reason in the option tooltip.
  */
 export function modeSelect(info: SessionInfo): SelectModel {
   const v = info.view;
-  const current =
-    v.choice.pendingMode ?? v.live.mode ?? info.settings?.permissionMode ?? info.permissionModes[0]?.id ?? '';
+  const current = currentMode(info);
   const fromSettings = info.settings?.permissionMode;
-  const options: SelectOption[] = info.permissionModes.map((m) => ({
-    value: m.id,
-    label: m.id === fromSettings ? `${m.label} (your settings)` : m.label,
-  }));
+  const listed = [...info.permissionModes, ...(info.unavailableModes ?? [])];
+  const options: SelectOption[] = listed.map((m) => {
+    const blocked = modeBlocked(info, m.id);
+    const o: SelectOption = {
+      value: m.id,
+      label: m.id === fromSettings ? `${m.label} (your settings)` : m.label,
+    };
+    const hint = [m.description, blocked].filter((x): x is string => x !== undefined && x !== '').join(' ');
+    if (hint !== '') o.hint = hint;
+    if (blocked !== undefined && m.id !== current) o.disabled = true;
+    return o;
+  });
   if (current !== '' && !options.some((o) => o.value === current)) options.push({ value: current, label: current });
+  const key = info.permissionModeCycle?.length ? ' Shift+Tab: next mode.' : '';
   const title =
     v.choice.pendingMode !== undefined
-      ? `Applies when ${info.backend.displayName} starts.`
-      : 'Permission mode for this session only.';
+      ? `Applies when ${info.backend.displayName} starts.${key}`
+      : `Permission mode for this session only.${key}`;
   return { value: current, options, title };
 }
 
@@ -125,17 +176,24 @@ const ASK_HEADING: Record<string, string> = {
   trust: 'asks whether you trust this folder',
 };
 
+/** Who asks: the subagent by its label (D77), else the agent's name. */
+export function askWho(a: { agent: 'main' | 'child'; agentLabel?: string }, name: string): string {
+  if (a.agent !== 'child') return name;
+  return a.agentLabel ? `Subagent “${a.agentLabel}”` : `A ${name} subagent`;
+}
+
 /** The asks to show, oldest first. Every answer is the user's click (or Stop). */
 export function askModels(info: SessionInfo): AskModel[] {
   const name = info.backend.displayName;
   return [...(info.view.asks ?? [])]
     .sort((a, b) => a.at - b.at)
     .map((a) => {
-      const who = a.agent === 'child' ? `A ${name} subagent` : name;
+      const who = askWho(a, name);
       const m: AskModel = {
         id: a.id,
         heading: `${who} ${ASK_HEADING[a.kind] ?? 'asks'}: ${a.title}`,
-        choices: a.choices.map((c) => ({ ...c })),
+        // The one-button row cannot fill a form: a choice that needs one waits for the full card.
+        choices: a.choices.filter((c) => c.submits === undefined).map((c) => ({ id: c.id, label: c.label })),
       };
       if (a.detail !== undefined) m.detail = a.detail;
       return m;

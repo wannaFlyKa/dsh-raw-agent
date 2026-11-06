@@ -25,6 +25,7 @@ import {
   type TurnSink,
 } from '../driver.js';
 import { SessionRegistry, SESSIONS_SERVICE, isSessionRegistry, type ReturnedDraft } from '../registry.js';
+import { modeCommandDescription, runModeCommand } from '../mode-command.js';
 import { SETTINGS_MODEL } from './catalog.js';
 import { startJob } from './jobs.js';
 import {
@@ -56,7 +57,25 @@ export interface AgentMountOptions {
   registry?: SessionRegistry;
   /** The preset id this mount serves (D81: `raw-agent-<kind>`). Used to find agents rebound to it. */
   presetId?: string;
+  /**
+   * Shadow DSH's `/permission` in our agents' own scope (R1.4 leftover). Default on. DSH's preset
+   * would show and set a level this agent never applies.
+   */
+  modeCommand?: boolean;
 }
+
+/** The part of DSH's command registry the port uses (`P/dsh-commands/lib/index.js:262-268`). */
+interface DshCommands {
+  register(definition: {
+    name: string;
+    description: string;
+    input?: { hint: string };
+    handler(invocation: { agent: DshAgent; rawInput: string }): Promise<unknown> | unknown;
+  }): unknown;
+}
+
+/** The name of DSH's permission-preset command, shadowed in our sessions. */
+export const PERMISSION_COMMAND = 'permission';
 
 /** D81: the preset row of a backend kind. */
 export function presetIdFor(kind: string): string {
@@ -165,6 +184,8 @@ function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext): TurnSink {
       log.result(id, toResultBlocks(content), isError, chainId === undefined ? undefined : { chainUuid: chainId }),
     saveImages: (images) => saveResultImages(ctx, images),
     closeStep: () => log.closeStep(),
+    approvalAsked: (info) => log.approvalAsked(info),
+    approvalDecided: (id, outcome) => log.approvalDecided(id, outcome),
   };
 }
 
@@ -276,6 +297,7 @@ function latestBinding(agent: DshAgent, kind: string): HostBinding | undefined {
     if (typeof b.hostSessionId === 'string') out.hostSessionId = b.hostSessionId;
     const chain = laterChain ?? (typeof b.lastChainId === 'string' ? b.lastChainId : undefined);
     if (chain !== undefined) out.chainId = chain;
+    if (typeof b.mode === 'string' && b.mode !== '') out.mode = b.mode; // D24
     return out;
   }
   return undefined;
@@ -385,6 +407,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
         // D87: the agent was evicted and is open again; the process kept running.
         existing.attach(portFor(agent));
         mine.add(agent.id);
+        shadowPermission(agent);
       }
       return existing;
     }
@@ -395,8 +418,55 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     const r = new SessionRuntime(factory, portFor(agent), opts);
     registry.set(agent.id, factory.kind, r);
     mine.add(agent.id);
+    shadowPermission(agent);
     return r;
   };
+
+  // R1.4 leftover (CLAUDE.md §4): DSH's `/permission` changes DSH's preset, which this agent
+  // ignores. A command registered under the agent's own context shadows the global one for that
+  // agent only (`P/dsh-commands/lib/index.js:89, 207-208`: "for a per-agent variant, mount a
+  // command-injected plugin under that agent's agent.ctx"). It shows and switches the agent's real
+  // mode instead. Standard sessions keep DSH's command. Live scope behaviour is **unverified**.
+  const shadows = new Map<string, unknown>();
+  function shadowPermission(agent: DshAgent): void {
+    if (o.modeCommand === false || shadows.has(agent.id)) return;
+    const actx = agent.ctx as CordisContext | undefined;
+    if (typeof actx?.inject !== 'function') return;
+    const register = (c: CordisContext) => {
+      const commands = c.get('commands') as DshCommands | undefined;
+      if (typeof commands?.register !== 'function') return;
+      try {
+        commands.register({
+          name: PERMISSION_COMMAND,
+          description: modeCommandDescription(factory),
+          input: { hint: '<mode>' },
+          handler: ({ agent: a, rawInput }) =>
+            runModeCommand(
+              registry.get(a.id, factory.kind) as SessionRuntime | undefined,
+              factory,
+              typeof rawInput === 'string' ? rawInput : '',
+            ),
+        });
+      } catch (error) {
+        warn('could not shadow /permission in this session', String((error as Error)?.message ?? error));
+      }
+    };
+    try {
+      shadows.set(agent.id, actx.inject(['commands'], register));
+    } catch (error) {
+      warn('could not shadow /permission in this session', String(error));
+    }
+  }
+  function unshadowPermission(agentId: string): void {
+    const handle = shadows.get(agentId);
+    shadows.delete(agentId);
+    try {
+      if (typeof handle === 'function') (handle as () => void)();
+      else (handle as { dispose?: () => void } | undefined)?.dispose?.();
+    } catch (error) {
+      warn('could not remove the /permission shadow', String(error));
+    }
+  }
 
   // D2: the guard. Outermost, so nothing a Host listener adds reaches a DSH model.
   ctx.on(
@@ -602,6 +672,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     }
     routeBefore.delete(agent.id);
     mine.delete(agent.id);
+    unshadowPermission(agent.id);
     void registry.delete(agent.id);
   }
 
@@ -613,6 +684,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   // D87: with the Host registry, an agent dispose (eviction) only detaches; the process and its
   // background tasks keep running. Without it, the process ends with the agent (D75).
   const release = (id: string) => {
+    shadows.delete(id); // the agent's own context disposes the command with it
     if (!mine.delete(id)) return;
     if (shared) (registry.get(id, factory.kind) as SessionRuntime | undefined)?.detach();
     else void registry.delete(id);

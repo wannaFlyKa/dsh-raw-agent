@@ -52,6 +52,9 @@ export type RegisteredRuntime = Pick<
   | 'view'
   | 'choose'
   | 'answer'
+  | 'respond'
+  | 'subscribe'
+  | 'showNotice'
 >;
 
 export class SessionRegistry {

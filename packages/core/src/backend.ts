@@ -48,6 +48,11 @@ export interface FactoryCapabilities {
   sideQuestionCommand?: string;
   /** Static default list for the mode picker (D38). */
   permissionModes: PermissionModeInfo[];
+  /**
+   * The order of the agent's own "next mode" key (Claude: Shift+Tab). Unavailable modes are
+   * skipped; a mode not in the list goes to the first entry. Absent: the agent has no such key.
+   */
+  permissionModeCycle?: string[];
   mainAgentPicker: 'new-session-only' | 'any-time' | 'none';
   efforts?: EffortInfo[];
   /** How mid-turn input is taken (D27). */
@@ -158,9 +163,21 @@ export interface InteractionHandler {
 export interface PermissionOption {
   id: string;
   kind: 'allow-once' | 'allow-always' | 'reject-once' | 'reject-always';
+  /** The agent's own wording where it has one (Claude: the TUI's "Yes, and don't ask again for …"). */
   label: string;
+  /** Where an "always" choice is saved, in plain words ("project local settings"). */
   destination?: string;
+  /** What an "always" choice saves, one line each (Claude: the exact rule text, `Bash(rm:*)`). */
+  effects?: string[];
   acceptsFeedback?: boolean;
+  /** Placeholder for the feedback field (Claude: "and tell Claude what to do differently"). */
+  feedbackPlaceholder?: string;
+  /**
+   * The rule this "always" choice saves may be edited before it is saved, as in the agent's
+   * terminal app (Claude: "Yes, and don't ask again for: <command prefix>"). `ruleContent` is the
+   * agent's own suggestion; the answer's `ruleContent` replaces it.
+   */
+  editableRule?: { toolName: string; ruleContent: string; placeholder?: string };
 }
 
 export interface PermissionRequest {
@@ -175,6 +192,10 @@ export interface PermissionRequest {
   description?: string;
   reason?: string;
   blockedPath?: string;
+  /** Open the card on its reject option and offer no one-key approve (Claude: `defaultToNo`). */
+  defaultToNo?: boolean;
+  /** For an MCP tool: the server that serves it. `name` is untrusted text from configuration. */
+  mcpServer?: { name: string; source: string };
   options: PermissionOption[];
 }
 
@@ -182,41 +203,84 @@ export interface PermissionRequest {
 export interface PermissionAnswer {
   optionId: string;
   feedback?: string;
+  /** The edited rule of an `editableRule` choice (only when the user changed it). */
+  ruleContent?: string;
+}
+
+export interface QuestionItem {
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description?: string; preview?: string }>;
+  /** The user may type their own answer instead of picking an option (Claude: always, as "Other"). */
+  allowsOther: boolean;
 }
 
 export interface QuestionRequest {
   id: string;
   agent: AgentRef;
+  agentLabel?: string;
   callId?: string;
-  questions: Array<{
-    question: string;
-    header?: string;
-    multiSelect: boolean;
-    options: Array<{ label: string; description?: string; preview?: string }>;
-  }>;
+  questions: QuestionItem[];
+  /**
+   * How option previews are written (D13). 'html' only when the user's own env chose it; the UI
+   * must then show it as text or in a sandbox, never as live HTML.
+   */
+  previewFormat: 'markdown' | 'html';
+  /** Label of the "type your own answer" choice (Claude: "Other"). */
+  otherLabel: string;
+  /**
+   * The agent offers to talk the questions over instead of answering (Claude: "Chat about this").
+   * The UI then sends `chat: true` with whatever answers the user gave so far.
+   */
+  chatLabel?: string;
 }
 
-/** Keyed by question text, as the CLI expects. `null` means the user dismissed the card. */
-export type QuestionAnswer = { answers: Record<string, string> } | null;
+/**
+ * Keyed by question text, as the CLI expects. A multi-select answer lists the picked labels; an
+ * "Other" answer is the typed text. `notes` are optional free-text notes per question. `null`
+ * means the user dismissed the card.
+ */
+export type QuestionAnswer = {
+  answers: Record<string, string | string[]>;
+  notes?: Record<string, string>;
+  /** The user picked the `chatLabel` choice; `answers` may be partial or empty. */
+  chat?: true;
+} | null;
 
 export interface PlanRequest {
   id: string;
   agent: AgentRef;
+  agentLabel?: string;
   callId?: string;
   plan: string;
   planFilePath?: string;
+  /** Approve choices, in the agent's own order and words (D42). */
   choices: PlanChoiceInfo[];
+  /** The "keep planning" choice; it takes optional feedback (D42). */
+  keepPlanning: { label: string; feedbackPlaceholder?: string };
 }
 
 export type PlanAnswer = { kind: 'approve'; choiceId: string } | { kind: 'keep-planning'; feedback?: string };
 
 export interface ElicitationRequest {
   id: string;
+  /**
+   * Which agent's tool call asked, when the backend can tell (D44). Claude's callback names no
+   * agent; the backend infers it from the open MCP tool calls of that server. Absent: unknown.
+   */
+  agent?: AgentRef;
+  agentLabel?: string;
   serverName: string;
   message: string;
   mode?: 'form' | 'url';
   url?: string;
+  /** Correlates a URL elicitation with its completion (`interaction-done`, D43). */
+  elicitationId?: string;
   requestedSchema?: unknown;
+  title?: string;
+  displayName?: string;
+  description?: string;
 }
 
 export type ElicitationAnswer =
@@ -227,6 +291,8 @@ export type ElicitationAnswer =
 export interface PermissionModeInfo {
   id: string;
   label: string;
+  /** The agent's own one-line description of the mode. */
+  description?: string;
   /**
    * Offered only when this backend user option is on (D38 r4; Claude: bypass needs
    * `allowDangerouslySkipPermissions`, as `claude --allow-dangerously-skip-permissions`, D14).
@@ -243,6 +309,8 @@ export interface EffortInfo {
 export interface PlanChoiceInfo {
   id: string;
   label: string;
+  /** The permission mode the agent runs in after this choice, when it is known. */
+  mode?: string;
 }
 
 export interface OptionSchema {
@@ -258,6 +326,8 @@ export interface ModelInfo {
   displayName: string;
   description?: string;
   efforts?: string[];
+  /** false: the agent says its auto permission mode is not available with this model (D38). */
+  supportsAutoMode?: boolean;
 }
 
 export interface AgentInfo {

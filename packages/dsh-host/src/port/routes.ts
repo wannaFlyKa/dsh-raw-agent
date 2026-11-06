@@ -8,6 +8,8 @@ import { readFileSync, statSync } from 'node:fs';
 import type { AgentBackendFactory, SessionChoiceRequest, SettingsDefaults } from '@dsh-raw-agent/core';
 import { offeredPermissionModes } from '@dsh-raw-agent/core';
 import { listConfigFiles, previewConfigFile, type ConfigPreviewDeps } from '../config-preview.js';
+import type { AskReply } from '../asks.js';
+import type { SessionView } from '../driver.js';
 import type { SessionRegistry } from '../registry.js';
 import type { CordisContext, DshSession } from './types.js';
 
@@ -159,6 +161,10 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
 export const SESSION_ROUTE = '/api/raw-agent/session';
 export const CHOICE_ROUTE = '/api/raw-agent/choice';
 export const ANSWER_ROUTE = '/api/raw-agent/answer';
+/** D39: the streaming interaction channel (NDJSON). */
+export const INTERACTIONS_ROUTE = '/api/raw-agent/interactions';
+/** How often the channel sends a keep-alive line. */
+export const INTERACTIONS_PING_MS = 25_000;
 
 export interface SessionControlDeps {
   factories: readonly AgentBackendFactory[];
@@ -190,13 +196,125 @@ export function parseChoice(body: unknown): SessionChoiceRequest | string {
   return out;
 }
 
-/** Parse and check the body of `POST …/answer`: `{ask, choice}`, ids only. */
-export function parseAnswer(body: unknown): { ask: string; choice: string } | string {
-  if (body === null || typeof body !== 'object' || Array.isArray(body)) return 'the body must be a JSON object';
-  const b = body as Record<string, unknown>;
+const MAX_ANSWER_BYTES = 512 * 1024;
+const plainObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * Parse and check the body of `POST …/answer`: `{ask, choice}` (ids), plus what the choice may
+ * carry: `feedback` (text), `answers` and `notes` (question form, D41), `content` (elicitation
+ * form, D43). The ask itself checks that the choice takes them (AskDesk.respond).
+ */
+export function parseAnswer(body: unknown): ({ ask: string } & AskReply) | string {
+  if (!plainObject(body)) return 'the body must be a JSON object';
+  const b = body;
   if (typeof b.ask !== 'string' || !MODEL_ID.test(b.ask)) return 'ask must be an ask id';
   if (typeof b.choice !== 'string' || !MODEL_ID.test(b.choice)) return 'choice must be a choice id';
-  return { ask: b.ask, choice: b.choice };
+  try {
+    if (JSON.stringify(b).length > MAX_ANSWER_BYTES) return 'the answer is too large';
+  } catch {
+    return 'the body must be JSON';
+  }
+  const out: { ask: string } & AskReply = { ask: b.ask, choice: b.choice };
+  if (b.feedback !== undefined) {
+    if (typeof b.feedback !== 'string') return 'feedback must be text';
+    out.feedback = b.feedback;
+  }
+  if (b.answers !== undefined) {
+    if (!plainObject(b.answers)) return 'answers must be an object';
+    out.answers = b.answers as Record<string, string | string[]>;
+  }
+  if (b.notes !== undefined) {
+    if (!plainObject(b.notes)) return 'notes must be an object';
+    out.notes = b.notes as Record<string, string>;
+  }
+  if (b.content !== undefined) {
+    if (!plainObject(b.content)) return 'content must be an object';
+    out.content = b.content;
+  }
+  if (b.rule !== undefined) {
+    if (typeof b.rule !== 'string') return 'rule must be text';
+    out.rule = b.rule;
+  }
+  return out;
+}
+
+/** One line of the interaction channel: the open asks and the process state (D39). */
+export function channelLine(view: SessionView): string {
+  return `${JSON.stringify({ type: 'asks', asks: view.asks ?? [], state: view.state, live: view.live })}\n`;
+}
+
+/**
+ * D39: the streaming interaction channel. On connect it sends the open asks (so a reloaded page
+ * or a second browser gets them again), then one line after every change, and a keep-alive.
+ * Answers go through `POST …/answer`; the first answer wins and the next line drops the card in
+ * every other browser. Nothing here reaches the host log.
+ */
+export function interactionsRoute(registry: SessionRegistry, pingMs: number = INTERACTIONS_PING_MS): FetchRoute {
+  return {
+    path: INTERACTIONS_ROUTE,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    async fetch(request) {
+      const id = new URL(request.url).searchParams.get('session');
+      if (!id) return json(400, { error: 'missing session' });
+      const runtime = registry.get(id);
+      if (!runtime) return json(404, { error: 'not a session of this plugin' });
+      const enc = new TextEncoder();
+      let stop = () => {};
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let last = '';
+          let closed = false;
+          const send = (line: string) => {
+            if (closed) return;
+            try {
+              controller.enqueue(enc.encode(line));
+            } catch {
+              stop();
+            }
+          };
+          const push = (view: SessionView) => {
+            const line = channelLine(view);
+            if (line === last) return;
+            last = line;
+            send(line);
+          };
+          let unsubscribe = () => {};
+          const timer = setInterval(() => send('{"type":"ping"}\n'), pingMs);
+          (timer as { unref?: () => void }).unref?.();
+          stop = () => {
+            if (closed) return;
+            closed = true;
+            clearInterval(timer);
+            unsubscribe();
+            request.signal?.removeEventListener('abort', stop);
+            try {
+              controller.close();
+            } catch {
+              // already closed by the reader
+            }
+          };
+          request.signal?.addEventListener('abort', stop, { once: true });
+          push(runtime.view());
+          // The runtime closes the channel when it is disposed (session gone, plugin unload).
+          unsubscribe = runtime.subscribe(push, () => stop());
+          if (closed) unsubscribe();
+        },
+        cancel() {
+          stop();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          'content-type': 'application/x-ndjson; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        },
+      });
+    },
+  };
 }
 
 /**
@@ -241,15 +359,28 @@ export function sessionControlRoutes(registry: SessionRegistry, deps: SessionCon
         trust = undefined;
       }
     }
+    // D38 r4: a mode that needs a backend option (Claude: bypass) can be picked only when it is
+    // on, or when the session already runs in it. The others are listed apart with the option
+    // that unlocks them, so the picker can name every mode (R5.1) without offering them.
+    const allModes = factory.staticCapabilities.permissionModes;
+    const permissionModes = offeredPermissionModes(allModes, registry.userConfig?.().options, [
+      view.live.mode,
+      view.choice.pendingMode,
+      settings?.permissionMode,
+    ]);
+    const unavailableModes = allModes
+      .filter((m) => !permissionModes.some((o) => o.id === m.id))
+      .map((m) => {
+        const option = factory.staticCapabilities.userOptions?.find((o) => o.key === m.requiresOption);
+        return { ...m, ...(option?.label !== undefined ? { optionLabel: option.label } : {}) };
+      });
     return {
       backend: { kind: factory.kind, displayName: factory.displayName },
-      // D38 r4: a mode that needs a backend option (Claude: bypass) shows only when it is on, or
-      // when the session already runs in it.
-      permissionModes: offeredPermissionModes(
-        factory.staticCapabilities.permissionModes,
-        registry.userConfig?.().options,
-        [view.live.mode, view.choice.pendingMode, settings?.permissionMode],
-      ),
+      permissionModes,
+      ...(unavailableModes.length > 0 ? { unavailableModes } : {}),
+      ...(factory.staticCapabilities.permissionModeCycle
+        ? { permissionModeCycle: [...factory.staticCapabilities.permissionModeCycle] }
+        : {}),
       efforts: factory.staticCapabilities.efforts ?? [],
       needsProcess: factory.staticCapabilities.needsProcess,
       models,
@@ -317,12 +448,15 @@ export function sessionControlRoutes(registry: SessionRegistry, deps: SessionCon
         }
         const a = parseAnswer(raw);
         if (typeof a === 'string') return json(400, { error: a });
-        const ok = runtime.answer(a.ask, a.choice);
-        return ok
-          ? json(200, { ok: true, session: await describe(id) })
-          : json(409, { ok: false, error: 'that question is no longer open', session: await describe(id) });
+        const { ask, ...reply } = a;
+        const r = runtime.respond(ask, reply);
+        if (r.ok) return json(200, { ok: true, session: await describe(id) });
+        // 409: the ask is gone (another browser answered first, or the agent cancelled it);
+        // 400: the reply does not fit the ask (a choice it does not offer, a bad form).
+        return json(r.code === 'gone' ? 409 : 400, { ok: false, error: r.error, session: await describe(id) });
       },
     },
+    interactionsRoute(registry),
   ];
 }
 

@@ -3,7 +3,8 @@
 // looks at). A 404 means "not a session of this plugin": the controls render nothing.
 
 import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
-import { RouteError, type RawAgentApi, type SessionInfo } from './api.js';
+import { RouteError, type AskReplyWire, type ChannelLine, type RawAgentApi, type SessionInfo } from './api.js';
+import { nextModeFor } from './view-model.js';
 
 export interface SessionSnapshot {
   status: 'loading' | 'absent' | 'ready' | 'error';
@@ -18,6 +19,12 @@ export interface SessionSnapshot {
    */
   noteProcess?: string;
   error?: string;
+  /** The interaction channel (D39) is connected: asks arrive at once, no fast poll needed. */
+  channel?: 'open' | 'closed';
+  /** The ask whose answer is in flight. */
+  answering?: string;
+  /** Why the last answer to an ask was refused (the card shows it; the ask stays open). */
+  askError?: { id: string; text: string };
 }
 
 export interface PollTimings {
@@ -36,6 +43,8 @@ export interface PollTimings {
 
 /** Poll faster while something changes (a process starts, a turn runs). */
 export const POLL_MS: PollTimings = { ready: 4000, active: 1500, absent: 20000, absentFirst: 1000, error: 10000 };
+/** Wait before the interaction channel connects again after it ended or failed. */
+export const CHANNEL_RETRY_MS = 2000;
 
 export interface TimerApi {
   set(fn: () => void, ms: number): unknown;
@@ -58,6 +67,10 @@ export class SessionControlStore {
   #generation = 0;
   #inflight: Promise<void> | undefined;
   #absentStreak = 0;
+  readonly #observers = new Set<() => void>();
+  #channel: AbortController | undefined;
+  #channelTimer: unknown;
+  #noChannel = false;
 
   constructor(sessionId: string, api: RawAgentApi, timers: TimerApi = defaultTimers, timings: PollTimings = POLL_MS) {
     this.sessionId = sessionId;
@@ -73,13 +86,32 @@ export class SessionControlStore {
     if (this.#listeners.size === 1) void this.refresh();
     return () => {
       this.#listeners.delete(listener);
-      if (this.#listeners.size === 0) this.#stop();
+      if (this.#listeners.size === 0) {
+        this.#stop();
+        this.#closeChannel();
+      }
     };
+  };
+
+  /**
+   * Watch the snapshot without starting any reads (the port's pending-interaction publisher):
+   * only a `subscribe` makes the store poll and open the interaction channel.
+   */
+  observe = (listener: () => void): (() => void) => {
+    this.#observers.add(listener);
+    return () => this.#observers.delete(listener);
   };
 
   #set(next: Partial<SessionSnapshot>): void {
     this.#snapshot = { ...this.#snapshot, ...next };
     for (const l of [...this.#listeners]) l();
+    for (const l of [...this.#observers]) {
+      try {
+        l();
+      } catch {
+        // an observer never breaks the controls
+      }
+    }
   }
 
   #stop(): void {
@@ -87,12 +119,71 @@ export class SessionControlStore {
     this.#timer = undefined;
   }
 
+  #closeChannel(): void {
+    if (this.#channelTimer !== undefined) this.#timers.clear(this.#channelTimer);
+    this.#channelTimer = undefined;
+    const c = this.#channel;
+    this.#channel = undefined;
+    c?.abort();
+    if (this.#snapshot.channel === 'open') this.#set({ channel: 'closed' });
+  }
+
+  /**
+   * D39: while someone looks at this session and it is ours, keep the interaction channel open,
+   * so a new ask (or another browser's answer) shows at once. It reconnects after it ends.
+   */
+  #openChannel(): void {
+    if (this.#channel || this.#channelTimer !== undefined) return;
+    if (this.#listeners.size === 0 || this.#snapshot.status !== 'ready') return;
+    if (typeof this.#api.interactions !== 'function' || this.#noChannel) return;
+    const ac = new AbortController();
+    this.#channel = ac;
+    const onLine = (line: ChannelLine) => {
+      if (ac.signal.aborted || line.type !== 'asks') return;
+      const info = this.#snapshot.info;
+      const next: Partial<SessionSnapshot> = { channel: 'open' };
+      if (info) {
+        const view = {
+          ...info.view,
+          asks: line.asks,
+          ...(line.state ? { state: line.state } : {}),
+          ...(line.live ? { live: line.live } : {}),
+        };
+        next.info = { ...info, view };
+        ++this.#generation; // a poll that started before this line is older
+      }
+      const err = this.#snapshot.askError;
+      if (err && !line.asks.some((a) => a.id === err.id)) next.askError = undefined;
+      this.#set(next);
+    };
+    void this.#api
+      .interactions(this.sessionId, ac.signal, onLine)
+      .catch((e: unknown) => e)
+      .then((e) => {
+        if (this.#channel !== ac) return;
+        this.#channel = undefined;
+        if (this.#snapshot.channel === 'open') this.#set({ channel: 'closed' });
+        // 404: not ours (any more); the poll decides what to show. 200 without a body: this
+        // fetch cannot stream, so the poll alone carries the asks.
+        if (e instanceof RouteError && (e.status === 404 || e.status === 200)) {
+          if (e.status === 200) this.#noChannel = true;
+          return;
+        }
+        if (this.#listeners.size === 0) return;
+        this.#channelTimer = this.#timers.set(() => {
+          this.#channelTimer = undefined;
+          this.#openChannel();
+        }, CHANNEL_RETRY_MS);
+      });
+  }
+
   #schedule(): void {
     this.#stop();
     if (this.#listeners.size === 0) return;
     const s = this.#snapshot;
     const v = s.info?.view;
-    const active = v !== undefined && (v.state.turn || v.state.process === 'starting' || (v.asks?.length ?? 0) > 0);
+    const asking = (v?.asks?.length ?? 0) > 0 && s.channel !== 'open';
+    const active = v !== undefined && (v.state.turn || v.state.process === 'starting' || asking);
     const ms =
       s.status === 'ready'
         ? active
@@ -103,6 +194,8 @@ export class SessionControlStore {
           : this.#timings.error;
     if (s.status !== 'absent') this.#absentStreak = 0;
     this.#timer = this.#timers.set(() => void this.refresh(), ms);
+    if (s.status === 'ready') this.#openChannel();
+    else if (s.status === 'absent') this.#closeChannel();
   }
 
   #absentDelay(): number {
@@ -157,19 +250,50 @@ export class SessionControlStore {
     }
   }
 
-  /** The user's answer to one pending ask (a click; nothing is answered without one). */
-  async answer(askId: string, choiceId: string): Promise<void> {
-    this.#set({ error: undefined });
+  /**
+   * The user's answer to one pending ask (a click; nothing is answered without one). `reply` is a
+   * bare choice id, or the choice with its feedback or form. A refused answer keeps the ask open
+   * and names the reason on its card; an ask another browser answered first is dropped.
+   */
+  async answer(askId: string, reply: string | AskReplyWire): Promise<boolean> {
+    if (this.#snapshot.answering === askId) return false;
+    this.#set({ error: undefined, answering: askId, askError: undefined });
     try {
-      const r = await this.#api.answer(this.sessionId, askId, choiceId);
+      const r = await this.#api.answer(this.sessionId, askId, reply);
       ++this.#generation;
-      const next: Partial<SessionSnapshot> = {};
+      const next: Partial<SessionSnapshot> = { answering: undefined };
       if (r.session) next.info = r.session;
-      if (!r.ok) next.error = r.error ?? 'that question is no longer open';
+      else if (r.ok || r.gone) {
+        // Drop the card now; the channel or the next read confirms it.
+        const info = this.#snapshot.info;
+        if (info)
+          next.info = { ...info, view: { ...info.view, asks: (info.view.asks ?? []).filter((a) => a.id !== askId) } };
+      }
+      if (!r.ok) {
+        const text = r.error ?? 'that question is no longer open';
+        if (r.gone) next.error = `${text} (answered elsewhere, or withdrawn)`;
+        else next.askError = { id: askId, text };
+      }
       this.#set(next);
+      return r.ok;
     } catch (e) {
-      this.#set({ error: String((e as Error)?.message ?? e) });
+      this.#set({ answering: undefined, askError: { id: askId, text: String((e as Error)?.message ?? e) } });
+      return false;
     }
+  }
+
+  /**
+   * The agent's "next mode" key (D38; Claude's Shift+Tab ring). False when the session has no
+   * ring, nothing to switch to, a choice is in flight, or an ask waits for the user.
+   */
+  cycleMode(): boolean {
+    const s = this.#snapshot;
+    if (s.status !== 'ready' || !s.info || s.busy) return false;
+    if ((s.info.view.asks ?? []).length > 0) return false;
+    const next = nextModeFor(s.info);
+    if (next === undefined) return false;
+    void this.choose({ mode: next });
+    return true;
   }
 
   /** "Start <displayName>" (D4): spawn without a message, for controls that need a process. */
@@ -186,7 +310,9 @@ export class SessionControlStore {
 
   dispose(): void {
     this.#listeners.clear();
+    this.#observers.clear();
     this.#stop();
+    this.#closeChannel();
   }
 }
 
@@ -195,6 +321,7 @@ export class SessionStores {
   readonly #api: RawAgentApi;
   readonly #timers: TimerApi | undefined;
   readonly #stores = new Map<string, SessionControlStore>();
+  readonly #created = new Set<(store: SessionControlStore) => void>();
   constructor(api: RawAgentApi, timers?: TimerApi) {
     this.#api = api;
     this.#timers = timers;
@@ -204,8 +331,19 @@ export class SessionStores {
     if (!s) {
       s = new SessionControlStore(sessionId, this.#api, this.#timers);
       this.#stores.set(sessionId, s);
+      for (const fn of [...this.#created]) fn(s);
     }
     return s;
+  }
+  /** The store of a session, only if one exists (no store is created). */
+  peek(sessionId: string): SessionControlStore | undefined {
+    return this.#stores.get(sessionId);
+  }
+  /** Run `fn` for every store, now and when one is created. */
+  each(fn: (store: SessionControlStore) => void): () => void {
+    for (const s of this.#stores.values()) fn(s);
+    this.#created.add(fn);
+    return () => this.#created.delete(fn);
   }
   dispose(): void {
     for (const s of this.#stores.values()) s.dispose();

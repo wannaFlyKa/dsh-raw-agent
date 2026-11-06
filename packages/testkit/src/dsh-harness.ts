@@ -51,12 +51,14 @@ export interface Dsh {
   LlmRuntime: Any;
   /** The real content-addressed local attachment store (`ctx.attachments`). */
   LocalAttachmentStore: Any;
+  /** DSH's real command registry (`ctx.commands`, scoped shadowing). */
+  CommandRuntime: Any;
 }
 
 export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined> {
   if (dir === undefined) return undefined;
   const imp = (pkg: string) => import(pathToFileURL(join(dir, '@deepseek-ai', pkg, 'lib', 'index.js')).href);
-  const [cordis, agent, loop, session, proj, sp, jsonl, jobs, v4, llm, exp, att] = await Promise.all([
+  const [cordis, agent, loop, session, proj, sp, jsonl, jobs, v4, llm, exp, att, commands] = await Promise.all([
     imp('cordis'),
     imp('dsh-agent'),
     imp('dsh-agent-loop'),
@@ -69,6 +71,7 @@ export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined>
     imp('dsh-llm'),
     imp('dsh-session-log-export'),
     imp('dsh-attachment-local'),
+    imp('dsh-commands'),
   ]);
   let version = 'unknown';
   try {
@@ -96,6 +99,7 @@ export async function loadDsh(dir = findDshPackages()): Promise<Dsh | undefined>
     formatSessionMarkdown: exp.formatSessionMarkdown,
     LlmRuntime: llm.default,
     LocalAttachmentStore: att.default ?? att.LocalAttachmentStore,
+    CommandRuntime: commands.default ?? commands.CommandRuntime,
   };
 }
 
@@ -119,6 +123,8 @@ export interface LoopOptions {
   llm?: 'stub' | 'real';
   /** Mount the real local attachment store under the loop's temp root. */
   attachments?: boolean;
+  /** Mount DSH's real command registry (`commands`). */
+  commands?: boolean;
 }
 
 export async function createLoop(dsh: Dsh, opts: LoopOptions = {}): Promise<LoopRuntime> {
@@ -161,6 +167,7 @@ export async function createLoop(dsh: Dsh, opts: LoopOptions = {}): Promise<Loop
       },
     });
   if (opts.attachments) ctx.plugin(dsh.LocalAttachmentStore, { dshHome: join(root, 'dsh-home') });
+  if (opts.commands) ctx.plugin(dsh.CommandRuntime);
   ctx.provide('tools', {
     resolve: async () => ({ dispose() {}, view: () => new Map() }),
     execute: async () => {

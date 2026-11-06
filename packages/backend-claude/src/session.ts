@@ -10,11 +10,13 @@ import {
   type BackendControls,
   type BackendEvent,
   type ContextUsage,
+  type ModelInfo,
   type UserInput,
 } from '@dsh-raw-agent/core';
 import { ClaudeMessageMapper } from './mapper.js';
 import type { Options, Query, SDKUserMessage } from './sdk.js';
 import { planChoices } from './interactions.js';
+import { AskContext } from './ask-context.js';
 import { withSdkVersionEnvRestored } from './env.js';
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
@@ -25,9 +27,18 @@ export interface ClaudeSessionInit {
   startedAs: AgentBackendSession['startedAs'];
   options: Options;
   queryFn: QueryFn;
-  canBypass: boolean;
+  /** The plugin's bypass switch is on (D14): the process was started with the CLI's allow flag. */
+  bypassOption: boolean;
+  /** The mode ids the CLI knows (D38); `setPermissionMode` refuses others before calling it. */
+  modeIds?: readonly string[];
   /** Called once the CLI has died, so the factory can clean up its process group (D8). */
   onExit?: (error?: string) => void;
+  /**
+   * The mode the process started in, when the CLI has not reported one yet. A mode set right
+   * after the spawn (a restored choice, a pick before the first message) comes before the CLI's
+   * first `init`, so without it the pre-plan mode of a plan begun there would be lost (D42).
+   */
+  startMode?: () => Promise<string | undefined>;
   /** Kills the CLI's process group (force stop). */
   killGroup?: () => void;
   now?: () => number;
@@ -112,6 +123,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
   readonly #mapper: ClaudeMessageMapper;
   readonly #query: Query;
   readonly #init: ClaudeSessionInit;
+  readonly #asks = new AskContext();
   #cliVersion: string | undefined;
   #exited = false;
   readonly #pump: Promise<void>;
@@ -132,7 +144,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
       teamMessaging: false,
       cancelQueued: true,
       fileRewind: init.options.enableFileCheckpointing === true,
-      planChoices: planChoices(init.canBypass),
+      planChoices: planChoices({ canBypass: init.bypassOption }),
       toolViewPack: init.kind,
     };
     this.#query = withSdkVersionEnvRestored(() => init.queryFn({ prompt: this.#input, options: init.options }));
@@ -146,6 +158,19 @@ export class ClaudeBackendSession implements AgentBackendSession {
 
   get cliVersion(): string | undefined {
     return this.#cliVersion;
+  }
+
+  /** What the interaction adapter reads about the live session (D42, D43, D44, D77). */
+  get asks(): AskContext {
+    return this.#asks;
+  }
+
+  /**
+   * The CLI allows bypass when it was started with the allow flag (our switch) or started in
+   * bypass mode (the user's settings `defaultMode`), D14 / sdk-surface answer 13.
+   */
+  get canBypass(): boolean {
+    return this.#init.bypassOption || this.#asks.startMode === 'bypassPermissions';
   }
 
   events(): AsyncIterable<BackendEvent> {
@@ -164,7 +189,9 @@ export class ClaudeBackendSession implements AgentBackendSession {
         if (m.type === 'system' && m.subtype === 'conversation_reset' && typeof m.new_conversation_id === 'string') {
           this.#sessionId = m.new_conversation_id; // D70; the event itself is mapped in a later milestone
         }
+        const closed = this.#asks.observe(msg);
         for (const e of this.#mapper.map(msg)) this.#events.push(e);
+        for (const e of closed) this.#events.push(e);
       }
     } catch (e) {
       error = String((e as Error)?.message ?? e);
@@ -219,7 +246,18 @@ export class ClaudeBackendSession implements AgentBackendSession {
       stopTask: async (taskId) => {
         await q.stopTask(taskId);
       },
+      // D38: the CLI's `status.permissionMode` frame that follows is the truth; nothing here
+      // reports a mode. Refused before the call: an unknown id, and bypass when this process
+      // cannot bypass (the CLI would refuse it with "not launched with …").
       setPermissionMode: async (mode) => {
+        const ids = this.#init.modeIds;
+        if (ids && !ids.includes(mode)) throw new Error(`unknown permission mode: ${mode}`);
+        if (mode === 'bypassPermissions' && !this.canBypass)
+          throw new Error(
+            'Bypass permissions is not available in this Claude Code process: it was started without the plugin option "Allow bypass permissions mode" (the same as `claude --allow-dangerously-skip-permissions`) and not in bypass mode. Turn the option on; it applies when Claude Code starts again.',
+          );
+        if (this.#asks.mode === undefined && this.#init.startMode)
+          this.#asks.seedStartMode(await this.#init.startMode());
         await q.setPermissionMode(mode as Parameters<Query['setPermissionMode']>[0]);
       },
       setModel: async (model) => {
@@ -235,13 +273,15 @@ export class ClaudeBackendSession implements AgentBackendSession {
       models: async () => {
         const list = await q.supportedModels();
         return list.map((m) => {
-          const info: { value: string; displayName: string; description?: string; efforts?: string[] } = {
+          const info: ModelInfo = {
             value: m.value,
             displayName: m.displayName,
           };
           if (m.description) info.description = m.description;
           const efforts = (m as unknown as Loose).supportedEffortLevels;
           if (Array.isArray(efforts)) info.efforts = efforts.map(String);
+          const auto = (m as unknown as Loose).supportsAutoMode;
+          if (typeof auto === 'boolean') info.supportsAutoMode = auto;
           return info;
         });
       },

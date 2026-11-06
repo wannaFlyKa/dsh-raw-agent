@@ -8,16 +8,9 @@ import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
 import { SETTINGS, type RawAgentApi } from '../api.js';
 import { restoreReturnedDrafts, type DraftTarget } from '../drafts.js';
 import type { SessionControlStore } from '../session-store.js';
-import {
-  START_OPTION,
-  askModels,
-  effortSelect,
-  modeSelect,
-  modelSelect,
-  statusLine,
-  type SelectModel,
-} from '../view-model.js';
+import { START_OPTION, effortSelect, modeSelect, modelSelect, statusLine, type SelectModel } from '../view-model.js';
 import type { HostActions } from './actions.js';
+import { AskPanel } from './ask-cards.js';
 import { SettingsPanel } from './settings-panel.js';
 import { css } from './style.js';
 
@@ -29,6 +22,11 @@ export interface ControlsProps {
   inputActions?: DraftTarget;
   /** Test seam: the draft poll interval. */
   draftPollMs?: number;
+  /**
+   * The asks show as cards in DSH's composer (the port's takeover, D39). Without that seam the
+   * cards show here, in the controls row.
+   */
+  asksInComposer?: boolean | (() => boolean);
 }
 
 function Picker(props: {
@@ -50,7 +48,7 @@ function Picker(props: {
       onChange={(e) => props.onPick(e.currentTarget.value)}
     >
       {model.options.map((o) => (
-        <option key={o.value} value={o.value} disabled={o.disabled}>
+        <option key={o.value} value={o.value} disabled={o.disabled} title={o.hint}>
           {o.label}
         </option>
       ))}
@@ -110,27 +108,16 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       : undefined;
   const status = snap.error ?? statusLine(info) ?? draftNote ?? snap.note;
   const name = info.backend.displayName;
-  const asks = askModels(info);
+  const asks = info.view.asks ?? [];
+  const inComposer =
+    typeof props.asksInComposer === 'function' ? props.asksInComposer() : props.asksInComposer === true;
   return (
     <span style={css.bar} data-raw-agent="controls" ref={barRef}>
-      {asks.map((a) => (
-        <span key={a.id} style={css.ask} data-raw-agent="ask" data-ask={a.id} role="alert">
-          <span>{a.heading}</span>
-          {a.detail && <code style={css.askDetail}>{a.detail}</code>}
-          {a.choices.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              style={css.button}
-              data-raw-agent="ask-choice"
-              data-choice={c.id}
-              onClick={() => void store.answer(a.id, c.id)}
-            >
-              {c.label}
-            </button>
-          ))}
+      {asks.length > 0 && !inComposer && (
+        <span style={css.ask} data-raw-agent="ask-inline">
+          <AskPanel store={store} actions={actions} />
         </span>
-      ))}
+      )}
       <Picker
         testId="model"
         label={`${name} model for this session`}

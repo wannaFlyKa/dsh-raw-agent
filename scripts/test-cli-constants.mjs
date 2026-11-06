@@ -1,6 +1,7 @@
 // `pnpm test:cli-constants` (architecture §9, D40, D17a, K7). Checks the constants and env names
 // this plugin copies from Claude Code against the user's installed `claude` binary:
-//   1. D40: every reject text of the table entry for this CLI version is in the binary.
+//   1. D40: every reject text of the table entry for this CLI version is in the binary; the TUI
+//      labels and mode descriptions we show (D40-D42) are too (a warning, not a failure).
 //   2. D17a: every env name a host Claude Code session puts into the env of its children (the
 //      child-marker builder and the Bash/MCP env builders, found by their `CLAUDECODE:"1"`
 //      object literals) is in our strip list, our conditional list, or our documented keep list.
@@ -16,7 +17,14 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const lib = await import(`${root}packages/backend-claude/lib/index.js`);
-const { REJECT_CONSTANTS_BY_VERSION, HOST_SESSION_VARS, CONDITIONAL_HOST_VARS, KEPT_HOST_MARKERS } = lib;
+const {
+  REJECT_CONSTANTS_BY_VERSION,
+  TUI_TEXT,
+  MODE_DESCRIPTIONS,
+  HOST_SESSION_VARS,
+  CONDITIONAL_HOST_VARS,
+  KEPT_HOST_MARKERS,
+} = lib;
 
 /**
  * `CLAUDE*` names the CLI 2.1.318 writes into its own `process.env`, reviewed and kept (not
@@ -82,6 +90,11 @@ const entryVersion = versions.includes(version) ? version : versions.at(-1);
 if (entryVersion !== version) warnings.push(`no D40 table entry for ${version}; checking the newest (${entryVersion})`);
 for (const [name, value] of Object.entries(REJECT_CONSTANTS_BY_VERSION[entryVersion])) {
   if (!has(value)) errors.push(`D40 constant ${name} is not in the binary: ${JSON.stringify(value)}`);
+}
+
+// 1b. TUI labels and mode descriptions we show (labels only; they never reach the model).
+for (const [name, value] of [...Object.entries(TUI_TEXT), ...Object.entries(MODE_DESCRIPTIONS)]) {
+  if (!has(value)) warnings.push(`TUI text ${name} is not in the binary: ${JSON.stringify(value)}`);
 }
 
 // 2. Host markers in the child env builders.

@@ -5,8 +5,18 @@ import { mountClient, type ClientContext, type MountClientOptions } from './port
 
 export * from './api.js';
 export * from './view-model.js';
+export * from './asks-model.js';
 export { restoreReturnedDrafts, type DraftTarget, type RestoreResult } from './drafts.js';
-export { SessionControlStore, SessionStores, POLL_MS, type SessionSnapshot, type TimerApi } from './session-store.js';
+export {
+  SessionControlStore,
+  SessionStores,
+  POLL_MS,
+  CHANNEL_RETRY_MS,
+  type SessionSnapshot,
+  type TimerApi,
+} from './session-store.js';
+export { AskCard, AskPanel, PreviewView, PREVIEW_LINES, type AskCardProps } from './ui/ask-cards.js';
+export { Markdown } from './ui/markdown.js';
 export type { HostActions } from './ui/actions.js';
 export { SessionControls, type ControlsProps } from './ui/controls.js';
 export { SettingsPanel, type SettingsPanelProps } from './ui/settings-panel.js';
@@ -21,6 +31,25 @@ export {
   NATIVE_PERMISSION_SLOT,
   SEAT_HIDDEN_ATTR,
   hideNativeSeat,
+  markToolCard,
+  findToolCard,
+  publishAsks,
+  selectAsk,
+  modeKeyHandler,
+  guardPresetDecoration,
+  isOurSession,
+  PRESET_DECORATION,
+  AskComposer,
+  ASK_INTERACTION_KIND,
+  ASK_INTERACTION_PRECEDENCE,
+  MODE_SHORTCUT_ID,
+  TOOL_CALL_ATTR,
+  TOOL_WAITING_ATTR,
+  type AskInteraction,
+  type ComposerOwner,
+  type FixedInput,
+  type MarkDocument,
+  type PublishInteraction,
   type SeatDocument,
   type SeatElement,
   type ClientContext,

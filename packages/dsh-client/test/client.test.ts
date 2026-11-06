@@ -574,7 +574,7 @@ describe('M1 verify fixes (client)', () => {
     const store = new SessionControlStore('s1', api, manualTimers().timers);
     await store.refresh();
     const html = renderToStaticMarkup(React.createElement(SessionControls, { store, api, actions: actions() }));
-    expect(html).toContain('data-raw-agent="ask"');
+    expect(html).toContain('data-raw-agent="ask-card"');
     expect(html).toContain('Allow once');
     expect(bodies).toEqual([]);
     await store.answer('p1', 'reject');

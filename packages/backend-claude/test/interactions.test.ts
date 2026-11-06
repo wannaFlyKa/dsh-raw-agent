@@ -46,7 +46,7 @@ describe('permission mapping (D40)', () => {
       opts({ suggestions: [suggestion] }),
     );
     expect(seen[0]!.options.map((o) => o.kind)).toEqual(['allow-once', 'allow-always', 'reject-once']);
-    expect(seen[0]!.options[1]!.destination).toBe('project local settings');
+    expect(seen[0]!.options[1]!.destination).toBe('project local settings (.claude/settings.local.json)');
     expect(seen[0]!.callId).toBe('toolu_1');
     expect(r).toEqual({ behavior: 'allow', updatedInput: { command: 'rm x' }, updatedPermissions: [suggestion] });
   });

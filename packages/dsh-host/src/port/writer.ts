@@ -37,7 +37,13 @@ export const WRITER_EVENT_TYPES: readonly string[] = Object.freeze([
   'tool/result',
   'step/end',
   'agent/inbox/spliced',
+  // D44: DSH's log-only approval audit pair (`P/dsh-user-approval/lib/types/types.d.ts:25-52`).
+  'approval/asked',
+  'approval/decided',
 ]);
+
+/** DSH's closed approval outcomes that this writer records (D44). */
+export type ApprovalAuditOutcome = 'allowed-once' | 'rejected' | 'cancelled';
 
 /** One driver-written inbox splice (D3, D25, D27). Never carries an `outcome`. */
 export interface InboxSplice {
@@ -146,6 +152,8 @@ export class TurnLog {
   #frameIndex = 0;
   /** Block indices that already have a block-start chunk in this attempt. */
   #started = new Set<number>();
+  /** D44: audit ids asked in this turn without a decision yet. */
+  readonly #approvals = new Set<string>();
 
   constructor(session: DshSession, live: LiveChannel, turn: number, opts: WriterOptions) {
     this.#session = session;
@@ -457,9 +465,36 @@ export class TurnLog {
     this.#stepOpen = false;
   }
 
+  /**
+   * D44: `approval/asked` for an ask shown while this turn is open. Log-only (no surface op), like
+   * DSH's own `approval.request()`: it may sit inside or between steps. Returns the audit id.
+   */
+  approvalAsked(info: { toolName: string; callId?: string; reason?: string }): string {
+    if (typeof info.toolName !== 'string' || info.toolName === '')
+      throw new WriterAssertError('refused approval/asked without a tool name');
+    const id = randomUUID();
+    const data: Record<string, unknown> = { id, toolName: info.toolName };
+    if (info.callId !== undefined) data.callId = info.callId;
+    if (info.reason !== undefined) data.reason = info.reason;
+    this.#append('approval/asked', data);
+    this.#approvals.add(id);
+    return id;
+  }
+
+  /** D44: the one `approval/decided` of an asked id. A second decision is ignored. */
+  approvalDecided(id: string, outcome: ApprovalAuditOutcome): void {
+    if (!this.#approvals.has(id)) return;
+    if (outcome !== 'allowed-once' && outcome !== 'rejected' && outcome !== 'cancelled')
+      throw new WriterAssertError(`refused approval/decided with outcome ${String(outcome)}`);
+    this.#append('approval/decided', { id, outcome });
+    this.#approvals.delete(id);
+  }
+
   /** Close everything this writer opened. Later appends are refused (the loop writes turn/end). */
   close(): void {
     this.closeStep();
+    // D44, D74: every ask still open when the turn ends is `cancelled` (the pair stays in the turn).
+    for (const id of [...this.#approvals]) this.approvalDecided(id, 'cancelled');
     this.#closed = true;
   }
 }

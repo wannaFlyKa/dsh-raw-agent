@@ -11,6 +11,7 @@ import {
   type AgentBackendFactory,
   type AgentBackendSession,
   type BackendEvent,
+  type ElicitationAnswer,
   type InteractionHandler,
   type OpenSessionOptions,
   type PermissionAnswer,
@@ -68,9 +69,10 @@ describe('AskDesk (held asks)', () => {
         agent: 'main',
         title: 'Bash wants to run',
         detail: 'ls -la',
-        choices: PERMISSION_OPTIONS.map((o) => ({ id: o.id, label: o.label })),
+        choices: PERMISSION_OPTIONS.map((o) => ({ id: o.id, label: o.label, kind: o.kind })),
         stopChoice: 'reject',
         at: 7,
+        form: { type: 'permission', toolName: 'Bash', input: { command: 'ls -la' } },
       },
     ]);
     expect(desk.answer('p1', 'not-offered')).toBe(false);
@@ -168,7 +170,7 @@ describe('AskDesk (held asks)', () => {
     await tick();
     const v = desk.list()[0]!;
     expect(v).toMatchObject({ kind: 'question', agent: 'child', title: 'Which colour?', stopChoice: DECLINE });
-    expect(v.choices.map((c) => c.label)).toEqual(['Red', 'Blue', 'Decline']);
+    expect(v.choices.map((c) => c.label)).toEqual(['Red', 'Blue', 'Submit answers', 'Decline']);
     desk.answer('q1', 'option-1');
     expect(await q).toEqual({ answers: { 'Which colour?': 'Blue' } });
 
@@ -181,7 +183,7 @@ describe('AskDesk (held asks)', () => {
       new AbortController().signal,
     );
     await tick();
-    expect(desk.list()[0]!.choices).toEqual([{ id: DECLINE, label: 'Decline' }]);
+    expect(desk.list()[0]!.choices.map((c) => c.id)).toEqual(['submit', DECLINE]);
     desk.answer('q2', DECLINE);
     expect(await multi).toBeNull();
   });
@@ -190,14 +192,23 @@ describe('AskDesk (held asks)', () => {
     const desk = new AskDesk(() => {});
     const h = desk.handler();
     const p = h.plan(
-      { id: 'pl', agent: MAIN, plan: '1. do it', choices: [{ id: 'yes', label: 'Yes' }] },
+      {
+        id: 'pl',
+        agent: MAIN,
+        plan: '1. do it',
+        choices: [{ id: 'yes', label: 'Yes' }],
+        keepPlanning: { label: 'No, keep planning' },
+      },
       new AbortController().signal,
     );
     await tick();
     expect(desk.list()[0]!.choices.map((c) => c.id)).toEqual(['yes', KEEP_PLANNING]);
     desk.answer('pl', 'yes');
     expect(await p).toEqual({ kind: 'approve', choiceId: 'yes' });
-    const p2 = h.plan({ id: 'pl2', agent: MAIN, plan: 'x', choices: [] }, new AbortController().signal);
+    const p2 = h.plan(
+      { id: 'pl2', agent: MAIN, plan: 'x', choices: [], keepPlanning: { label: 'No' } },
+      new AbortController().signal,
+    );
     await tick();
     desk.stop();
     expect(await p2).toEqual({ kind: 'keep-planning' });
@@ -217,11 +228,12 @@ interface Fake {
   queues: AsyncQueue<BackendEvent>[];
   interrupts: number;
   answers: PermissionAnswer[];
+  elicited: ElicitationAnswer[];
 }
 
 /** A backend whose turn asks for permission before it ends. */
 function fake(trust?: () => Promise<TrustState>): Fake {
-  const f: Fake = { factory: undefined as never, opens: [], queues: [], interrupts: 0, answers: [] };
+  const f: Fake = { factory: undefined as never, opens: [], queues: [], interrupts: 0, answers: [], elicited: [] };
   f.factory = {
     kind: 'k',
     displayName: 'Agent',
@@ -256,6 +268,19 @@ function fake(trust?: () => Promise<TrustState>): Fake {
         async send(u) {
           q.push({ type: 'turn-start', origin: 'user' });
           q.push({ type: 'input-consumed', inputId: u.id });
+          if (u.parts.some((p) => p.type === 'text' && p.text === 'elicit')) {
+            // An MCP server of a background agent asks for input; the agent keeps running.
+            void o.interactions
+              .elicitation(
+                { id: 'el1', agent: { kind: 'child', id: 'bg' }, serverName: 'srv', message: 'token?' },
+                new AbortController().signal,
+              )
+              .then(
+                (a) => void f.elicited.push(a),
+                () => undefined,
+              );
+            return;
+          }
           const child = u.parts.some((p) => p.type === 'text' && p.text === 'ask-child');
           if (child) {
             // A background agent asks while the main turn waits on something else.
@@ -391,6 +416,26 @@ describe('SessionRuntime asks (rules 3, 4)', () => {
   });
 });
 
+describe('Stop and elicitations (M1 verify 3-2 item 5)', () => {
+  it('Stop never declines an elicitation; the agent cancels the ones its interrupt ends', async () => {
+    const f = fake();
+    const r = new SessionRuntime(f.factory, port(), { env: {}, stopGraceMs: 50 });
+    const stop = new AbortController();
+    const turn = r.runTurn(
+      sink(),
+      { userInputs: [{ id: 'u3', parts: [{ type: 'text', text: 'elicit' }] }], wake: false },
+      stop.signal,
+    );
+    await tick(10);
+    expect(r.view().asks?.map((a) => [a.id, a.agent])).toEqual([['el1', 'child']]);
+    stop.abort();
+    expect(await turn).toEqual({ kind: 'interrupted' });
+    await tick(5);
+    expect(f.elicited).toEqual([]);
+    expect(r.view().asks?.map((a) => a.id)).toEqual(['el1']);
+  });
+});
+
 describe('workspace trust (D73)', () => {
   const untrusted = async (): Promise<TrustState> => ({
     state: 'untrusted',
@@ -483,7 +528,8 @@ describe('answer route', () => {
     expect((await post('nope', { ask: 'a', choice: 'b' })).status).toBe(404);
     const turn = r.runTurn(sink(), { userInputs: [askInput], wake: false }, new AbortController().signal);
     await tick(10);
-    expect((await post('h1', { ask: 'p1', choice: 'bogus' })).status).toBe(409);
+    expect((await post('h1', { ask: 'p1', choice: 'bogus' })).status).toBe(400);
+    expect((await post('h1', { ask: 'gone', choice: 'reject' })).status).toBe(409);
     const ok = await post('h1', { ask: 'p1', choice: 'reject' });
     expect(ok.status).toBe(200);
     await turn;

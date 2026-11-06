@@ -17,7 +17,12 @@ import { resolveClaudeBinary, type BinaryResolveDeps } from './binary.js';
 import { decideFileCheckpointing } from './checkpoint.js';
 import { claudeConfigFiles, maskClaudeSettings } from './config-files.js';
 import { buildClaudeEnv } from './env.js';
-import { createCanUseTool, createOnElicitation } from './interactions.js';
+import {
+  createCanUseTool,
+  createOnElicitation,
+  MODE_DESCRIPTIONS,
+  type InteractionAdapterOptions,
+} from './interactions.js';
 import { loadSdk } from './sdk.js';
 import { ClaudeBackendSession, newRequestId, type QueryFn } from './session.js';
 import { createSpawner } from './spawn.js';
@@ -39,19 +44,30 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
       key: ALLOW_BYPASS_OPTION,
       type: 'boolean',
       label: 'Allow bypass permissions mode (same as `claude --allow-dangerously-skip-permissions`)',
+      description:
+        'Off by default. Lets you switch a session to bypass permissions (no further prompts). As with the terminal flag, plan mode then no longer asks before edits. Applies when Claude Code starts.',
       default: false,
     },
   ],
   needsProcess: ['agents', 'commands', 'side-question', 'mcp', 'context', 'usage', 'task-actions'],
   sideQuestionCommand: 'btw',
+  // Labels are ours (short picker names); descriptions are the CLI's own (MODE_DESCRIPTIONS).
   permissionModes: [
-    { id: 'default', label: 'Ask before edits' },
-    { id: 'acceptEdits', label: 'Accept edits' },
-    { id: 'plan', label: 'Plan mode' },
-    { id: 'auto', label: 'Auto' },
-    { id: 'dontAsk', label: "Don't ask" },
-    { id: 'bypassPermissions', label: 'Bypass permissions', requiresOption: ALLOW_BYPASS_OPTION },
+    { id: 'default', label: 'Ask before edits', description: MODE_DESCRIPTIONS.default },
+    { id: 'acceptEdits', label: 'Accept edits', description: MODE_DESCRIPTIONS.acceptEdits },
+    { id: 'plan', label: 'Plan mode', description: MODE_DESCRIPTIONS.plan },
+    { id: 'auto', label: 'Auto', description: MODE_DESCRIPTIONS.auto },
+    { id: 'dontAsk', label: "Don't ask", description: MODE_DESCRIPTIONS.dontAsk },
+    {
+      id: 'bypassPermissions',
+      label: 'Bypass permissions',
+      description: MODE_DESCRIPTIONS.bypassPermissions,
+      requiresOption: ALLOW_BYPASS_OPTION,
+    },
   ],
+  // The TUI's Shift+Tab ring (CLI 2.1.318 binary fn `uhn`): default → acceptEdits → plan →
+  // bypassPermissions (when available) → auto (when available) → default; dontAsk → default.
+  permissionModeCycle: ['default', 'acceptEdits', 'plan', 'bypassPermissions', 'auto'],
   mainAgentPicker: 'new-session-only',
   efforts: [
     { id: 'low', label: 'Low' },
@@ -63,6 +79,12 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
   ],
   steer: 'native',
 }) as FactoryCapabilities;
+
+/** D13: what the CLI writes previews in. The user's own env value wins; never html by us. */
+export function questionPreviewFormat(env: Readonly<Record<string, string | undefined>>): 'markdown' | 'html' {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === 'CLAUDE_CODE_QUESTION_PREVIEW_FORMAT');
+  return key !== undefined && env[key]?.trim().toLowerCase() === 'html' ? 'html' : 'markdown';
+}
 
 export const nodeBinaryDeps = (env: OpenSessionOptions['env']): BinaryResolveDeps => ({
   env,
@@ -124,6 +146,11 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
   const readEnv = () => buildClaudeEnv(factoryOptions.env ? factoryOptions.env() : process.env).env;
   const fs = factoryOptions.fs ?? nodeFs;
   const home = () => factoryOptions.homedir ?? homedir();
+  const readDefaults = async (cwd: string): Promise<SettingsDefaults> => {
+    const env = readEnv();
+    const files = claudeConfigFiles(cwd, { env, platform: process.platform, homedir: home() });
+    return readSettingsDefaults(files, (p) => fs.readText(p), env);
+  };
   return {
     kind: CLAUDE_KIND,
     displayName: 'Claude Code',
@@ -139,9 +166,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
       return maskClaudeSettings(file, text);
     },
     async settingsDefaults(cwd: string): Promise<SettingsDefaults> {
-      const env = readEnv();
-      const files = claudeConfigFiles(cwd, { env, platform: process.platform, homedir: home() });
-      return readSettingsDefaults(files, (p) => fs.readText(p), env);
+      return readDefaults(cwd);
     },
     async trustState(cwd: string): Promise<TrustState> {
       return readTrustState(cwd, { env: readEnv(), platform: process.platform, homedir: home(), ...fs });
@@ -165,15 +190,25 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
 
       const queryFn = factoryOptions.queryFn ?? ((await loadSdk()).query as unknown as QueryFn);
       const ref: { session?: ClaudeBackendSession } = {};
-      // Pre-spawn view only: a settings `defaultMode: bypassPermissions` also allows bypass (D14).
-      const canBypass = o.userConfig.options[ALLOW_BYPASS_OPTION] === true;
-      const adapter = {
+      const bypassOption = o.userConfig.options[ALLOW_BYPASS_OPTION] === true;
+      const adapter: InteractionAdapterOptions = {
         handler: o.interactions,
         cliVersion: () => ref.session?.cliVersion,
-        canBypass: () => canBypass,
+        // The option, or a process that started in bypass (the user's settings), D14.
+        canBypass: () => ref.session?.canBypass ?? bypassOption,
         newId: newRequestId,
+        prePlanMode: () => ref.session?.asks.prePlanMode,
+        agentLabel: (id) => ref.session?.asks.agentLabel(id),
+        elicitationAgent: (server) => ref.session?.asks.elicitationAgent(server),
+        rememberElicitation: (eid, id) => ref.session?.asks.rememberElicitation(eid, id),
+        forgetElicitation: (eid) => ref.session?.asks.forgetElicitation(eid),
+        previewFormat: () => questionPreviewFormat(env),
         onInterruptingDeny: () => ref.session?.noteInterruptRequested(),
       };
+      if (factoryOptions.debug) {
+        const debug = factoryOptions.debug;
+        adapter.warn = (text) => debug('interaction', text);
+      }
       const startInput: Parameters<typeof buildStartOptions>[0] = {
         executablePath: bin.path,
         cwd: o.cwd,
@@ -205,7 +240,18 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         startedAs: start.kind === 'new' ? 'new' : start.kind === 'resume' ? 'resumed' : 'forked',
         options,
         queryFn,
-        canBypass,
+        bypassOption,
+        modeIds: CLAUDE_STATIC_CAPABILITIES.permissionModes.map((m) => m.id),
+        // The mode the process starts in: we pass none, so the user's settings `defaultMode`
+        // (else the CLI's default). Read only when a mode is set before the CLI reported one.
+        startMode: async () => {
+          if (typeof options.permissionMode === 'string') return options.permissionMode;
+          try {
+            return (await readDefaults(o.cwd)).permissionMode ?? 'default';
+          } catch {
+            return undefined;
+          }
+        },
         // D8: when the CLI dies, end what is left of its process group.
         onExit: () => spawner.killGroup('SIGTERM'),
         killGroup: () => spawner.killGroup('SIGKILL'),
