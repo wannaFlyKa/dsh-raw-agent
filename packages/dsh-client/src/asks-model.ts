@@ -2,6 +2,7 @@
 // elicitation forms. No React, no DSH, no backend names: previews are chosen by the shape of the
 // tool input, not by tool name, so another agent's tools render the same way.
 
+import { lineDiff, numberDiff, splitLines, type DiffLine } from '@dsh-raw-agent/core';
 import type { AskChoiceWire, AskWire, QuestionWire } from './api.js';
 import { askWho } from './view-model.js';
 
@@ -31,10 +32,8 @@ export function askTitle(ask: AskWire): string {
 // ---------------------------------------------------------------------------------------------
 // Permission previews (D77: from the request's own input, before any tool/call is written)
 
-export interface DiffLine {
-  op: ' ' | '-' | '+';
-  text: string;
-}
+export type { DiffLine } from '@dsh-raw-agent/core';
+export { splitLines, lineDiff, diffHunks, diffText, numberDiff } from '@dsh-raw-agent/core';
 
 export type Preview =
   | { kind: 'command'; text: string; note?: string }
@@ -44,76 +43,6 @@ export type Preview =
 
 const str = (v: unknown): v is string => typeof v === 'string';
 const rec = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
-
-/** Split into lines; a trailing newline makes no empty last line. */
-export function splitLines(text: string): string[] {
-  if (text === '') return [];
-  const lines = text.replace(/\r\n/g, '\n').split('\n');
-  if (lines.at(-1) === '') lines.pop();
-  return lines;
-}
-
-/** Above this many line pairs the diff is shown as "all removed, then all added". */
-const MAX_DIFF_CELLS = 4_000_000;
-
-/** A line diff (longest common subsequence). Exact for normal edit sizes. */
-export function lineDiff(before: string, after: string): DiffLine[] {
-  const a = splitLines(before);
-  const b = splitLines(after);
-  // Trim the common head and tail first: most edits touch a few lines.
-  let head = 0;
-  while (head < a.length && head < b.length && a[head] === b[head]) head++;
-  let tail = 0;
-  while (tail < a.length - head && tail < b.length - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
-  const out: DiffLine[] = a.slice(0, head).map((text) => ({ op: ' ', text }));
-  const ma = a.slice(head, a.length - tail);
-  const mb = b.slice(head, b.length - tail);
-  if (ma.length * mb.length > MAX_DIFF_CELLS) {
-    for (const text of ma) out.push({ op: '-', text });
-    for (const text of mb) out.push({ op: '+', text });
-  } else {
-    const n = ma.length;
-    const m = mb.length;
-    const len: Uint32Array[] = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
-    for (let i = n - 1; i >= 0; i--)
-      for (let j = m - 1; j >= 0; j--)
-        len[i]![j] = ma[i] === mb[j] ? len[i + 1]![j + 1]! + 1 : Math.max(len[i + 1]![j]!, len[i]![j + 1]!);
-    let i = 0;
-    let j = 0;
-    while (i < n && j < m) {
-      if (ma[i] === mb[j]) {
-        out.push({ op: ' ', text: ma[i]! });
-        i++;
-        j++;
-      } else if (len[i + 1]![j]! >= len[i]![j + 1]!) out.push({ op: '-', text: ma[i++]! });
-      else out.push({ op: '+', text: mb[j++]! });
-    }
-    while (i < n) out.push({ op: '-', text: ma[i++]! });
-    while (j < m) out.push({ op: '+', text: mb[j++]! });
-  }
-  for (const text of a.slice(a.length - tail)) out.push({ op: ' ', text });
-  return out;
-}
-
-/** Keep `context` unchanged lines around each change; the rest collapses into a "…" line. */
-export function diffHunks(lines: readonly DiffLine[], context = 3): Array<DiffLine | { op: '…'; count: number }> {
-  const keep = new Array<boolean>(lines.length).fill(false);
-  lines.forEach((l, i) => {
-    if (l.op === ' ') return;
-    for (let k = Math.max(0, i - context); k <= Math.min(lines.length - 1, i + context); k++) keep[k] = true;
-  });
-  const out: Array<DiffLine | { op: '…'; count: number }> = [];
-  let skipped = 0;
-  lines.forEach((l, i) => {
-    if (keep[i]) {
-      if (skipped > 0) out.push({ op: '…', count: skipped });
-      skipped = 0;
-      out.push(l);
-    } else skipped++;
-  });
-  if (skipped > 0) out.push({ op: '…', count: skipped });
-  return out;
-}
 
 function pathOf(o: Record<string, unknown>): string | undefined {
   for (const k of ['file_path', 'notebook_path', 'path']) if (str(o[k]) && o[k] !== '') return o[k];
@@ -139,7 +68,7 @@ export function permissionPreview(input: unknown): Preview | undefined {
   const note = str(input.description) && input.description !== '' ? input.description : undefined;
   if (str(input.command)) return { kind: 'command', text: input.command, ...(note ? { note } : {}) };
   if (str(input.old_string) && str(input.new_string)) {
-    const lines = lineDiff(input.old_string, input.new_string);
+    const lines = numberDiff(lineDiff(input.old_string, input.new_string));
     const all = input.replace_all === true ? 'Every match is replaced.' : undefined;
     return { kind: 'diff', ...(path ? { path } : {}), lines, ...(all ? { note: all } : {}) };
   }
@@ -147,7 +76,7 @@ export function permissionPreview(input: unknown): Preview | undefined {
     const lines: DiffLine[] = [];
     (input.edits as Array<{ old_string: string; new_string: string }>).forEach((e, i) => {
       if (i > 0) lines.push({ op: ' ', text: '⋯' });
-      lines.push(...lineDiff(e.old_string, e.new_string));
+      lines.push(...numberDiff(lineDiff(e.old_string, e.new_string)));
     });
     return { kind: 'diff', ...(path ? { path } : {}), lines };
   }
@@ -155,7 +84,7 @@ export function permissionPreview(input: unknown): Preview | undefined {
     return {
       kind: 'diff',
       path,
-      lines: splitLines(input.content).map((text) => ({ op: '+', text })),
+      lines: splitLines(input.content).map((text, i) => ({ op: '+', text, new: i + 1 })),
       note: 'New file content.',
     };
   }
@@ -167,6 +96,11 @@ export function permissionPreview(input: unknown): Preview | undefined {
       lines: splitLines(input.new_source).map((text) => ({ op: '+', text })),
       ...(mode ? { note: mode } : {}),
     };
+  }
+  // Leftover M4: a workflow launch shows its script, not the input as JSON.
+  if (str(input.script) && input.script !== '') {
+    const name = str(input.name) && input.name !== '' ? `Workflow: ${input.name}` : undefined;
+    return { kind: 'text', label: 'Script', text: input.script, ...(name ? { note: name } : {}) };
   }
   if (str(input.url)) {
     const prompt = str(input.prompt) ? input.prompt : undefined;
@@ -183,11 +117,6 @@ export function clipLines<T>(
 ): { shown: readonly T[]; hidden: number } {
   if (expanded || lines.length <= max) return { shown: lines, hidden: 0 };
   return { shown: lines.slice(0, max), hidden: lines.length - max };
-}
-
-/** The diff as plain text (for Copy). */
-export function diffText(lines: readonly DiffLine[]): string {
-  return lines.map((l) => `${l.op}${l.text}`).join('\n');
 }
 
 /** The permission choices, grouped as the card shows them. */

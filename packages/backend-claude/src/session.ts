@@ -22,6 +22,15 @@ import { planChoices } from './interactions.js';
 import { AskContext } from './ask-context.js';
 import { withSdkVersionEnvRestored } from './env.js';
 import type { WorkflowRunsOptions } from './workflows.js';
+import {
+  MCP_TOGGLE_NOTE,
+  sideHistoryWire,
+  skillList,
+  slashCommandOf,
+  toMcpAuthStart,
+  toMcpServerList,
+  toSideAnswer,
+} from './commands.js';
 
 export type QueryFn = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
@@ -133,9 +142,19 @@ async function optionalControl<T>(q: Query, name: string, ...args: unknown[]): P
   try {
     return (await (fn as (...a: unknown[]) => Promise<T>).apply(q, args)) as T;
   } catch (e) {
-    if (/Unsupported control request subtype/.test(String((e as Error)?.message ?? e))) return undefined;
+    if (isUnsupported(e)) return undefined;
     throw e;
   }
+}
+
+/** D9: an older CLI answers a control it does not know with this text (sdk-surface answer 1). */
+function isUnsupported(e: unknown): boolean {
+  return /Unsupported control request subtype/.test(String((e as Error)?.message ?? e));
+}
+
+/** Whether this SDK's Query has the method at all (D9: every control is optional). */
+function hasControl(q: Query, name: string): boolean {
+  return typeof (q as unknown as Loose)[name] === 'function';
 }
 
 export class ClaudeBackendSession implements AgentBackendSession {
@@ -192,6 +211,8 @@ export class ClaudeBackendSession implements AgentBackendSession {
       toolViewPack: init.kind,
     };
     this.#query = withSdkVersionEnvRestored(() => init.queryFn({ prompt: this.#input, options: init.options }));
+    // D54, D9: `/btw` needs the undeclared `askSideQuestion`; an older CLI's refusal turns it off.
+    this.capabilities.sideQuestions = hasControl(this.#query, 'askSideQuestion');
     this.controls = this.#makeControls();
     this.#pump = this.#run();
     void this.#prime();
@@ -294,6 +315,9 @@ export class ClaudeBackendSession implements AgentBackendSession {
     // Build first: a message that cannot be built (an unreferenceable file path) must not stay
     // pending in the tracker, or every later turn end would wait for it (M1 verify 3-2).
     const message = toSdkUserMessage(input, mode);
+    // D52: a slash command is the plain text the user typed; only its name is noted, so a
+    // local command output that carries no name of its own can be named (R7.2).
+    this.#mapper.noteSlashCommand(slashCommandOf(input));
     this.#tracker.sent(input.id);
     this.#input.push(message);
   }
@@ -328,6 +352,73 @@ export class ClaudeBackendSession implements AgentBackendSession {
   }
 
   #makeControls(): BackendControls {
+    const q = this.#query;
+    const controls: BackendControls = this.#baseControls();
+    // D54, R7.3: `/btw`. Full context, no tools, nothing written to either transcript; answers
+    // while a turn streams or a tool runs (sdk-surface §7.5). History is the caller's (D24).
+    if (hasControl(q, 'askSideQuestion'))
+      controls.askSideQuestion = async (question, history, signal) => {
+        const ask = (q as unknown as Loose).askSideQuestion as (
+          question: string,
+          opts: { history?: unknown[]; signal?: AbortSignal },
+        ) => Promise<unknown>;
+        const opts: { history?: unknown[]; signal?: AbortSignal } = { signal };
+        const wire = sideHistoryWire(history);
+        if (wire.length > 0) opts.history = wire;
+        try {
+          return toSideAnswer(await ask.call(q, question, opts));
+        } catch (e) {
+          if (signal.aborted) return null;
+          if (isUnsupported(e)) {
+            this.capabilities.sideQuestions = false;
+            throw new Error('this Claude Code version cannot answer side questions (/btw)', { cause: e });
+          }
+          throw e;
+        }
+      };
+    // D55, R7.4: MCP status, reconnect and toggle (never `updateSettings`, rule 2).
+    if (hasControl(q, 'mcpServerStatus'))
+      controls.mcpStatus = async () => {
+        const r = await optionalControl<unknown>(q, 'mcpServerStatus');
+        if (r === undefined) throw new Error('this Claude Code version cannot report its MCP servers');
+        return toMcpServerList(r);
+      };
+    if (hasControl(q, 'reconnectMcpServer'))
+      controls.mcpReconnect = async (name) => {
+        await this.#required('reconnectMcpServer', 'reconnect an MCP server', name);
+      };
+    if (hasControl(q, 'toggleMcpServer'))
+      controls.mcpToggle = async (name, enabled) => {
+        // The CLI saves `disabledMcpServers` for the project in ~/.claude.json, as /mcp does
+        // (Phase 1 probe6 M): a CLI-owned write, like "always allow" (rule 2).
+        await this.#required('toggleMcpServer', 'turn an MCP server on or off', name, enabled);
+        return { note: MCP_TOGGLE_NOTE };
+      };
+    // Undeclared, not run live (**unverified**): no redirect address of ours, so the CLI uses its
+    // own localhost callback, as the terminal app does.
+    if (hasControl(q, 'mcpAuthenticate'))
+      controls.mcpAuthenticate = async (name) =>
+        toMcpAuthStart(await this.#required('mcpAuthenticate', 'sign in to an MCP server', name));
+    if (hasControl(q, 'mcpSubmitOAuthCallbackUrl'))
+      controls.mcpSubmitAuthCallback = async (name, callbackUrl) => {
+        await this.#required('mcpSubmitOAuthCallbackUrl', 'finish an MCP sign-in', name, callbackUrl);
+      };
+    return controls;
+  }
+
+  /** Call a control this CLI must support; an older CLI's refusal becomes a plain error (D9). */
+  async #required(name: string, what: string, ...args: unknown[]): Promise<unknown> {
+    const fn = (this.#query as unknown as Loose)[name];
+    if (typeof fn !== 'function') throw new Error(`this Claude Code version cannot ${what}`);
+    try {
+      return await (fn as (...a: unknown[]) => Promise<unknown>).apply(this.#query, args);
+    } catch (e) {
+      if (isUnsupported(e)) throw new Error(`this Claude Code version cannot ${what}`, { cause: e });
+      throw e;
+    }
+  }
+
+  #baseControls(): BackendControls {
     const q = this.#query;
     return {
       stopTask: async (taskId) => {
@@ -399,14 +490,22 @@ export class ClaudeBackendSession implements AgentBackendSession {
           return info;
         });
       },
-      commands: async () => {
-        const list = await q.supportedCommands();
-        return list.map((c) => {
-          const info: { name: string; description?: string; argumentHint?: string } = { name: c.name };
-          if (c.description) info.description = c.description;
-          if (c.argumentHint) info.argumentHint = c.argumentHint;
-          return info;
-        });
+      // R7.1, D52: the CLI's own list (the latest `commands_changed` push, SDK/sdk.mjs), with
+      // the `init` skill and terminal-only names marked. Names are kept byte for byte.
+      commands: async () => this.#mapper.commands.rows(await q.supportedCommands()),
+      // R7.5: the `init` skill names (or the `/context` skill rows before `init`) with their
+      // command rows. The context read is 'summary': no token-count calls, no model turn (M5).
+      skills: async () => {
+        const catalog = this.#mapper.commands;
+        const commands = catalog.rows(await q.supportedCommands());
+        let fromContext: ReturnType<typeof parseContextUsage>['details'];
+        try {
+          const r = await optionalControl<Loose>(q, 'getContextUsage', { detail: 'summary' });
+          if (r !== undefined) fromContext = parseContextUsage(r).details;
+        } catch (e) {
+          this.#init.debug?.('skills: getContextUsage failed', String((e as Error)?.message ?? e));
+        }
+        return skillList(catalog, commands, fromContext?.skills);
       },
       // The end of a background shell or Monitor output, as the TUI's /tasks view reads it
       // (undeclared `getTaskOutput`, D9; live M3 probe B). Read-only, no model turn.

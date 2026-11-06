@@ -48,6 +48,26 @@ export {
   type ModeCommandRuntime,
 } from './mode-command.js';
 export {
+  DSH_KEPT_COMMANDS,
+  TAKEN_NOTE,
+  SIDE_ENTRIES_KEPT,
+  SIDE_QUESTION_MAX,
+  LOCAL_OUTPUTS_KEPT,
+  planCommandMenu,
+  SideQuestionDesk,
+  LocalOutputs,
+  type MenuPlacement,
+  type MenuRow,
+  type MenuPlan,
+  type SideEntry,
+  type SideEntryStatus,
+  type SideView,
+  type SideAskResult,
+  type SideControl,
+  type McpAnswer,
+  type McpActionResult,
+} from './agent-commands.js';
+export {
   listConfigFiles,
   previewConfigFile,
   MAX_PREVIEW_BYTES,
@@ -121,6 +141,7 @@ export {
   type TurnOutcome,
   type UsageAnswer,
   type ContextAnswer,
+  type CommandsAnswer,
   CONTEXT_REPORT_MIN_MS,
 } from './driver.js';
 export {

@@ -3,7 +3,7 @@
 // Phase 3 spike subset. Every member keeps its final §7.2 name and shape; the members that
 // the spike does not emit yet are listed at the end as a comment and are added in place later.
 
-import type { AgentRef } from './backend.js';
+import type { AgentRef, CommandInfo, ContextUsage, McpServerInfo } from './backend.js';
 import type { AuthInfo, CostLabel, PlanLimits, TurnUsage, UsageTotals } from './usage.js';
 
 /** A content block as the DSH writer stores it. `arguments` is the exact JSON string (D21). */
@@ -116,7 +116,8 @@ export type BackendEvent =
       final: boolean;
       synthetic?: boolean;
       error?: string;
-      localCommand?: { name: string; structured?: unknown };
+      /** R7.2, D53, D69: this message is a local command's output (no model call, no usage). */
+      localCommand?: LocalCommandInfo;
       interrupted?: boolean;
     }
   | {
@@ -280,9 +281,38 @@ export type BackendEvent =
     }
   /** R8.3: how this session is billed (read from the live process, never from an extra one). */
   | { type: 'auth'; auth: AuthInfo; costLabel: CostLabel }
+  /**
+   * R7.1, D52: the agent's `/` menu changed (Claude: `system/init` names, then the full rows of
+   * `commands_changed`). Replace the cached list. Rows from `init` carry names only; read
+   * `controls.commands()` for descriptions.
+   */
+  | { type: 'commands'; list: CommandInfo[]; namesOnly?: boolean }
+  /**
+   * D55: the MCP servers as the agent reported them on its own (Claude: `system/init.mcp_servers`,
+   * always 'pending' at start). Read `controls.mcpStatus()` for the live state.
+   */
+  | { type: 'mcp-status'; servers: McpServerInfo[] }
   | { type: 'exit'; error?: string };
 
-// Not in the spike yet (added in place later, §7.2): title, commands.
+/** R7.2: what a local command step is. */
+export interface LocalCommandInfo {
+  /** The command's name without the slash ('context', 'usage', 'compact', …). Absent: unknown. */
+  name?: string;
+  /** What the user typed after the name. */
+  args?: string;
+  /**
+   * The agent says the command does not run here (Claude: 'unavailable_headless', a TUI-only
+   * command such as `/help` or `/btw` typed into the composer). The text says so in its words.
+   */
+  unavailable?: boolean;
+  /** Structured twin of the text, when the agent sends one. */
+  structured?: LocalCommandStructured;
+}
+
+/** The structured output of a local command, where the agent gives structure (R7.2). */
+export type LocalCommandStructured = { kind: 'context'; context: ContextUsage };
+
+// Not in the spike yet (added in place later, §7.2): title.
 
 export type BackendEventType = BackendEvent['type'];
 export type BackendEventOf<T extends BackendEventType> = Extract<BackendEvent, { type: T }>;

@@ -103,6 +103,9 @@ importers:
       '@dsh-raw-agent/dsh-host':
         specifier: workspace:*
         version: link:../dsh-host
+      '@dsh-raw-agent/views-claude':
+        specifier: workspace:*
+        version: link:../views-claude
 
   packages/testkit:
     dependencies:
@@ -115,6 +118,19 @@ importers:
       '@dsh-raw-agent/core':
         specifier: workspace:*
         version: link:../core
+    devDependencies:
+      '@types/react':
+        specifier: ^19.3.0
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: ^19.3.0
+        version: 19.3.0(@types/react@19.3.0)
+      react:
+        specifier: ^19.3.1
+        version: 19.3.1
+      react-dom:
+        specifier: ^19.3.1
+        version: 19.3.1(react@19.3.1)
 
 packages:
 

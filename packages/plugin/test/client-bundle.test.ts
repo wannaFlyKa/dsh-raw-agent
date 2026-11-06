@@ -13,6 +13,7 @@ const root = fileURLToPath(new URL('../../../', import.meta.url));
 const alias = {
   '@dsh-raw-agent/core': `${root}packages/core/src/index.ts`,
   '@dsh-raw-agent/dsh-client': `${root}packages/dsh-client/src/index.ts`,
+  '@dsh-raw-agent/views-claude': `${root}packages/views-claude/src/index.ts`,
 };
 const reactRequire = createRequire(`${root}packages/dsh-client/package.json`);
 
@@ -43,13 +44,23 @@ describe('client bundle (module-loader format)', () => {
     const slots: string[] = [];
     (mod.apply as (ctx: unknown) => void)({
       slots: {
-        inject: (key: string, cb: () => unknown) => (slots.push(key), cb(), () => {}),
+        inject: (key: string, cb: () => unknown) => {
+          slots.push(key);
+          const r = cb();
+          // DSH iterates a generator callback (one registration per yield).
+          if (r && typeof (r as Iterable<unknown>)[Symbol.iterator] === 'function') Array.from(r as Iterable<unknown>);
+          return () => {};
+        },
         register: (o: { name: string }) => (slots.push(`register ${o.name}`), () => {}),
       },
       get: () => undefined,
       effect: () => {},
     });
-    expect(slots).toEqual([
+    // D19: the Claude tool views come first, one registration per tool name.
+    expect(slots[0]).toBe('tool.call.toolview');
+    const views = slots.slice(1).filter((x) => x === 'register tool.call.toolview').length;
+    expect(views).toBe(15);
+    expect(slots.slice(1 + views)).toEqual([
       'conversation.session.header.actions',
       'register conversation.session.header.actions',
       'conversation.composer.dock',

@@ -9,6 +9,7 @@ export * from './asks-model.js';
 export * from './agents-model.js';
 export * from './workflow-model.js';
 export * from './usage-model.js';
+export * from './commands-model.js';
 export { UsageReader, UsageReaders, type UsageReadSnapshot } from './usage-reader.js';
 export {
   ContextPill,
@@ -34,6 +35,27 @@ export {
   type ChildRowProps,
 } from './ui/agents-panel.js';
 export { WakeTriggerCard } from './ui/wake-card.js';
+export { SidePanel, SidePanelBody, SideEntryView, type SidePanelProps } from './ui/side-panel.js';
+export { McpPanel, McpServerRow, CommandList, type McpPanelProps } from './ui/mcp-panel.js';
+export {
+  LocalCommandView,
+  LocalCommandText,
+  LocalContextView,
+  Divider,
+  type LocalCommandNodeProps,
+} from './ui/local-command.js';
+export {
+  TOOL_VIEW_SLOT,
+  DSH_TOOL_VIEW_KEYS,
+  toolViewNames,
+  toolViewPropsOf,
+  useSessionKind,
+  PlainToolRow,
+  ScopedToolView,
+  registerToolViews,
+  type ToolOwner,
+  type ScopedToolViewProps,
+} from './port/tool-views.js';
 export {
   WorkflowAgentRow,
   WorkflowNodeView,
@@ -100,6 +122,12 @@ export {
   WORKFLOW_RUN_END_EVENT,
   workflowDefinition,
   WorkflowNode,
+  ASSISTANT_MESSAGE_EVENT,
+  LOCAL_COMMAND_NODE_KIND,
+  LOCAL_COMMAND_DEFINITION_KIND,
+  localCommandDefinition,
+  LOCAL_COMMAND_GROUP_TREE,
+  LocalCommandNode,
   type WorkflowNodeData,
   type AskInteraction,
   type ComposerOwner,
@@ -128,3 +156,4 @@ export function createRawAgentClient(options: MountClientOptions & { name?: stri
     },
   };
 }
+export { agentCommandSource, COMMAND_SOURCE_NAME, type AgentCommandSource } from './port/command-source.js';

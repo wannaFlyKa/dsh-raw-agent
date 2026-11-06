@@ -62,7 +62,20 @@ export type RegisteredRuntime = Pick<
   | 'taskOutput'
 > &
   // M5: optional, so a runtime from an older agent bundle still registers (D87).
-  Partial<Pick<SessionRuntime, 'usage' | 'contextUsage'>>;
+  Partial<Pick<SessionRuntime, 'usage' | 'contextUsage'>> &
+  // M6: optional for the same reason.
+  Partial<
+    Pick<
+      SessionRuntime,
+      | 'commandsAnswer'
+      | 'askSideQuestion'
+      | 'sideQuestions'
+      | 'cancelSideQuestion'
+      | 'mcp'
+      | 'mcpAction'
+      | 'localOutput'
+    >
+  >;
 
 export class SessionRegistry {
   readonly apiVersion = 1;

@@ -66,6 +66,7 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
   ],
   needsProcess: ['agents', 'commands', 'side-question', 'mcp', 'context', 'usage', 'task-actions'],
   sideQuestionCommand: 'btw',
+  mcpCommand: 'mcp',
   // Labels are ours (short picker names); descriptions are the CLI's own (MODE_DESCRIPTIONS).
   permissionModes: [
     { id: 'default', label: 'Ask before edits', description: MODE_DESCRIPTIONS.default },

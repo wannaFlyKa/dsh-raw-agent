@@ -25,7 +25,7 @@ import {
   type TurnSink,
 } from '../driver.js';
 import { SessionRegistry, SESSIONS_SERVICE, isSessionRegistry, type ReturnedDraft } from '../registry.js';
-import { modeCommandDescription, runModeCommand } from '../mode-command.js';
+import { AgentCommandMenus } from './commands.js';
 import { SETTINGS_MODEL } from './catalog.js';
 import { startJob } from './jobs.js';
 import { childPreStep, createChildSession } from './children.js';
@@ -66,18 +66,7 @@ export interface AgentMountOptions {
   modeCommand?: boolean;
 }
 
-/** The part of DSH's command registry the port uses (`P/dsh-commands/lib/index.js:262-268`). */
-interface DshCommands {
-  register(definition: {
-    name: string;
-    description: string;
-    input?: { hint: string };
-    handler(invocation: { agent: DshAgent; rawInput: string }): Promise<unknown> | unknown;
-  }): unknown;
-}
-
-/** The name of DSH's permission-preset command, shadowed in our sessions. */
-export const PERMISSION_COMMAND = 'permission';
+export { PERMISSION_COMMAND } from './commands.js';
 
 /** D81: the preset row of a backend kind. */
 export function presetIdFor(kind: string): string {
@@ -417,6 +406,8 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     notify(state) {
       ctx.emit('raw-agent/state', { sessionId: agent.session.id, state });
     },
+    // R7.1, D52: the agent's command list changed; update the rows in this agent's `/` menu.
+    commandsChanged: () => menus.sync(agent.id),
   });
 
   const runtimeFor = (agent: DshAgent): SessionRuntime => {
@@ -441,51 +432,18 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     return r;
   };
 
-  // R1.4 leftover (CLAUDE.md §4): DSH's `/permission` changes DSH's preset, which this agent
-  // ignores. A command registered under the agent's own context shadows the global one for that
-  // agent only (`P/dsh-commands/lib/index.js:89, 207-208`: "for a per-agent variant, mount a
-  // command-injected plugin under that agent's agent.ctx"). It shows and switches the agent's real
-  // mode instead. Standard sessions keep DSH's command. Live scope behaviour is **unverified**.
-  const shadows = new Map<string, unknown>();
-  function shadowPermission(agent: DshAgent): void {
-    if (o.modeCommand === false || shadows.has(agent.id)) return;
-    const actx = agent.ctx as CordisContext | undefined;
-    if (typeof actx?.inject !== 'function') return;
-    const register = (c: CordisContext) => {
-      const commands = c.get('commands') as DshCommands | undefined;
-      if (typeof commands?.register !== 'function') return;
-      try {
-        commands.register({
-          name: PERMISSION_COMMAND,
-          description: modeCommandDescription(factory),
-          input: { hint: '<mode>' },
-          handler: ({ agent: a, rawInput }) =>
-            runModeCommand(
-              registry.get(a.id, factory.kind) as SessionRuntime | undefined,
-              factory,
-              typeof rawInput === 'string' ? rawInput : '',
-            ),
-        });
-      } catch (error) {
-        warn('could not shadow /permission in this session', String((error as Error)?.message ?? error));
-      }
-    };
-    try {
-      shadows.set(agent.id, actx.inject(['commands'], register));
-    } catch (error) {
-      warn('could not shadow /permission in this session', String(error));
-    }
-  }
-  function unshadowPermission(agentId: string): void {
-    const handle = shadows.get(agentId);
-    shadows.delete(agentId);
-    try {
-      if (typeof handle === 'function') (handle as () => void)();
-      else (handle as { dispose?: () => void } | undefined)?.dispose?.();
-    } catch (error) {
-      warn('could not remove the /permission shadow', String(error));
-    }
-  }
+  // R1.4 leftover, R7.1, R7.3 (D38, D52, D54): our rows in this agent's own `/` menu
+  // (./commands.ts): `/permission`, the side-question command and the agent's commands. Scoped
+  // to the agent's context, so Standard sessions keep DSH's menu. Live scope behaviour is
+  // **unverified**.
+  const menus = new AgentCommandMenus({
+    factory,
+    runtime: (id) => registry.get(id, factory.kind) as SessionRuntime | undefined,
+    warn,
+    ...(o.modeCommand === false ? { modeCommand: false } : {}),
+  });
+  const shadowPermission = (agent: DshAgent) => menus.mount(agent);
+  const unshadowPermission = (agentId: string) => menus.unmount(agentId);
 
   // D2: the guard. Outermost, so nothing a Host listener adds reaches a DSH model.
   ctx.on(
@@ -702,7 +660,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   // D87: with the Host registry, an agent dispose (eviction) only detaches; the process and its
   // background tasks keep running. Without it, the process ends with the agent (D75).
   const release = (id: string) => {
-    shadows.delete(id); // the agent's own context disposes the command with it
+    menus.forget(id); // the agent's own context disposes the rows with it
     if (!mine.delete(id)) return;
     if (shared) (registry.get(id, factory.kind) as SessionRuntime | undefined)?.detach();
     else void registry.delete(id);

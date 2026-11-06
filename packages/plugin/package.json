@@ -39,7 +39,8 @@
     "@dsh-raw-agent/backend-claude": "workspace:*",
     "@dsh-raw-agent/core": "workspace:*",
     "@dsh-raw-agent/dsh-host": "workspace:*",
-    "@dsh-raw-agent/dsh-client": "workspace:*"
+    "@dsh-raw-agent/dsh-client": "workspace:*",
+    "@dsh-raw-agent/views-claude": "workspace:*"
   },
   "dsh": {
     "bundle": {

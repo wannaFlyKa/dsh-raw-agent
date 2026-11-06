@@ -13,6 +13,9 @@ import { START_OPTION, effortSelect, modeSelect, modelSelect, statusLine, type S
 import type { HostActions } from './actions.js';
 import { AskPanel } from './ask-cards.js';
 import { SettingsPanel } from './settings-panel.js';
+import { mcpButtonLabel } from '../commands-model.js';
+import { McpPanel } from './mcp-panel.js';
+import { SidePanel } from './side-panel.js';
 import { css } from './style.js';
 
 export interface ControlsProps {
@@ -62,6 +65,22 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   const snap = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
   const [panel, setPanel] = React.useState(false);
   const close = React.useCallback(() => setPanel(false), []);
+  const [mcpPanel, setMcpPanel] = React.useState(false);
+  const closeMcp = React.useCallback(() => setMcpPanel(false), []);
+  // D55: a bare `/mcp` in the composer (our `/` source) opens this panel, like the terminal app.
+  const panelSeq = snap.panelRequest?.panel === 'mcp' ? snap.panelRequest.seq : 0;
+  const panelSeen = React.useRef(panelSeq); // a request from before this mount does not reopen it
+  React.useEffect(() => {
+    if (panelSeq > panelSeen.current) setMcpPanel(true);
+    panelSeen.current = panelSeq;
+  }, [panelSeq]);
+  // R7.3: the side panel opens by itself for a new question; the button brings it back.
+  const [sideShown, setSideShown] = React.useState(false);
+  const [sideWanted, setSideWanted] = React.useState(false);
+  const onSideOpen = React.useCallback((open: boolean) => {
+    setSideShown(open);
+    if (!open) setSideWanted(false);
+  }, []);
   const info = snap.info;
   const turn = info?.view.state.turn === true;
   // D25: while a turn runs, and once right after it, take back the steers Stop cancelled.
@@ -158,6 +177,38 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           }}
         />
       )}
+      {api.mcp && (
+        <button
+          type="button"
+          style={css.button}
+          data-raw-agent="mcp-button"
+          title={`${name} MCP servers and commands`}
+          onClick={() => setMcpPanel(true)}
+        >
+          {mcpButtonLabel(info.view.mcp)}
+        </button>
+      )}
+      {(info.view.side?.entries.length ?? 0) > 0 && !sideShown && (
+        <button
+          type="button"
+          style={css.button}
+          data-raw-agent="side-button"
+          title="Show the side questions (not part of the conversation)"
+          onClick={() => setSideWanted(true)}
+        >
+          Side questions
+        </button>
+      )}
+      {api.askSide && (
+        <SidePanel
+          store={store}
+          api={api}
+          actions={actions}
+          displayName={name}
+          open={sideWanted}
+          onOpenChange={onSideOpen}
+        />
+      )}
       <button
         type="button"
         style={css.button}
@@ -190,6 +241,17 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           {status}
         </span>
       )}
+      {mcpPanel &&
+        actions.portal(
+          <McpPanel
+            sessionId={store.sessionId}
+            api={api}
+            actions={actions}
+            displayName={name}
+            onStart={() => void store.start()}
+            onClose={closeMcp}
+          />,
+        )}
       {panel &&
         actions.portal(
           <SettingsPanel

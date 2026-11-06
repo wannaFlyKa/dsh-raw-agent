@@ -167,6 +167,7 @@ export const css = {
   diffAdd: { background: v('diff-add', 'surface-success', 'rgba(46,160,67,0.18)') },
   diffDel: { background: v('diff-del', 'surface-danger', 'rgba(248,81,73,0.18)') },
   diffGap: { color: muted },
+  diffNum: { color: muted, userSelect: 'none', whiteSpace: 'pre' },
   textarea: {
     font: 'inherit',
     fontSize: 12,

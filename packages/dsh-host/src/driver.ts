@@ -10,7 +10,9 @@ import type {
   BackendEvent,
   BackendEventOf,
   BackendUserConfig,
+  CommandInfo,
   ContextUsage,
+  McpServerInfo,
   ModelInfo,
   SessionChoiceRequest,
   TaskKind,
@@ -33,6 +35,17 @@ import {
 } from './children.js';
 import { UsageBoard, type ContextView, type UsageSummary, type UsageView } from './usage.js';
 import { WorkflowRecorder, type OpenWorkflowRun, type WorkflowRecord, type WorkflowView } from './workflows.js';
+import {
+  LocalOutputs,
+  SideQuestionDesk,
+  planCommandMenu,
+  type McpActionResult,
+  type McpAnswer,
+  type MenuRow,
+  type SideAskResult,
+  type SideControl,
+  type SideView,
+} from './agent-commands.js';
 
 /** What the driver writes into one open host turn. Implemented by the port writer. */
 export interface TurnSink {
@@ -188,6 +201,8 @@ export interface HostSessionPort {
   returnDraft?(hostMessageId: string): void;
   /** Lifecycle changes for the plugin UI (D75 idle-death notice, Start button, job counts). */
   notify?(state: RuntimeState): void;
+  /** R7.1: the agent's command list changed; the port updates the host `/` menu (D52). */
+  commandsChanged?(): void;
 }
 
 /** What the plugin UI can show about one session's agent process. */
@@ -270,6 +285,30 @@ export interface SessionView {
   workflowAgentStop?: boolean;
   /** M5: the context pill's data and short usage totals (the panel reads the usage route). */
   usage?: UsageSummary;
+  /** R7.3, D54: the side questions of this session (in memory only). */
+  side?: SideView;
+  /** R7.1: the agent's command list changed when `version` changes; read the commands route. */
+  menu?: { version: number; count: number; full: boolean };
+  /** R7.4: a short MCP summary (name and state); the panel reads the MCP route. */
+  mcp?: Array<{ name: string; status: string }>;
+}
+
+/** The commands route's answer (R7.1). Never starts a process. */
+export interface CommandsAnswer {
+  running: boolean;
+  /** 'live': read from the process now; 'reported': the agent's own report; 'none': nothing yet. */
+  from: 'live' | 'reported' | 'none';
+  /** Names only (the agent's start report), until the full rows are read. */
+  full: boolean;
+  /** Every agent command with its place in the plugin's `/` source (D52). */
+  rows: MenuRow[];
+  /** The backend's name for its labels ("Start <displayName>"). */
+  displayName: string;
+  /** The side-question command the client source claims (D54), if the backend has one. */
+  sideQuestionCommand?: string;
+  /** The agent's MCP view command; bare, it opens the plugin's MCP panel (D55). */
+  mcpCommand?: string;
+  reason?: string;
 }
 
 /** The usage route's answer (D58-D60). Never starts a process. */
@@ -487,6 +526,19 @@ export class SessionRuntime {
   #contextRead: { at: number; detail: string; promise: Promise<ContextAnswer> } | undefined;
   /** Told once when the runtime is disposed, so open channels close (D39). */
   readonly #endListeners = new Set<() => void>();
+  /** R7.3, D54: side questions and their history (in memory only, D24). */
+  readonly #side: SideQuestionDesk;
+  /** R7.1: the agent's command list (kept after the process ends; it still names what typing runs). */
+  #commandList: CommandInfo[] | undefined;
+  #commandsFull = false;
+  #commandsVersion = 0;
+  /** The menu placements the port computed last (D52: `taken` needs the host's registry). */
+  #menuRows: MenuRow[] | undefined;
+  /** R7.4, D55: the MCP servers as last reported or read. Reset at each spawn. */
+  #mcp: McpServerInfo[] | undefined;
+  #mcpFrom: 'live' | 'reported' | 'none' = 'none';
+  /** R7.2: structured local-command outputs (display-only path). */
+  readonly #local = new LocalOutputs();
 
   constructor(factory: AgentBackendFactory, port: HostSessionPort, opts: SessionRuntimeOptions) {
     this.#factory = factory;
@@ -514,6 +566,12 @@ export class SessionRuntime {
       },
       teamMessaging: () => this.#backend?.capabilities.teamMessaging === true,
       imageText: (mediaType) => imageUnavailableText(mediaType, 'child result images are not stored'),
+    });
+    this.#side = new SideQuestionDesk({
+      displayName: factory.displayName,
+      now: this.#now,
+      notify: () => this.#notify(),
+      control: () => this.#sideControl(),
     });
     this.#workflows = new WorkflowRecorder({
       now: this.#now,
@@ -780,7 +838,201 @@ export class SessionRuntime {
     }
     const usage = this.#usage.summary();
     if (usage) v.usage = usage;
+    const side = this.#side.view();
+    if (side.entries.length > 0) v.side = side;
+    if (this.#commandList)
+      v.menu = { version: this.#commandsVersion, count: this.#commandList.length, full: this.#commandsFull };
+    if (this.#mcp) v.mcp = this.#mcp.map((m) => ({ name: m.name, status: m.status }));
     return v;
+  }
+
+  // ---- M6: commands, side questions, MCP, local outputs (R7.1-R7.4) ----
+
+  /** R7.1: the agent's command list as known now (the port builds the host menu from it). */
+  commandList(): { list: CommandInfo[] | undefined; full: boolean; version: number } {
+    return {
+      list: this.#commandList?.map((c) => ({ ...c })),
+      full: this.#commandsFull,
+      version: this.#commandsVersion,
+    };
+  }
+
+  /** The port's menu placements (D52), so the commands route can name the taken rows. */
+  noteMenu(rows: MenuRow[]): void {
+    const changed = JSON.stringify(rows) !== JSON.stringify(this.#menuRows);
+    this.#menuRows = rows.map((r) => ({ ...r }));
+    // The client source caches the answer per menu version: a new taken name must reach it.
+    if (changed) {
+      this.#commandsVersion++;
+      this.#notify();
+    }
+  }
+
+  #setCommands(list: CommandInfo[], full: boolean): void {
+    this.#commandList = list.map((c) => ({ ...c }));
+    this.#commandsFull = full;
+    this.#commandsVersion++;
+    this.#menuRows = undefined;
+    try {
+      this.#port?.commandsChanged?.();
+    } catch (error) {
+      this.#warn('could not update the / menu', String((error as Error)?.message ?? error));
+    }
+    this.#notify();
+  }
+
+  /** The agent sent names only: read the full rows (descriptions, hints) from the live process. */
+  #loadCommands(backend: AgentBackendSession): void {
+    const read = backend.controls.commands;
+    if (!read) return;
+    read.call(backend.controls).then(
+      (list) => {
+        if (backend !== this.#backend || !Array.isArray(list)) return;
+        this.#setCommands(list, true);
+      },
+      (error) => this.#warn('reading the command list failed', String((error as Error)?.message ?? error)),
+    );
+  }
+
+  /**
+   * R7.1: the commands route. With a process and only names known, the full rows are read once
+   * (the agent's own command list, no model call). Never starts a process (rule 9, D4).
+   */
+  async commandsAnswer(): Promise<CommandsAnswer> {
+    const backend = this.#backend;
+    let reason: string | undefined;
+    let from: CommandsAnswer['from'] = this.#commandList ? 'reported' : 'none';
+    if (backend && !this.#commandsFull && backend.controls.commands) {
+      try {
+        const list = await backend.controls.commands.call(backend.controls);
+        if (backend === this.#backend && Array.isArray(list)) {
+          this.#setCommands(list, true);
+          from = 'live';
+        }
+      } catch (e) {
+        reason = String((e as Error)?.message ?? e);
+      }
+    }
+    const { sideQuestionCommand, mcpCommand } = this.#factory.staticCapabilities;
+    const rows =
+      this.#menuRows ??
+      planCommandMenu(this.#commandList ?? [], {
+        displayName: this.#factory.displayName,
+        ...(sideQuestionCommand !== undefined ? { sideQuestionCommand } : {}),
+        ...(mcpCommand !== undefined ? { mcpCommand } : {}),
+      }).rows;
+    const answer: CommandsAnswer = {
+      running: backend !== undefined,
+      from,
+      full: this.#commandsFull,
+      rows: rows.map((r) => ({ ...r })),
+      displayName: this.#factory.displayName,
+    };
+    if (sideQuestionCommand !== undefined) answer.sideQuestionCommand = sideQuestionCommand;
+    if (mcpCommand !== undefined) answer.mcpCommand = mcpCommand;
+    if (reason !== undefined) answer.reason = reason;
+    return answer;
+  }
+
+  #sideControl(): SideControl {
+    const backend = this.#backend;
+    if (!backend) return { kind: 'not-running' };
+    const ask = backend.controls.askSideQuestion;
+    if (!ask || !backend.capabilities.sideQuestions) return { kind: 'unsupported' };
+    return { kind: 'ready', ask: (q, history, signal) => ask.call(backend.controls, q, history, signal) };
+  }
+
+  /**
+   * R7.3, D54: one side question. Full context, no tools, nothing written to either log. With no
+   * process the question waits and is asked after the user starts the agent (D4).
+   */
+  askSideQuestion(question: string, signal?: AbortSignal): Promise<SideAskResult> {
+    if (this.#disposed) return Promise.resolve({ ok: false, code: 'unsupported', error: 'the session is closed' });
+    return this.#side.ask(question, signal);
+  }
+
+  sideQuestions(): SideView {
+    return this.#side.view();
+  }
+
+  cancelSideQuestion(id: string): boolean {
+    return this.#side.cancel(id);
+  }
+
+  /** R7.4, D55: the MCP servers, read from the live process when it can. Never spawns. */
+  async mcp(): Promise<McpAnswer> {
+    const backend = this.#backend;
+    const answer = (reason?: string): McpAnswer => {
+      const a: McpAnswer = {
+        running: backend !== undefined,
+        from: this.#mcpFrom,
+        servers: (this.#mcp ?? []).map((m) => ({ ...m })),
+      };
+      if (reason !== undefined) a.reason = reason;
+      return a;
+    };
+    if (!backend) return answer('not-running');
+    const read = backend.controls.mcpStatus;
+    if (!read) return answer('unsupported');
+    try {
+      const servers = await read.call(backend.controls);
+      if (backend !== this.#backend) return answer('not-running');
+      this.#mcp = Array.isArray(servers) ? servers.map((m) => ({ ...m })) : [];
+      this.#mcpFrom = 'live';
+      this.#notify();
+      return answer();
+    } catch (e) {
+      return answer(String((e as Error)?.message ?? e));
+    }
+  }
+
+  /**
+   * D55: reconnect, toggle or sign in one MCP server. The name must be one the agent listed (it is
+   * untrusted text, passed back unchanged). The agent saves a toggle itself; its note is shown as
+   * given. Never writes a settings file (rule 2) and never spawns.
+   */
+  async mcpAction(
+    action: 'reconnect' | 'toggle' | 'authenticate' | 'auth-callback',
+    name: string,
+    arg?: { enabled?: boolean; callbackUrl?: string },
+  ): Promise<McpActionResult> {
+    const backend = this.#backend;
+    const label = this.#factory.displayName;
+    if (!backend) return { ok: false, code: 'not-running', error: `${label} is not running. Start it first.` };
+    const c = backend.controls;
+    const fn =
+      action === 'reconnect'
+        ? c.mcpReconnect
+        : action === 'toggle'
+          ? c.mcpToggle
+          : action === 'authenticate'
+            ? c.mcpAuthenticate
+            : c.mcpSubmitAuthCallback;
+    if (!fn) return { ok: false, code: 'unsupported', error: `This ${label} version cannot do that.` };
+    let known = this.#mcp;
+    if (!known?.some((m) => m.name === name)) known = (await this.mcp()).servers;
+    if (!known.some((m) => m.name === name))
+      return { ok: false, code: 'unknown-server', error: `${label} lists no MCP server with that name.` };
+    try {
+      let note: string | undefined;
+      let auth: Awaited<ReturnType<NonNullable<typeof c.mcpAuthenticate>>> | undefined;
+      if (action === 'reconnect') await c.mcpReconnect!.call(c, name);
+      else if (action === 'toggle') note = (await c.mcpToggle!.call(c, name, arg?.enabled === true))?.note;
+      else if (action === 'authenticate') auth = await c.mcpAuthenticate!.call(c, name);
+      else await c.mcpSubmitAuthCallback!.call(c, name, arg?.callbackUrl ?? '');
+      const mcp = await this.mcp();
+      const r: McpActionResult = { ok: true, mcp };
+      if (note !== undefined) r.note = note;
+      if (auth !== undefined) r.auth = auth;
+      return r;
+    } catch (e) {
+      return { ok: false, code: 'failed', error: String((e as Error)?.message ?? e), mcp: await this.mcp() };
+    }
+  }
+
+  /** R7.2: one structured local-command output (display-only; the text is in the host log). */
+  localOutput(id: string): ReturnType<LocalOutputs['get']> {
+    return this.#local.get(id);
   }
 
   /**
@@ -1203,6 +1455,8 @@ export class SessionRuntime {
       this.#mainAgent = mainAgent;
       if (mainAgent !== undefined) this.#live.agent = mainAgent;
       this.#agents = undefined;
+      this.#mcp = undefined;
+      this.#mcpFrom = 'none';
       if (trustNotice !== undefined) this.#live.notice = { level: 'warning', text: trustNotice, at: this.#now() };
       this.#lastExit = undefined;
       this.#sent.clear();
@@ -1215,11 +1469,19 @@ export class SessionRuntime {
       void this.#pump(backend);
       this.#loadModels(backend);
       this.#loadAgents(backend);
+      // D54: a side question typed before the start is asked now that the user started the agent.
+      queueMicrotask(() => {
+        if (backend === this.#backend) this.#side.resume();
+      });
       return backend;
     })();
     this.#notify();
     try {
       return await this.#starting;
+    } catch (error) {
+      // D54: a question waiting for this start would otherwise block every later one.
+      this.#side.startFailed(String((error as Error)?.message ?? error));
+      throw error;
     } finally {
       this.#starting = undefined;
       this.#notify();
@@ -1346,7 +1608,24 @@ export class SessionRuntime {
           this.#notify();
         }
         return;
+      case 'commands':
+        // R7.1: names only from the start report; read the full rows from the live process.
+        this.#setCommands(e.list, e.namesOnly !== true);
+        if (e.namesOnly === true) this.#loadCommands(from);
+        return;
+      case 'mcp-status':
+        // D55: the agent's own start report; a live read replaces it.
+        if (this.#mcpFrom !== 'live' || !this.#mcp) {
+          this.#mcp = e.servers.map((m) => ({ ...m }));
+          this.#mcpFrom = 'reported';
+          this.#notify();
+        }
+        return;
       case 'conversation-reset':
+        // D70: the side-question history belongs to the old conversation.
+        this.#side.clear();
+        if (this.#usage.apply(e, this.#box ? this.#sink?.turn : undefined)) this.#notify();
+        return;
       case 'context':
       case 'compaction':
       case 'limits':
@@ -1562,6 +1841,23 @@ export class SessionRuntime {
     if (id === undefined || this.#superseded.has(id)) return;
     this.#chain.push(id);
     if (this.#chain.length > 64) this.#chain = this.#chain.slice(-32);
+  }
+
+  /**
+   * R7.2: a local command step names its command in the binding (a native field, D21), so it
+   * survives reload and fork. The structured twin has no host event type: it is kept in memory
+   * and the binding carries its id (display-only path).
+   */
+  #localCommandBinding(lc: NonNullable<BackendEventOf<'step-message'>['localCommand']>): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    if (lc.name !== undefined) out.name = lc.name;
+    if (lc.args !== undefined && lc.args !== '') out.args = lc.args;
+    if (lc.unavailable) out.unavailable = true;
+    if (lc.structured) {
+      out.structured = lc.structured.kind;
+      out.outputId = this.#local.add(lc.structured);
+    }
+    return out;
   }
 
   #binding(): Record<string, unknown> {
@@ -1856,7 +2152,10 @@ export class SessionRuntime {
             this.#claimConsumed(sink);
             this.#openStep(sink);
           }
-          const m: Parameters<TurnSink['commit']>[0] = { blocks: e.blocks, binding: this.#binding() };
+          const binding = this.#binding();
+          if (e.localCommand) binding.localCommand = this.#localCommandBinding(e.localCommand);
+          // Rule 8: the CLI's text as it wrote it; the client draws local outputs (R7.2, D69 r5).
+          const m: Parameters<TurnSink['commit']>[0] = { blocks: e.blocks, binding };
           if (e.usage) m.usage = e.usage;
           if (e.model) m.model = e.model;
           if (e.interrupted) m.interrupted = true;

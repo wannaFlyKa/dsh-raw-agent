@@ -35,6 +35,7 @@ const alias = {
   '@dsh-raw-agent/backend-claude': `${root}packages/backend-claude/src/index.ts`,
   '@dsh-raw-agent/dsh-host': `${root}packages/dsh-host/src/index.ts`,
   '@dsh-raw-agent/dsh-client': `${root}packages/dsh-client/src/index.ts`,
+  '@dsh-raw-agent/views-claude': `${root}packages/views-claude/src/index.ts`,
 };
 
 function checkInputs(result, out) {

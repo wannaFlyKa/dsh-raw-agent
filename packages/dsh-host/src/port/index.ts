@@ -17,6 +17,7 @@ export {
   type AgentMount,
   type AgentMountOptions,
 } from './loop.js';
+export { AgentCommandMenus, type DshCommands, type DshCommandResult } from './commands.js';
 export { mountHost, catalogAdapter, SETTINGS_MODEL } from './catalog.js';
 export {
   TurnLog,
@@ -52,6 +53,16 @@ export {
   USAGE_ROUTE,
   CONTEXT_ROUTE,
   usageRoutes,
+  commandRoutes,
+  COMMANDS_ROUTE,
+  SIDE_QUESTION_ROUTE,
+  SIDE_QUESTION_CANCEL_ROUTE,
+  MCP_ROUTE,
+  MCP_RECONNECT_ROUTE,
+  MCP_TOGGLE_ROUTE,
+  MCP_AUTH_ROUTE,
+  MCP_AUTH_CALLBACK_ROUTE,
+  LOCAL_OUTPUT_ROUTE,
   SESSION_ROUTE,
   CHOICE_ROUTE,
   ANSWER_ROUTE,

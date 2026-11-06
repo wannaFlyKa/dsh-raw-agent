@@ -296,7 +296,11 @@ export function WorkflowNodeView(props: WorkflowNodeViewProps): React.ReactEleme
   const now = useNow(run !== undefined && isLiveWorkflow(run));
   if (snap.status !== 'ready' || !info || !run) return null;
   return (
-    <div style={{ ...css.card, padding: '4px 10px' }} data-raw-agent="workflow-node">
+    // Leftover M4: the chat card grows with its rows (no inner scroll box that cut off agent rows).
+    <div
+      style={{ ...css.card, padding: '4px 10px', maxHeight: 'none', overflow: 'visible' }}
+      data-raw-agent="workflow-node"
+    >
       <WorkflowRunCard
         run={run}
         sessionId={props.sessionId}

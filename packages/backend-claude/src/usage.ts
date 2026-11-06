@@ -28,6 +28,7 @@ import {
   type AuthInfo,
   type BackendEvent,
   type ContextCategory,
+  type ContextDetails,
   type ContextUsage,
   type CostBasis,
   type CostLabel,
@@ -309,7 +310,11 @@ export function parseUsageLimits(resp: unknown, at: number): { available: boolea
 /** `getContextUsage` (SDK/sdk.d.ts:4099-4227) in our shape. */
 export function parseContextUsage(r: unknown): ContextUsage {
   const raw = isObject(r) ? r : {};
-  const out: ContextUsage = { used: num(raw.totalTokens) ?? 0, window: num(raw.maxTokens) ?? 0 };
+  // The control answers in camelCase (live M5 probe A); the `/context` local command's twin on
+  // its synthetic message is snake_case (`context_usage`, probe5; `SDK/sdk.d.ts:4099`).
+  const used = num(raw.totalTokens) ?? num(raw.total_tokens) ?? 0;
+  const window = num(raw.maxTokens) ?? num(raw.raw_max_tokens) ?? num(raw.rawMaxTokens) ?? 0;
+  const out: ContextUsage = { used, window };
   const auto = num(raw.autoCompactThreshold);
   if (auto !== undefined) out.autoCompactAt = auto;
   if (typeof raw.isAutoCompactEnabled === 'boolean') out.autoCompactEnabled = raw.isAutoCompactEnabled;
@@ -336,7 +341,50 @@ export function parseContextUsage(r: unknown): ContextUsage {
     }
     out.categories = cats;
   }
+  const details = parseContextDetails(raw);
+  if (details !== undefined) out.details = details;
   return out;
+}
+
+/** R7.2: the item tables of `/context`, from either answer shape. Paths and ids beyond these are dropped. */
+function parseContextDetails(raw: Record<string, unknown>): ContextDetails | undefined {
+  const rows = (v: unknown): Record<string, unknown>[] => (Array.isArray(v) ? v.filter(isObject) : []);
+  const d: ContextDetails = {};
+  const mcp = rows(raw.mcpTools ?? raw.mcp_tools).flatMap((t) => {
+    const name = str(t.name);
+    const server = str(t.serverName) ?? str(t.server_name);
+    const tokens = num(t.tokens);
+    return name !== undefined && server !== undefined && tokens !== undefined ? [{ name, server, tokens }] : [];
+  });
+  if (mcp.length > 0) d.mcpTools = mcp;
+  const memory = rows(raw.memoryFiles ?? raw.memory_files).flatMap((f) => {
+    const path = str(f.path);
+    const type = str(f.type);
+    const tokens = num(f.tokens);
+    return path !== undefined && type !== undefined && tokens !== undefined ? [{ path, type, tokens }] : [];
+  });
+  if (memory.length > 0) d.memoryFiles = memory;
+  const agents = rows(raw.agents).flatMap((a) => {
+    const name = str(a.agentType) ?? str(a.agent_type);
+    const source = str(a.source);
+    const tokens = num(a.tokens);
+    return name !== undefined && source !== undefined && tokens !== undefined ? [{ name, source, tokens }] : [];
+  });
+  if (agents.length > 0) d.agents = agents;
+  // The control nests the rows (`skills.skillFrontmatter`); the twin lists them directly.
+  const skillRows = Array.isArray(raw.skills) ? raw.skills : isObject(raw.skills) ? raw.skills.skillFrontmatter : [];
+  const skills = rows(skillRows).flatMap((s) => {
+    const name = str(s.name);
+    const source = str(s.source);
+    const tokens = num(s.tokens);
+    if (name === undefined || source === undefined || tokens === undefined) return [];
+    const row: NonNullable<ContextDetails['skills']>[number] = { name, source, tokens };
+    const plugin = str(s.pluginName) ?? str(s.plugin_name);
+    if (plugin !== undefined) row.plugin = plugin;
+    return [row];
+  });
+  if (skills.length > 0) d.skills = skills;
+  return Object.keys(d).length > 0 ? d : undefined;
 }
 
 // ---- the ledger ----

@@ -105,3 +105,16 @@ export {
   type RateLimitReport,
   type UsageLedgerOptions,
 } from './usage.js';
+export {
+  CommandCatalog,
+  MCP_TOGGLE_NOTE,
+  localCommandOf,
+  sideHistoryWire,
+  skillList,
+  slashCommandOf,
+  toCommandInfo,
+  toMcpAuthStart,
+  toMcpServerInfo,
+  toMcpServerList,
+  toSideAnswer,
+} from './commands.js';

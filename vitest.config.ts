@@ -15,6 +15,7 @@ export default defineConfig({
       { find: /^@dsh-raw-agent\/backend-claude$/, replacement: src('backend-claude') },
       { find: /^@dsh-raw-agent\/dsh-host$/, replacement: src('dsh-host') },
       { find: /^@dsh-raw-agent\/dsh-client$/, replacement: src('dsh-client') },
+      { find: /^@dsh-raw-agent\/views-claude$/, replacement: src('views-claude') },
       { find: /^@dsh-raw-agent\/testkit$/, replacement: src('testkit') },
     ],
   },

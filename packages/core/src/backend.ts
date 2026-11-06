@@ -58,6 +58,12 @@ export interface FactoryCapabilities {
   needsProcess: string[];
   /** 'btw' for Claude (D54). */
   sideQuestionCommand?: string;
+  /**
+   * The agent command that opens its MCP view in its terminal app ('mcp' for Claude, D55). The
+   * plugin's `/` source claims the bare command and opens the MCP panel instead; with arguments
+   * the line still goes to the agent.
+   */
+  mcpCommand?: string;
   /** Static default list for the mode picker (D38). */
   permissionModes: PermissionModeInfo[];
   /**
@@ -159,7 +165,29 @@ export interface BackendControls {
   effortState?(): Promise<EffortState>;
   models?(): Promise<ModelInfo[]>;
   agents?(): Promise<AgentInfo[]>;
+  /** R7.1: the agent's own `/` menu rows, as it reports them now (Claude: `supportedCommands()`). */
   commands?(): Promise<CommandInfo[]>;
+  /** R7.5: the skills this session can use. Read-only; reloads nothing. */
+  skills?(): Promise<SkillInfo[]>;
+  /**
+   * D54, R7.3: answer a side question with the conversation's full context, no tools, and
+   * nothing written to any transcript (Claude: `askSideQuestion`, the engine behind `/btw`).
+   * Works while a turn runs. `history`: earlier exchanges, oldest first (the caller keeps them,
+   * see `SideQuestionHistory`). `null`: cancelled through `signal`.
+   */
+  askSideQuestion?(question: string, history: SideExchange[], signal: AbortSignal): Promise<SideAnswer | null>;
+  /** D55, R7.4: the MCP servers and their state. */
+  mcpStatus?(): Promise<McpServerInfo[]>;
+  mcpReconnect?(name: string): Promise<void>;
+  /**
+   * D55: turn a server on or off. The agent saves the choice itself; `note` says where, in the
+   * backend's words, and the UI shows it as given.
+   */
+  mcpToggle?(name: string, enabled: boolean): Promise<{ note?: string }>;
+  /** D55: start a sign-in for a server that needs auth (**unverified** live on Claude). */
+  mcpAuthenticate?(name: string): Promise<McpAuthStart>;
+  /** D55: finish a sign-in with the provider's final redirect address, pasted by the user. */
+  mcpSubmitAuthCallback?(name: string, callbackUrl: string): Promise<void>;
   contextUsage?(detail: 'summary' | 'full'): Promise<ContextUsage>;
   /**
    * D58, D60: the conversation's totals, the cost label, the auth type and the plan limits, read
@@ -397,10 +425,91 @@ export interface AgentInfo {
   model?: string;
 }
 
+/**
+ * One row of the agent's own `/` menu (R7.1, D52). `name` is the agent's name, byte for byte, with
+ * no leading slash: the menu inserts `/<name>` and the line goes to the agent as typed text.
+ */
 export interface CommandInfo {
   name: string;
   description?: string;
   argumentHint?: string;
+  /** Other names that run the same command (Claude: `/cost` and `/stats` for `/usage`). */
+  aliases?: string[];
+  /**
+   * What the row is, as far as the agent tells: its own command ('builtin'), a skill ('skill'), an
+   * MCP server prompt ('mcp-prompt'), or another user, project or plugin command ('custom').
+   */
+  kind?: 'builtin' | 'skill' | 'mcp-prompt' | 'custom';
+  /**
+   * The agent says the command only makes sense in its terminal app (Claude:
+   * `system/init.terminal_slash_commands`). The menu may hide or mark it.
+   */
+  terminalOnly?: boolean;
+}
+
+/** One skill the session can use (R7.5; Claude: the skills of `system/init` and `/context`). */
+export interface SkillInfo {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+  /** Where the skill comes from, in the agent's own words ('plugin', 'built-in', 'userSettings', …). */
+  source?: string;
+  /** The plugin that ships it, when it comes from one. */
+  plugin?: string;
+  /** Context tokens its listing costs, when the agent reports it. */
+  tokens?: number;
+}
+
+/** D55: one MCP server as the agent reports it (Claude: `mcpServerStatus()`). */
+export interface McpServerInfo {
+  /** The agent's name for the server; pass it back to the MCP controls unchanged. Untrusted text. */
+  name: string;
+  /** Unknown words from a newer agent are kept as they are. */
+  status: 'connected' | 'failed' | 'needs-auth' | 'pending' | 'disabled' | (string & {});
+  error?: string;
+  /** Configuration scope ('user', 'project', 'local', 'claudeai', 'managed', …). */
+  scope?: string;
+  /** Where the definition came from ('plugin', 'user', 'sdk', …). Key trust on this, not on `name`. */
+  source?: string;
+  /** The server's own name and version, once connected. */
+  serverName?: string;
+  serverVersion?: string;
+  /** 'stdio', 'http', 'sse', … Only the transport kind: never headers, env or arguments. */
+  transport?: string;
+  /** The server's tools, once connected. */
+  tools?: Array<{ name: string; description?: string; readOnly?: boolean; destructive?: boolean }>;
+}
+
+/** D55: what starting an MCP sign-in returned. */
+export interface McpAuthStart {
+  /** Open this in a browser. Absent: nothing for the user to do (already signed in). */
+  url?: string;
+  needsUserAction: boolean;
+  /**
+   * The agent waits for the provider's redirect. When the browser cannot reach the agent's
+   * machine, the user pastes the final address into `mcpSubmitAuthCallback`.
+   */
+  callbackExpected: boolean;
+}
+
+/** D54: one earlier side question and its answer, oldest first. */
+export interface SideExchange {
+  question: string;
+  answer: string;
+  /** The agent's note that another model answered (Claude: the refusal fallback's content). */
+  fallbackNotice?: string;
+}
+
+/** D54: the agent's answer to a side question. */
+export interface SideAnswer {
+  text: string;
+  /**
+   * true: the agent made this text itself (no answer was possible). It is shown, but not kept
+   * in the side-question history, as the terminal app does.
+   */
+  synthetic: boolean;
+  /** Another model answered after the first one declined. */
+  fallback?: { originalModel: string; fallbackModel: string; content: string };
 }
 
 /** One settings file the agent reads (D63). `scope` is a stable key such as 'user' or 'project'. */
@@ -460,6 +569,16 @@ export interface ContextUsage {
   categories?: ContextCategory[];
   /** The model the report is for (display id, D61). */
   model?: string;
+  /** R7.2: the per-item tables of the agent's `/context`, when it reports them. */
+  details?: ContextDetails;
+}
+
+/** The item tables behind `/context` (Claude: MCP tools, memory files, agents, skills). */
+export interface ContextDetails {
+  mcpTools?: Array<{ name: string; server: string; tokens: number }>;
+  memoryFiles?: Array<{ path: string; type: string; tokens: number }>;
+  agents?: Array<{ name: string; source: string; tokens: number }>;
+  skills?: Array<{ name: string; source: string; plugin?: string; tokens: number }>;
 }
 
 /** What the user's own settings choose (R1.4). Display only; read without a process (D83). */

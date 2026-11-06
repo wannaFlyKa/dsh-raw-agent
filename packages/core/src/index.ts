@@ -1,8 +1,12 @@
 export type * from './backend.js';
 export type * from './events.js';
 export type * from './usage.js';
+export type * from './tool-views.js';
+export { splitLines, lineDiff, numberDiff, diffHunks, diffCounts, diffText } from './diff.js';
+export type { DiffLine, DiffGap } from './diff.js';
 export { SentInputTracker } from './sent-inputs.js';
 export { AsyncQueue } from './async-queue.js';
+export { SideQuestionHistory, SIDE_HISTORY_LIMIT } from './side-questions.js';
 export { offeredPermissionModes, nextPermissionMode } from './modes.js';
 export { mergeWorkflowSnapshot, settleWorkflowSnapshot, isSettledWorkflowAgent } from './workflow.js';
 export type { WorkflowSnapshot } from './workflow.js';

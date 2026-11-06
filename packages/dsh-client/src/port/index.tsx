@@ -16,6 +16,11 @@ import { SessionControls } from '../ui/controls.js';
 import { ContextPill } from '../ui/usage-panel.js';
 import { WakeTriggerCard } from '../ui/wake-card.js';
 import { WorkflowNodeView } from '../ui/workflow-panel.js';
+import type { ToolViewPack } from '@dsh-raw-agent/core';
+import { localCommandOf, messageText, type LocalCommandData } from '../commands-model.js';
+import { LocalCommandText, LocalCommandView } from '../ui/local-command.js';
+import { agentCommandSource } from './command-source.js';
+import { registerToolViews } from './tool-views.js';
 
 /** DSH versions this port was tested against (D79). */
 export const TESTED_DSH_VERSIONS: readonly string[] = Object.freeze(['0.2.2-rc.1']);
@@ -613,6 +618,92 @@ export function WorkflowNode(props: {
   return <WorkflowNodeView sessionId={props.sessionId} runId={runId} stores={props.stores} actions={props.actions} />;
 }
 
+// --- R7.2, D69, D70: local command outputs in the chat -------------------------------------------
+
+/** DSH's assistant message event (`P/dsh-session-format-v3-to-v4`); its `source` holds our binding. */
+export const ASSISTANT_MESSAGE_EVENT = 'assistant/message';
+/** Our chat node kind (no DSH package uses this key). */
+export const LOCAL_COMMAND_NODE_KIND = 'raw-agent-local-command';
+export const LOCAL_COMMAND_DEFINITION_KIND = 'raw-agent-local-command-output';
+
+interface LocalContext {
+  key: string;
+  id: string;
+  state?: LocalCommandData;
+  start?: { location?: unknown };
+  matches: Array<{ location?: unknown }>;
+}
+
+/**
+ * A Chat-target Definition for the native `assistant/message` of a local command step (its
+ * binding names the command, D21). **(D69 r5)** It claims the event (`exclusive: true`) and our
+ * node draws the command's text itself, from the event as written (rule 8: the log holds the
+ * CLI's own text). DSH's Markdown would turn the CLI's `$` columns into math and put the long
+ * `/context` text above its table; our node draws the plain columns monospaced and the table
+ * first. Only events carrying our binding are claimed; every other message is DSH's.
+ */
+/** R7.2: the chat group-tree position of our local command node (outside the turn's process). */
+export const LOCAL_COMMAND_GROUP_TREE = 'turn';
+
+export function localCommandDefinition(): Record<string, unknown> {
+  const dataOf = (event: { type: string; seq: number; data: unknown }): LocalCommandData | undefined => {
+    if (event.type !== ASSISTANT_MESSAGE_EVENT) return undefined;
+    const source = (event.data as { message?: { source?: unknown } } | undefined)?.message?.source;
+    const d = localCommandOf(source, event.seq);
+    if (!d) return undefined;
+    const text = messageText((event.data as { message?: unknown } | undefined)?.message);
+    return text !== '' ? { ...d, text } : d;
+  };
+  return {
+    kind: LOCAL_COMMAND_DEFINITION_KIND,
+    target: 'chat',
+    match: (event: { type: string; seq: number; data: unknown }) => {
+      const d = dataOf(event);
+      return d ? { id: `local-${event.seq}`, role: 'start', exclusive: true } : null;
+    },
+    start: (_context: unknown, match: { event: { type: string; seq: number; data: unknown } }) => dataOf(match.event),
+    update: (context: LocalContext) => context.state,
+    buildViewNode: (context: LocalContext) => {
+      if (context.state === undefined) return null;
+      return {
+        key: context.key,
+        kind: LOCAL_COMMAND_NODE_KIND,
+        id: context.id,
+        target: 'chat',
+        anchorSeq: context.state.seq,
+        location: context.start?.location ?? context.matches[0]?.location ?? { kind: 'unresolved' },
+        visibility: 'visible',
+        // R7.2 (live M6): without a position DSH put the node in a folded "process" group, so the
+        // `/context` table stayed hidden. `turn` keeps it in its turn, outside the disclosure,
+        // next to DSH's own text of the output (`P/dsh-client-ui-chat` ChatGroupTree).
+        groupTree: LOCAL_COMMAND_GROUP_TREE,
+        data: context.state,
+      };
+    },
+  };
+}
+
+/** The keyed chat renderer of our local command node. */
+export function LocalCommandNode(props: {
+  node?: { data?: LocalCommandData };
+  sessionId?: string;
+  stores?: SessionStores;
+  api?: RawAgentApi;
+}): React.ReactElement | null {
+  const data = props.node?.data;
+  if (!data) return null;
+  // We claimed the event: without our services, still draw the agent's text (never lose it).
+  if (!props.sessionId || !props.stores || !props.api) return <LocalCommandText text={data.text ?? ''} />;
+  return (
+    <LocalCommandView
+      data={data}
+      sessionId={props.sessionId}
+      store={props.stores.get(props.sessionId)}
+      api={props.api}
+    />
+  );
+}
+
 interface UiConversationService {
   events?: { register(definition: Record<string, unknown>): () => void };
 }
@@ -716,6 +807,8 @@ export function hostActions(ctx: ClientContext): HostActions {
 
 export interface MountClientOptions {
   fetch?: FetchFn;
+  /** D19, D80: the tool view packs of the backends (the composition root passes them). */
+  toolViews?: readonly ToolViewPack[];
   /** Test seam. */
   api?: RawAgentApi;
 }
@@ -750,6 +843,13 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       if (svc) fn(svc, ctx);
     }
   };
+  // R7.1, D52: the agent commands DSH's own `/` menu cannot list (plugin skills, MCP prompts).
+  withService('inputTriggers', (svc, scope) => {
+    const triggers = svc as { registerSource?: (src: unknown) => () => void } | undefined;
+    if (typeof triggers?.registerSource !== 'function') return;
+    const source = agentCommandSource(stores, api);
+    scope.effect?.(() => triggers.registerSource!(source), 'raw-agent: agent command source');
+  });
   withService('uiSession', (svc, scope) => {
     const ui = svc as UiSessionService | undefined;
     if (typeof ui?.registerPendingInteraction !== 'function') return;
@@ -827,7 +927,17 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
         WorkflowNode as React.ComponentType<never>,
       ),
     );
+    // R7.2, D70: local command outputs (the /context table, the /clear divider, the compact marker).
+    scope.effect?.(() => events.register(localCommandDefinition()), 'raw-agent: local command outputs');
+    scope.slots.inject('conversation.chat.node', () =>
+      scope.slots.register(
+        { name: 'conversation.chat.node', key: LOCAL_COMMAND_NODE_KIND, inject: () => ({ stores, api }) },
+        LocalCommandNode as React.ComponentType<never>,
+      ),
+    );
   });
+  // D19: the backends' tool views, drawn only in sessions of their backend (and their children).
+  if (options.toolViews && options.toolViews.length > 0) registerToolViews(ctx.slots, options.toolViews, stores, links);
   // R6.1-R6.3: the agents button in our sessions' header, and the child strip in a child session.
   ctx.slots.inject(AGENTS_SLOT, () =>
     ctx.slots.register(

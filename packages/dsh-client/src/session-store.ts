@@ -36,6 +36,11 @@ export interface SessionSnapshot {
   stopping?: readonly string[];
   /** Why the last Stop of one child or task failed. */
   stopError?: { id: string; text: string };
+  /**
+   * A panel the `/` source asked to open (the bare MCP command, D55): the controls open it when
+   * `seq` changes. Browser state only; nothing is sent.
+   */
+  panelRequest?: { panel: 'mcp'; seq: number };
 }
 
 export interface PollTimings {
@@ -178,6 +183,13 @@ export class SessionControlStore {
           // M5: the pill's summary rides the channel, so the context reading follows each call.
           if (line.usage) view.usage = line.usage;
           else delete view.usage;
+        }
+        // M6: the side questions (D54), the menu version and the MCP summary ride the channel too.
+        for (const key of ['side', 'menu', 'mcp'] as const) {
+          const val = line[key];
+          if (val === undefined) continue;
+          if (val === null) delete view[key];
+          else (view as Record<string, unknown>)[key] = val;
         }
         next.info = { ...info, view };
         ++this.#generation; // a poll that started before this line is older
@@ -378,6 +390,11 @@ export class SessionControlStore {
   }
 
   /** "Start <displayName>" (D4): spawn without a message, for controls that need a process. */
+  /** Ask the controls of this session to open one of our panels (D55: the bare MCP command). */
+  requestPanel(panel: 'mcp'): void {
+    this.#set({ panelRequest: { panel, seq: (this.#snapshot.panelRequest?.seq ?? 0) + 1 } });
+  }
+
   async start(): Promise<void> {
     this.#set({ busy: true, error: undefined });
     try {

@@ -82,7 +82,12 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Local command results** (`/compact`, `/clear`, `/context`) come with `num_turns: 0` and empty text. One that answers our input must still end the DSH turn, or every later message queues. They also say `duration_api_ms: 0`, but the next real result is the running total again: do not treat that 0 as a counter restart.
 - **`/clear` new id:** take the conversation id from the next frame's `session_id`, not from `conversation_reset.new_conversation_id`.
 - **Usage panel re-reads:** never key a re-read on a summary's `at` stamp; each route read re-stamps it, which loops the usage control.
+- **DSH's `/` menu keeps a source's row order, and Enter picks the first row.** Our command source ranks an exact name or alias first for a typed query; the CLI lists `autocompact` before `compact`, so without the rank `/compact` + Enter sent `/autocompact`. Live drivers that type a command and press Enter go through this pick.
 - **DSH's token meter** counts the main thread only and is not reset by `/clear`; our pill and panel include child tokens. The two totals differ by design (D68).
+- **MCP toggle:** the CLI's `mcp_toggle` writes `disabledMcpServers` in `~/.claude.json` itself, as the TUI's `/mcp` does. That is the CLI's write, not ours; tell the user.
+- **`/btw` answers carry no usage** (`side_question` replies have only `response` and `synthetic`), so a warm cache cannot be measured from the reply.
+- **CLI 2.1.318 has no Grep, Glob or TodoWrite tool** in `init.tools`. Their views can be checked only by unit tests.
+- **`/compact` output and `/clear`** come as a CLI user frame, so no compacted or cleared marker draws in the chat yet (known gap).
 
 ## 5. Development workflow
 
@@ -140,4 +145,5 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live ultracode frame checks:** point the dev profile's `raw-agent.config.executablePath` at a small wrapper that `tee`s stdin to a file and `exec`s the real `claude`. Restore `cordis.patch.yml` afterwards.
 - **Live workflow approval:** a Workflow launch asks permission only outside `auto`/bypass modes. Test it in `default` mode.
 - **Live usage checks:** a wrapper that `tee`s the CLI's stdout (same `executablePath` trick) captures its `result`, `rate_limit_event` and `compact_boundary` frames for comparison with our panel. This machine has only Bedrock auth; subscription limits are unit-tested only.
+- **Live command checks:** set `executablePath` to a `tee` wrapper and compare the CLI's stdin lines with what was typed; a menu open on Enter replaces the line with the picked row (for example `/cost` becomes `/usage`).
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

@@ -6,6 +6,8 @@ import {
   AsyncQueue,
   type AgentBackendFactory,
   type AgentBackendSession,
+  type BackendCapabilities,
+  type BackendControls,
   type BackendEvent,
   type FactoryCapabilities,
   type OpenSessionOptions,
@@ -43,6 +45,12 @@ export interface StubScript {
    * event is replaced by the id of the k-th input the driver sent.
    */
   inputAliases?: string[];
+  /** Extra or replaced session controls (M6: commands, side questions, MCP). */
+  controls?: Partial<BackendControls>;
+  /** Overrides of the session capabilities. */
+  capabilities?: Partial<BackendCapabilities>;
+  /** Overrides of the factory's static capabilities (for example `sideQuestionCommand`). */
+  staticCapabilities?: Partial<FactoryCapabilities>;
 }
 
 export interface StubRecord {
@@ -100,7 +108,9 @@ export function createStubFactory(
   const factory: AgentBackendFactory = {
     kind,
     displayName: 'Stub agent',
-    staticCapabilities: STUB_CAPABILITIES,
+    staticCapabilities: script.staticCapabilities
+      ? ({ ...STUB_CAPABILITIES, ...script.staticCapabilities } as FactoryCapabilities)
+      : STUB_CAPABILITIES,
     async open(o) {
       record.opened.push(o);
       queue = new AsyncQueue<BackendEvent>();
@@ -117,6 +127,7 @@ export function createStubFactory(
           cancelQueued: script.cancelQueued === true,
           fileRewind: false,
           planChoices: [],
+          ...script.capabilities,
         },
         events: () => q,
         async send(input) {
@@ -160,6 +171,7 @@ export function createStubFactory(
             record.controls.push(['setPermissionMode', mode]);
             q.push({ type: 'mode', mode }); // as the CLI's status frame
           },
+          ...script.controls,
         },
       };
       return session;

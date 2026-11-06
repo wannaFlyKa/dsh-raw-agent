@@ -79,7 +79,99 @@ export interface SessionViewWire {
   workflowAgentStop?: boolean;
   /** M5: the context pill's data and short usage totals (mirrors dsh-host `UsageSummary`). */
   usage?: UsageSummaryWire;
+  /** R7.3, D54: this session's side questions (in memory on the Host only). */
+  side?: SideViewWire;
+  /** R7.1: the command list version; read the commands route when it changes. */
+  menu?: { version: number; count: number; full: boolean };
+  /** R7.4: a short MCP summary (name and state). */
+  mcp?: Array<{ name: string; status: string }>;
 }
+
+// ---- M6: commands, side questions, MCP, local outputs (R7.1-R7.4) ----
+
+/** One side question (mirrors dsh-host `SideEntry`). */
+export interface SideEntryWire {
+  id: string;
+  question: string;
+  status: 'waiting' | 'asking' | 'answered' | 'failed' | 'cancelled';
+  at: number;
+  answer?: string;
+  /** The agent's own "no answer" text. */
+  synthetic?: boolean;
+  fallback?: { originalModel: string; fallbackModel: string; content: string };
+  error?: string;
+}
+
+export interface SideViewWire {
+  entries: SideEntryWire[];
+  historySize: number;
+}
+
+/** `POST api/raw-agent/side-question`. */
+export interface SideAskWire {
+  ok: boolean;
+  entry?: SideEntryWire;
+  code?: string;
+  error?: string;
+  side?: SideViewWire;
+}
+
+/** One agent command with its place in the `/` menu (mirrors dsh-host `MenuRow`). */
+export interface CommandRowWire {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+  aliases?: string[];
+  kind?: 'builtin' | 'skill' | 'mcp-prompt' | 'custom';
+  terminalOnly?: boolean;
+  menu: 'listed' | 'taken' | 'terminal-only' | 'side-question' | 'mcp-panel';
+  note?: string;
+}
+
+export interface CommandsAnswerWire {
+  running: boolean;
+  from: 'live' | 'reported' | 'none';
+  full: boolean;
+  rows: CommandRowWire[];
+  /** The backend's name for labels (older Hosts: absent). */
+  displayName?: string;
+  sideQuestionCommand?: string;
+  /** The agent's MCP view command: bare, our source opens the MCP panel (D55). */
+  mcpCommand?: string;
+  reason?: string;
+}
+
+/** One MCP server (core `McpServerInfo`). Every text in it is the agent's, shown as text. */
+export interface McpServerWire {
+  name: string;
+  status: string;
+  error?: string;
+  scope?: string;
+  source?: string;
+  serverName?: string;
+  serverVersion?: string;
+  transport?: string;
+  tools?: Array<{ name: string; description?: string; readOnly?: boolean; destructive?: boolean }>;
+}
+
+export interface McpAnswerWire {
+  running: boolean;
+  from: 'live' | 'reported' | 'none';
+  servers: McpServerWire[];
+  reason?: string;
+}
+
+export interface McpActionWire {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  note?: string;
+  auth?: { url?: string; needsUserAction: boolean; callbackExpected: boolean };
+  mcp?: McpAnswerWire;
+}
+
+/** `GET api/raw-agent/local-output`: a local command's structured twin (core `LocalCommandStructured`). */
+export type LocalOutputWire = { kind: 'context'; context: Record<string, unknown> };
 
 /** The agent's context figure (mirrors dsh-host `ContextView`, D59). */
 export interface ContextViewWire {
@@ -399,6 +491,10 @@ export type ChannelLine =
       workflows?: WorkflowWire[];
       /** M5: the usage summary; `null` = nothing known yet, absent = an older Host line. */
       usage?: UsageSummaryWire | null;
+      /** M6 (absent: an older Host line). */
+      side?: SideViewWire | null;
+      menu?: SessionViewWire['menu'] | null;
+      mcp?: SessionViewWire['mcp'] | null;
     }
   | { type: 'ping' };
 
@@ -523,6 +619,24 @@ export interface RawAgentApi {
   configFiles(sessionId: string): Promise<{ backend: string; files: ConfigFileItem[] }>;
   configFile(sessionId: string, scope: string): Promise<ConfigFilePreviewWire>;
   reveal(sessionId: string, scope: string, index: number): Promise<{ index: number; key?: string; value: string }>;
+  /** R7.1: the agent's commands and their place in the `/` menu. Never spawns. */
+  commands?(sessionId: string): Promise<CommandsAnswerWire>;
+  /** R7.3, D54: the side questions of this session. */
+  sideQuestions?(sessionId: string): Promise<SideViewWire>;
+  /** D54: ask one side question; resolves with the answer (or `waiting` until the agent starts). */
+  askSide?(sessionId: string, question: string, signal?: AbortSignal): Promise<SideAskWire>;
+  cancelSide?(sessionId: string, entryId: string): Promise<{ ok: boolean; side?: SideViewWire }>;
+  /** R7.4, D55: the MCP servers. Never spawns. */
+  mcp?(sessionId: string): Promise<McpAnswerWire>;
+  mcpAction?(
+    sessionId: string,
+    action: 'reconnect' | 'toggle' | 'authenticate',
+    server: string,
+    enabled?: boolean,
+  ): Promise<McpActionWire>;
+  mcpAuthCallback?(sessionId: string, server: string, url: string): Promise<McpActionWire>;
+  /** R7.2: one structured local-command output; undefined when the Host no longer keeps it. */
+  localOutput?(sessionId: string, outputId: string): Promise<LocalOutputWire | undefined>;
 }
 
 export function createApi(fetchFn: FetchFn): RawAgentApi {
@@ -666,7 +780,49 @@ export function createApi(fetchFn: FetchFn): RawAgentApi {
     configFile: (id, scope) => read(fetchFn, `${BASE}/config-file?${q(id)}&scope=${encodeURIComponent(scope)}`),
     reveal: (id, scope, index) =>
       read(fetchFn, `${BASE}/config-file?${q(id)}&scope=${encodeURIComponent(scope)}&reveal=${index}`),
+    commands: (id) => read<CommandsAnswerWire>(fetchFn, `${BASE}/commands?${q(id)}`),
+    sideQuestions: (id) => read<SideViewWire>(fetchFn, `${BASE}/side-question?${q(id)}`),
+    async askSide(id, question, signal) {
+      const r = await fetchFn(`${BASE}/side-question?${q(id)}`, {
+        ...post({ question }),
+        ...(signal ? { signal } : {}),
+      });
+      const body = (await r.json().catch(() => undefined)) as SideAskWire | { error?: string } | undefined;
+      if (body && 'ok' in body) return body;
+      if (!r.ok) return { ok: false, error: body?.error ?? `request failed (${r.status})` };
+      return { ok: false, error: 'the answer could not be read' };
+    },
+    async cancelSide(id, entry) {
+      const r = await fetchFn(`${BASE}/side-question-cancel?${q(id)}&id=${encodeURIComponent(entry)}`, post());
+      const body = (await r.json().catch(() => undefined)) as { ok?: boolean; side?: SideViewWire } | undefined;
+      return { ok: r.ok && body?.ok === true, ...(body?.side ? { side: body.side } : {}) };
+    },
+    mcp: (id) => read<McpAnswerWire>(fetchFn, `${BASE}/mcp?${q(id)}`),
+    async mcpAction(id, action, server, enabled) {
+      const path = action === 'reconnect' ? 'mcp-reconnect' : action === 'toggle' ? 'mcp-toggle' : 'mcp-auth';
+      const extra = action === 'toggle' ? `&enabled=${enabled === true ? 'true' : 'false'}` : '';
+      const r = await fetchFn(`${BASE}/${path}?${q(id)}&server=${encodeURIComponent(server)}${extra}`, post());
+      return mcpResult(r.status, await r.json().catch(() => undefined));
+    },
+    async mcpAuthCallback(id, server, url) {
+      const r = await fetchFn(`${BASE}/mcp-auth-callback?${q(id)}`, post({ server, url }));
+      return mcpResult(r.status, await r.json().catch(() => undefined));
+    },
+    async localOutput(id, outputId) {
+      const r = await fetchFn(`${BASE}/local-output?${q(id)}&id=${encodeURIComponent(outputId)}`);
+      if (r.status === 404) return undefined;
+      const body = (await r.json().catch(() => undefined)) as
+        { kind?: unknown; context?: unknown; error?: string } | undefined;
+      if (!r.ok) throw new RouteError(r.status, body?.error ?? `request failed (${r.status})`);
+      return body?.kind === 'context' && isObj(body.context) ? { kind: 'context', context: body.context } : undefined;
+    },
   };
+}
+
+function mcpResult(status: number, body: unknown): McpActionWire {
+  const b = (isObj(body) ? body : {}) as Partial<McpActionWire>;
+  if (typeof b.ok === 'boolean') return b as McpActionWire;
+  return { ok: false, error: typeof b.error === 'string' ? b.error : `request failed (${status})` };
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -770,6 +926,19 @@ export function parseChannelLine(text: string): ChannelLine | undefined {
         typeof (w as WorkflowWire).runId === 'string' &&
         Array.isArray((w as WorkflowWire).agents) &&
         Array.isArray((w as WorkflowWire).phases),
+    );
+  // M6: side questions, the command list version and the MCP summary (`null`: none yet).
+  const o6 = v as { side?: unknown; menu?: unknown; mcp?: unknown };
+  if (o6.side === null) line.side = null;
+  else if (isObj(o6.side) && Array.isArray(o6.side.entries)) line.side = o6.side as unknown as SideViewWire;
+  if (o6.menu === null) line.menu = null;
+  else if (isObj(o6.menu) && finite(o6.menu.version))
+    line.menu = o6.menu as unknown as SessionViewWire['menu'] & object;
+  if (o6.mcp === null) line.mcp = null;
+  else if (Array.isArray(o6.mcp))
+    line.mcp = o6.mcp.filter(
+      (m): m is { name: string; status: string } =>
+        isObj(m) && typeof m.name === 'string' && typeof m.status === 'string',
     );
   // M5: the usage summary (`null`: nothing known yet). An older Host line has no key at all.
   const usage = (v as { usage?: unknown }).usage;

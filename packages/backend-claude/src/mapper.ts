@@ -43,6 +43,7 @@ import { ChildAgents } from './children.js';
 import { WorkflowRuns, taskUsageOf, type WorkflowRunsOptions } from './workflows.js';
 import { canonicalModel } from './model-id.js';
 import { UsageLedger } from './usage.js';
+import { CommandCatalog, localCommandOf, toMcpServerList } from './commands.js';
 
 type ToolResultEvent = Extract<BackendEvent, { type: 'tool-result' }>;
 
@@ -198,6 +199,11 @@ export class ClaudeMessageMapper {
   /** Workflow launches whose call result is held (D18): emitted after that result. */
   #pendingLaunches = new Map<string, Record<string, unknown>>();
   readonly #usage: UsageLedger;
+  /** R7.1: the CLI's command list and skill names (D52). */
+  readonly #commands = new CommandCatalog();
+  /** The last slash command we sent, to name a local command output that has no name (R7.2). */
+  /** The last sent line's slash command; `queued` when it was sent while a turn ran (it answers after that turn). */
+  #lastSlash: { name: string; args: string; queued: boolean } | undefined;
   /** The CLI session id of the frames (D70: it changes after a conversation reset). */
   #sessionId: string | undefined;
   /** A `conversation_reset` seen; its event waits for the first frame of the new conversation. */
@@ -217,6 +223,18 @@ export class ClaudeMessageMapper {
   /** Usage accounting of this stream (D57-D60). */
   get usage(): UsageLedger {
     return this.#usage;
+  }
+
+  /** The command list and skills this stream reported (R7.1, R7.5). */
+  get commands(): CommandCatalog {
+    return this.#commands;
+  }
+
+  /** The session sent a line that starts with `/name` (it went to the CLI as plain text, D52). */
+  noteSlashCommand(cmd: { name: string; args: string } | undefined): void {
+    // Every sent line replaces it: after a plain prompt no later output is named from an old line
+    // (M6 review). A line sent mid-turn waits for the next turn.
+    this.#lastSlash = cmd === undefined ? undefined : { name: cmd.name, args: cmd.args, queued: this.#turnOpen };
   }
 
   /** Workflow runs seen on this stream (D48). */
@@ -269,6 +287,9 @@ export class ClaudeMessageMapper {
         break;
       case 'result':
         this.#result(msg as WireResult, out);
+        // A turn ended: an unclaimed name belonged to it (drop it); a queued one is the next turn's.
+        if (this.#lastSlash?.queued) this.#lastSlash.queued = false;
+        else this.#lastSlash = undefined;
         break;
       case 'tombstone':
         this.#tombstone(msg, out);
@@ -288,6 +309,14 @@ export class ClaudeMessageMapper {
         this.#debug('ignored message type', msg);
     }
     return out;
+  }
+
+  /** The sent slash command a local output answers, once. */
+  #takeSlash(): { name: string; args?: string } | undefined {
+    const s = this.#lastSlash;
+    this.#lastSlash = undefined;
+    if (s === undefined) return undefined;
+    return s.args === '' ? { name: s.name } : { name: s.name, args: s.args };
   }
 
   /** The CLI process ended or the iterator threw. Closes what the mapper holds. */
@@ -366,6 +395,42 @@ export class ClaudeMessageMapper {
         if (version !== undefined) e.version = version;
         out.push(e);
         out.push(...this.#usage.apiKeySource(str(msg.apiKeySource))); // R8.3
+        // R7.1: the init lists names only; full rows come from `commands_changed` or the control.
+        const names = this.#commands.init(msg);
+        if (names !== undefined) {
+          const ev: Extract<BackendEvent, { type: 'commands' }> = { type: 'commands', list: names };
+          if (names.every((c) => c.description === undefined)) ev.namesOnly = true;
+          out.push(ev);
+        }
+        // D55: always 'pending' at start (Phase 1 probe2); the panel reads the control for more.
+        if (Array.isArray(msg.mcp_servers)) out.push({ type: 'mcp-status', servers: toMcpServerList(msg.mcp_servers) });
+        break;
+      }
+      case 'commands_changed':
+        // R7.1: the full list again; replace, do not merge (SDK/sdk.d.ts:3875).
+        out.push({ type: 'commands', list: this.#commands.rows(msg.commands) });
+        break;
+      case 'local_command_output': {
+        // Declared (SDK/sdk.d.ts:5584) but not seen on 2.1.318 (probe5); same shape as D69.
+        const text = str(msg.content);
+        if (text === undefined || text === '') break;
+        this.#maybeTurnStart(msg, out);
+        const stepId = str(msg.uuid) ?? `local-${at}`;
+        this.#step = undefined;
+        this.#whole = undefined;
+        out.push({ type: 'step-start', agent: MAIN, stepId, at, synthetic: true });
+        const e: Extract<BackendEvent, { type: 'step-message' }> = {
+          type: 'step-message',
+          agent: MAIN,
+          stepId,
+          blocks: [{ type: 'text', text }],
+          final: true,
+          synthetic: true,
+          localCommand: this.#takeSlash() ?? {},
+        };
+        const uuid = str(msg.uuid);
+        if (uuid !== undefined) e.lastChainId = uuid;
+        out.push(e);
         break;
       }
       case 'status': {
@@ -697,6 +762,16 @@ export class ClaudeMessageMapper {
       if (special) {
         e.synthetic = true;
         if (error !== undefined) e.error = error;
+        // R7.2, D69: a local command's output (no usage; `/context` with its structured twin).
+        const local = localCommandOf(msg);
+        if (local !== undefined) {
+          const sent = this.#takeSlash();
+          if (local.name === undefined && sent !== undefined) {
+            local.name = sent.name;
+            if (sent.args !== '' && local.args === undefined) local.args = sent.args;
+          }
+          e.localCommand = local;
+        }
       } else {
         const whole = this.#whole!;
         const usage = usageFromStart(msg.message?.usage as WireMessage['usage']);

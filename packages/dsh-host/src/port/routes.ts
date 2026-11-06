@@ -280,6 +280,7 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
       }),
     },
     ...usageRoutes(registry),
+    ...commandRoutes(registry),
     ...(controls ? sessionControlRoutes(registry, controls) : []),
   ];
 }
@@ -328,6 +329,236 @@ export function usageRoutes(registry: SessionRegistry): FetchRoute[] {
           return json(500, { error: String((e as Error)?.message ?? e) });
         }
       },
+    },
+  ];
+}
+
+// ---- M6: commands, side questions, MCP, local outputs (R7.1-R7.4) ----
+
+/** R7.1: the agent's commands and their place in the `/` menu (`?session=…`). Never spawns. */
+export const COMMANDS_ROUTE = '/api/raw-agent/commands';
+/** R7.3, D54: POST `{question}` asks; GET lists this session's side questions (`?session=…`). */
+export const SIDE_QUESTION_ROUTE = '/api/raw-agent/side-question';
+/** D54: cancel one open side question (`?session=…&id=…`). */
+export const SIDE_QUESTION_CANCEL_ROUTE = '/api/raw-agent/side-question-cancel';
+/** R7.4, D55: the MCP servers (`?session=…`). Never spawns. */
+export const MCP_ROUTE = '/api/raw-agent/mcp';
+/** D55: `?session=…&server=…`. */
+export const MCP_RECONNECT_ROUTE = '/api/raw-agent/mcp-reconnect';
+/** D55: `?session=…&server=…&enabled=true|false`. Saved by the agent itself, never by us. */
+export const MCP_TOGGLE_ROUTE = '/api/raw-agent/mcp-toggle';
+/** D55: start a sign-in (`?session=…&server=…`), **unverified** live. */
+export const MCP_AUTH_ROUTE = '/api/raw-agent/mcp-auth';
+/** D55: POST `{server, url}`: the provider's final redirect address, pasted by the user. */
+export const MCP_AUTH_CALLBACK_ROUTE = '/api/raw-agent/mcp-auth-callback';
+/** R7.2: one structured local-command output (`?session=…&id=…`), display-only. */
+export const LOCAL_OUTPUT_ROUTE = '/api/raw-agent/local-output';
+
+/** The longest MCP server name or callback address a route accepts. */
+const MAX_MCP_TEXT = 4096;
+const MAX_SIDE_BODY = 128 * 1024;
+
+/**
+ * Read a JSON body of at most `max` bytes. A declared larger length is refused before reading,
+ * and the stream is read only up to the limit (M6 review: no whole-body read before the check).
+ */
+export async function readJson(request: Request, max: number): Promise<unknown> {
+  const declared = Number(request.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > max) throw new RangeError('the body is too large');
+  const body = request.body;
+  if (!body) return JSON.parse(await request.text());
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel().catch(() => undefined);
+      throw new RangeError('the body is too large');
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(all));
+}
+
+/**
+ * M6 routes over the Host registry. A session id names only a runtime the registry holds (D62).
+ * None of them starts a process (rule 9, D4) or writes the host log; the side question's answer
+ * is held in memory only (D24, D54). MCP actions call the agent's own controls, never a settings
+ * write (rule 2, D55).
+ */
+export function commandRoutes(registry: SessionRegistry): FetchRoute[] {
+  const missing = () => json(404, { error: 'not a session of this plugin' });
+  const lookup = (request: Request) => {
+    const url = new URL(request.url);
+    const id = url.searchParams.get('session');
+    return { url, id, runtime: id ? registry.get(id) : undefined };
+  };
+  const guard = async (fn: () => Promise<Response>) => {
+    try {
+      return await fn();
+    } catch (e) {
+      return json(500, { error: String((e as Error)?.message ?? e) });
+    }
+  };
+  const mcpStatusOf = (code: string) => (code === 'unknown-server' ? 404 : code === 'failed' ? 502 : 409); // not-running, unsupported
+  const serverParam = (url: URL) => {
+    const s = url.searchParams.get('server');
+    return s && s.length <= MAX_MCP_TEXT ? s : undefined;
+  };
+  return [
+    {
+      path: COMMANDS_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.commandsAnswer !== 'function') return json(409, { error: 'this runtime has no commands' });
+          return json(200, await runtime.commandsAnswer());
+        }),
+    },
+    {
+      path: SIDE_QUESTION_ROUTE,
+      methods: ['GET', 'POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.askSideQuestion !== 'function' || typeof runtime.sideQuestions !== 'function')
+            return json(409, { error: 'this runtime has no side questions' });
+          if (request.method !== 'POST') return json(200, runtime.sideQuestions());
+          let body: unknown;
+          try {
+            body = await readJson(request, MAX_SIDE_BODY);
+          } catch {
+            return json(400, { error: 'the body must be JSON: {"question": "…"}' });
+          }
+          const question = (body as { question?: unknown } | null)?.question;
+          if (typeof question !== 'string') return json(400, { error: 'question must be text' });
+          // Not tied to the request: the question runs to its answer even when the page that
+          // asked it closes (the panel reads it back); the user cancels with the cancel route.
+          const asked = runtime.askSideQuestion(question);
+          // A refusal resolves at once; an answer takes a model call, so the route answers 202
+          // while the question is open and the answer reaches the page on the interaction
+          // channel (`side`). The composer's `/btw` claim does not wait for the model.
+          const r = await Promise.race([asked, new Promise<undefined>((done) => setTimeout(() => done(undefined), 0))]);
+          const side = runtime.sideQuestions();
+          if (r === undefined) {
+            const entry = side.entries.at(-1);
+            return json(202, { ok: true, ...(entry ? { entry } : {}), side });
+          }
+          if (r.ok) return json(r.entry.status === 'answered' ? 200 : 202, { ...r, side });
+          return json(r.code === 'busy' || r.code === 'unsupported' ? 409 : 400, { ...r, side });
+        }),
+    },
+    {
+      path: SIDE_QUESTION_CANCEL_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { url, id, runtime } = lookup(request);
+          const entry = url.searchParams.get('id');
+          if (!id || !entry) return json(400, { error: 'missing session or id' });
+          if (!runtime) return missing();
+          if (typeof runtime.cancelSideQuestion !== 'function') return json(409, { error: 'no side questions' });
+          const ok = runtime.cancelSideQuestion(entry);
+          return json(ok ? 200 : 409, { ok, side: runtime.sideQuestions?.() });
+        }),
+    },
+    {
+      path: MCP_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.mcp !== 'function') return json(409, { error: 'this runtime has no MCP data' });
+          return json(200, await runtime.mcp());
+        }),
+    },
+    ...(
+      [
+        [MCP_RECONNECT_ROUTE, 'reconnect'],
+        [MCP_TOGGLE_ROUTE, 'toggle'],
+        [MCP_AUTH_ROUTE, 'authenticate'],
+      ] as const
+    ).map(([path, action]): FetchRoute => ({
+      path,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { url, id, runtime } = lookup(request);
+          const server = serverParam(url);
+          if (!id || server === undefined) return json(400, { error: 'missing session or server' });
+          if (!runtime) return missing();
+          if (typeof runtime.mcpAction !== 'function') return json(409, { error: 'this runtime has no MCP controls' });
+          let arg: { enabled: boolean } | undefined;
+          if (action === 'toggle') {
+            const enabled = url.searchParams.get('enabled');
+            if (enabled !== 'true' && enabled !== 'false') return json(400, { error: 'enabled must be true or false' });
+            arg = { enabled: enabled === 'true' };
+          }
+          const r = await runtime.mcpAction(action, server, arg);
+          return json(r.ok ? 200 : mcpStatusOf(r.code), r);
+        }),
+    })),
+    {
+      path: MCP_AUTH_CALLBACK_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.mcpAction !== 'function') return json(409, { error: 'this runtime has no MCP controls' });
+          let body: unknown;
+          try {
+            body = await readJson(request, MAX_MCP_TEXT * 2);
+          } catch {
+            return json(400, { error: 'the body must be JSON: {"server": "…", "url": "…"}' });
+          }
+          const b = (body ?? {}) as { server?: unknown; url?: unknown };
+          if (typeof b.server !== 'string' || b.server === '' || b.server.length > MAX_MCP_TEXT)
+            return json(400, { error: 'server must be a server name' });
+          if (typeof b.url !== 'string' || !/^https?:\/\//i.test(b.url) || b.url.length > MAX_MCP_TEXT)
+            return json(400, { error: 'url must be the http(s) address the browser ended on' });
+          const r = await runtime.mcpAction('auth-callback', b.server, { callbackUrl: b.url });
+          return json(r.ok ? 200 : mcpStatusOf(r.code), r);
+        }),
+    },
+    {
+      path: LOCAL_OUTPUT_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { url, id, runtime } = lookup(request);
+          const out = url.searchParams.get('id');
+          if (!id || !out) return json(400, { error: 'missing session or id' });
+          if (!runtime) return missing();
+          const found = runtime.localOutput?.(out);
+          // Gone after a restart: the command's text stays in the log (display-only path).
+          if (!found) return json(404, { error: 'this output is no longer kept; its text is in the conversation' });
+          return json(200, found);
+        }),
     },
   ];
 }
@@ -436,6 +667,10 @@ export function channelLine(view: SessionView): string {
     workflows: view.workflows ?? [],
     // M5: the pill's small usage summary, so context and totals update without a poll (D59).
     usage: view.usage ?? null,
+    // M6: side questions (D54), the command list version (R7.1) and the MCP summary (R7.4).
+    side: view.side ?? null,
+    menu: view.menu ?? null,
+    mcp: view.mcp ?? null,
   };
   return `${JSON.stringify(line)}\n`;
 }

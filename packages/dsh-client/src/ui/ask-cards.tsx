@@ -168,6 +168,9 @@ export function PreviewView(props: { preview: Preview; actions: HostActions }): 
     const changed = p.lines.some((l) => l.op !== ' ');
     const hunks = full || !changed ? p.lines : diffHunks(p.lines);
     const folded = hunks.length < p.lines.length;
+    // Leftover M2: line numbers, counted from the start of the edited text (all the input tells).
+    const numbered = p.lines.some((l) => l.old !== undefined || l.new !== undefined);
+    const width = String(p.lines.reduce((m, l) => Math.max(m, l.old ?? 0, l.new ?? 0), 0)).length;
     const rows = hunks.map((l, i) =>
       l.op === '…' ? (
         <div key={i} style={css.diffGap}>
@@ -175,6 +178,11 @@ export function PreviewView(props: { preview: Preview; actions: HostActions }): 
         </div>
       ) : (
         <div key={i} style={l.op === '+' ? css.diffAdd : l.op === '-' ? css.diffDel : undefined} data-op={l.op}>
+          {numbered && (
+            <span style={css.diffNum} data-raw-agent="diff-num" aria-hidden="true">
+              {`${l.old ?? ''}`.padStart(width)} {`${l.new ?? ''}`.padStart(width)}{' '}
+            </span>
+          )}
           {`${l.op} ${l.text}`}
         </div>
       ),
