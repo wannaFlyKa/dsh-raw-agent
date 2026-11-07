@@ -9,7 +9,18 @@ import { agentSelect } from '../agents-model.js';
 import { SETTINGS, type RawAgentApi } from '../api.js';
 import { restoreReturnedDrafts, takePrefill, type DraftTarget } from '../drafts.js';
 import type { SessionControlStore, SessionStores } from '../session-store.js';
-import { START_OPTION, effortSelect, modeSelect, modelSelect, statusLine, type SelectModel } from '../view-model.js';
+import {
+  START_OPTION,
+  effortChip,
+  effortSelect,
+  modeChip,
+  modeSelect,
+  modelChip,
+  modelSelect,
+  statusLine,
+  type ChipModel,
+  type SelectModel,
+} from '../view-model.js';
 import type { HostActions } from './actions.js';
 import { AskPanel } from './ask-cards.js';
 import { SettingsPanel } from './settings-panel.js';
@@ -18,7 +29,7 @@ import { McpPanel } from './mcp-panel.js';
 import { SidePanel } from './side-panel.js';
 import { exitBanner } from '../lifecycle-model.js';
 import { RewindPanel } from './rewind-panel.js';
-import { css } from './style.js';
+import { CHIP_CLASS, CHIP_CSS, STATUS_CLASS, css } from './style.js';
 import type { PluginApi } from '../plugin-routes.js';
 
 export interface ControlsProps {
@@ -38,35 +49,105 @@ export interface ControlsProps {
   stores?: SessionStores;
   /** R9.2: the plugin routes (the settings dialog shows the plugin access section). */
   plugin?: PluginApi;
+  /**
+   * DSH's session-slot `useProjection` (standard prop): the `agentPreset` value tells a session
+   * that just picked our preset before our route knows it (0.1.1).
+   */
+  useProjection?: (key: string) => unknown;
+  /** Test seam: the status note's fade timers. */
+  fadeTimers?: FadeTimers;
 }
 
+const Chevron = () => (
+  <svg viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+    <path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+  </svg>
+);
+
+/**
+ * A compact picker chip (0.1.1): the short value, a dot when it comes from the user's settings,
+ * and an invisible native `<select>` on top, so the browser's list, the keyboard and `showPicker`
+ * work as before. The full text is in the tooltip and the accessible name.
+ */
 function Picker(props: {
   model: SelectModel;
+  chip: ChipModel;
   label: string;
   disabled: boolean;
   onPick(value: string): void;
   testId: string;
   selectRef?: React.Ref<HTMLSelectElement>;
 }): React.ReactElement {
-  const { model } = props;
+  const { model, chip } = props;
+  const from = chip.fromSettings ? ', from your settings' : '';
+  const tip = `${chip.fromSettings ? 'From your settings: ' : ''}${chip.full}. ${model.title}`;
   return (
-    <select
-      ref={props.selectRef}
-      aria-label={props.label}
-      title={model.title}
-      style={css.select}
-      value={model.value}
-      disabled={props.disabled}
-      data-raw-agent={props.testId}
-      onChange={(e) => props.onPick(e.currentTarget.value)}
+    <span
+      className={CHIP_CLASS}
+      title={tip}
+      data-raw-agent={`${props.testId}-chip`}
+      {...(chip.risk ? { 'data-risk': chip.risk } : {})}
+      {...(chip.fromSettings ? { 'data-from-settings': '' } : {})}
+      {...(chip.sessionMode ? { 'data-session-mode': '' } : {})}
+      {...(props.disabled ? { 'data-disabled': '' } : {})}
     >
-      {model.options.map((o) => (
-        <option key={o.value} value={o.value} disabled={o.disabled} title={o.hint}>
-          {o.label}
-        </option>
-      ))}
-    </select>
+      <span data-chip-text="" aria-hidden="true">
+        {chip.text}
+      </span>
+      {chip.fromSettings && <span data-chip-dot="" aria-hidden="true" />}
+      <Chevron />
+      <select
+        ref={props.selectRef}
+        aria-label={`${props.label}: ${chip.full}${from}`}
+        title={tip}
+        value={model.value}
+        disabled={props.disabled}
+        data-raw-agent={props.testId}
+        onChange={(e) => props.onPick(e.currentTarget.value)}
+      >
+        {model.options.map((o) => (
+          <option key={o.value} value={o.value} disabled={o.disabled} title={o.hint}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </span>
   );
+}
+
+export interface FadeTimers {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+}
+
+/** How long a status note stays in the row before it fades (errors stay longer). */
+export const NOTE_SHOW_MS = 5000;
+export const ERROR_SHOW_MS = 12000;
+const FADE_MS = 400;
+
+/**
+ * 0.1.1: a status note shows, then fades out of the row after a few seconds. It stays in the
+ * `role="status"` live region (visually hidden), so screen readers still get it.
+ */
+// Wrapped: a browser's `setTimeout` called as a method of another object throws "Illegal invocation".
+export const FADE_TIMERS: FadeTimers = {
+  set: (fn, ms) => setTimeout(fn, ms),
+  clear: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),
+};
+
+export function useFade(text: string | undefined, error: boolean, timers: FadeTimers = FADE_TIMERS) {
+  const [phase, setPhase] = React.useState<'shown' | 'fading' | 'faded'>('shown');
+  React.useEffect(() => {
+    setPhase('shown');
+    if (text === undefined) return undefined;
+    const a = timers.set(() => setPhase('fading'), error ? ERROR_SHOW_MS : NOTE_SHOW_MS);
+    const b = timers.set(() => setPhase('faded'), (error ? ERROR_SHOW_MS : NOTE_SHOW_MS) + FADE_MS);
+    return () => {
+      timers.clear(a);
+      timers.clear(b);
+    };
+  }, [text, error, timers]);
+  return phase;
 }
 
 /**
@@ -158,31 +239,45 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   }, [prefillSeq, inputActions, store]);
   // DSH's own permission control does not apply to this agent: hide it while our controls show
   // (only in our sessions; a Standard session renders no controls, so its seat stays).
+  // 0.1.1: DSH's `agentPreset` projection says the session is ours before our route does (a new
+  // session that just picked our preset): hide the seat at once, and read the route again.
   const barRef = React.useRef<HTMLSpanElement | null>(null);
+  const preset = props.useProjection ? props.useProjection('agentPreset') : undefined;
+  const presetOurs = actions.isOurPreset?.(preset) === true;
+  React.useEffect(() => store.notePreset(presetOurs), [store, presetOurs]);
   const ready = snap.status === 'ready' && info !== undefined;
+  const seatOff = ready || (presetOurs && snap.status !== 'error');
   React.useEffect(() => {
-    if (!ready || !actions.hideNativeSeat) return undefined;
+    if (!seatOff || !actions.hideNativeSeat) return undefined;
     const hidden = actions.hideNativeSeat(barRef.current);
     return () => hidden.undo();
-  }, [ready, actions]);
-  if (snap.status !== 'ready' || !info) return null;
+  }, [seatOff, ready, actions]);
+  const draftNote =
+    dropped > 0
+      ? `The stopped message had ${dropped === 1 ? 'an attachment' : `${dropped} attachments`} that cannot go back into the composer; attach ${dropped === 1 ? 'it' : 'them'} again.`
+      : undefined;
+  const status = info
+    ? (snap.error ?? statusLine(info, { exitShown: exitBanner(info) !== undefined }) ?? draftNote ?? snap.note)
+    : undefined;
+  // Errors (a refused choice, a warning notice such as a refused `/permission`) stay longer.
+  const notice = info?.view.live.notice;
+  const statusError =
+    status !== undefined && (status === snap.error || (notice?.level === 'warning' && status.endsWith(notice.text)));
+  const phase = useFade(status, statusError, props.fadeTimers);
+  if (snap.status !== 'ready' || !info)
+    return seatOff ? <span data-raw-agent="controls-pending" ref={barRef} style={{ display: 'none' }} /> : null;
   const choose = (c: SessionChoiceRequest) => void store.choose(c);
   const model = modelSelect(info);
   const effort = effortSelect(info);
   const mode = modeSelect(info);
   const agent = agentSelect(info);
-  const draftNote =
-    dropped > 0
-      ? `The stopped message had ${dropped === 1 ? 'an attachment' : `${dropped} attachments`} that cannot go back into the composer; attach ${dropped === 1 ? 'it' : 'them'} again.`
-      : undefined;
-  const status =
-    snap.error ?? statusLine(info, { exitShown: exitBanner(info) !== undefined }) ?? draftNote ?? snap.note;
   const name = info.backend.displayName;
   const asks = info.view.asks ?? [];
   const inComposer =
     typeof props.asksInComposer === 'function' ? props.asksInComposer() : props.asksInComposer === true;
   return (
     <span style={css.bar} data-raw-agent="controls" ref={barRef}>
+      <style data-raw-agent="chip-style">{CHIP_CSS}</style>
       {asks.length > 0 && !inComposer && (
         <span style={css.ask} data-raw-agent="ask-inline">
           <AskPanel store={store} actions={actions} />
@@ -193,6 +288,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
         selectRef={modelRef}
         label={`${name} model for this session`}
         model={model}
+        chip={modelChip(info)}
         disabled={snap.busy}
         onPick={(value) => {
           if (value === START_OPTION) void store.start();
@@ -204,6 +300,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           testId="effort"
           label={`${name} effort for this session`}
           model={effort}
+          chip={effortChip(info)!}
           disabled={snap.busy}
           onPick={(value) => value !== effort.value && choose({ effort: value === SETTINGS ? null : value })}
         />
@@ -212,6 +309,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
         testId="mode"
         label={`${name} permission mode for this session`}
         model={mode}
+        chip={modeChip(info)}
         disabled={snap.busy}
         onPick={(value) => value !== mode.value && choose({ mode: value })}
       />
@@ -220,6 +318,11 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           testId="agent"
           label={`${name} main-thread agent for this new session`}
           model={agent}
+          chip={{
+            text: agent.options.find((o) => o.value === agent.value)?.label ?? agent.value,
+            fromSettings: false,
+            full: agent.options.find((o) => o.value === agent.value)?.label ?? agent.value,
+          }}
           disabled={snap.busy || agent.locked}
           onPick={(value) => {
             if (value === START_OPTION) void store.start();
@@ -230,7 +333,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       {api.mcp && (
         <button
           type="button"
-          style={css.button}
+          className={CHIP_CLASS}
           data-raw-agent="mcp-button"
           title={`${name} MCP servers and commands`}
           onClick={() => setMcpPanel(true)}
@@ -241,7 +344,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       {(info.view.side?.entries.length ?? 0) > 0 && !sideShown && (
         <button
           type="button"
-          style={css.button}
+          className={CHIP_CLASS}
           data-raw-agent="side-button"
           title="Show the side questions (not part of the conversation)"
           onClick={() => setSideWanted(true)}
@@ -263,7 +366,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       {api.rewind && (
         <button
           type="button"
-          style={css.button}
+          className={CHIP_CLASS}
           data-raw-agent="rewind-button"
           title={`Go back to an earlier message: restore the conversation (a new branch), the code, or both`}
           onClick={() => setRewindPanel(true)}
@@ -273,7 +376,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       )}
       <button
         type="button"
-        style={css.button}
+        className={CHIP_CLASS}
         data-raw-agent="settings-button"
         title={`Open your ${name} settings files (read-only)`}
         onClick={() => setPanel(true)}
@@ -318,7 +421,15 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
         </span>
       )}
       {status && (
-        <span style={css.status} data-raw-agent="status" role="status">
+        <span
+          className={STATUS_CLASS}
+          data-raw-agent="status"
+          role="status"
+          aria-live="polite"
+          data-level={statusError ? 'error' : 'info'}
+          {...(phase === 'fading' ? { 'data-fading': '' } : {})}
+          {...(phase === 'faded' ? { 'data-faded': '' } : {})}
+        >
           {status}
         </span>
       )}

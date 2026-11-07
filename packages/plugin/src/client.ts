@@ -6,7 +6,11 @@
 import { createRawAgentClient } from '@dsh-raw-agent/dsh-client';
 import { toolViewPack } from '@dsh-raw-agent/views-claude';
 
-const client = createRawAgentClient({ name: 'dsh-raw-agent-client', toolViews: [toolViewPack] });
+const client = createRawAgentClient({
+  name: 'dsh-raw-agent-client',
+  toolViews: [toolViewPack],
+  agentNames: ['Claude Code'],
+});
 
 export const name = client.name;
 export const inject = client.inject;

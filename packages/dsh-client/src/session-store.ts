@@ -100,6 +100,7 @@ export class SessionControlStore {
   #channel: AbortController | undefined;
   #channelTimer: unknown;
   #noChannel = false;
+  #presetOurs = false;
 
   constructor(sessionId: string, api: RawAgentApi, timers: TimerApi = defaultTimers, timings: PollTimings = POLL_MS) {
     this.sessionId = sessionId;
@@ -109,6 +110,24 @@ export class SessionControlStore {
   }
 
   getSnapshot = (): SessionSnapshot => this.#snapshot;
+
+  /** 0.1.1: DSH says this session runs one of our presets (its `agentPreset` projection). */
+  get presetOurs(): boolean {
+    return this.#presetOurs;
+  }
+
+  /**
+   * 0.1.1: note what DSH's `agentPreset` projection says. A session that just became ours while
+   * our route still answered 404 is read again at once, not after the 404 back-off (up to 20 s).
+   */
+  notePreset(ours: boolean): void {
+    const was = this.#presetOurs;
+    this.#presetOurs = ours;
+    if (ours && !was && this.#snapshot.status === 'absent') {
+      this.#absentStreak = 0;
+      void this.refresh();
+    }
+  }
 
   subscribe = (listener: () => void): (() => void) => {
     this.#listeners.add(listener);
@@ -299,7 +318,7 @@ export class SessionControlStore {
       const next: Partial<SessionSnapshot> = { busy: false };
       if (r.session) next.info = r.session;
       if (r.ok) {
-        next.note = r.note;
+        next.note = choiceNote(choice, r.note, r.session ?? this.#snapshot.info);
         next.noteProcess = (r.session ?? this.#snapshot.info)?.view.state.process;
       } else next.error = r.error ?? 'the choice was refused';
       this.#set(next);
@@ -473,4 +492,24 @@ export class SessionStores {
     for (const s of this.#stores.values()) s.dispose();
     this.#stores.clear();
   }
+}
+
+/**
+ * 0.1.1: the status note after a choice. A mode switch names the mode ("Permission mode: Plan
+ * mode (this session)"), as our `/permission` answer does; "applied" alone says nothing more.
+ */
+export function choiceNote(
+  choice: SessionChoiceRequest,
+  note: string | undefined,
+  info: SessionInfo | undefined,
+): string | undefined {
+  const rest = (note ?? '')
+    .split('; ')
+    .filter((n) => n !== '' && n !== 'applied')
+    .join('; ');
+  if (choice.mode !== undefined && choice.model === undefined && choice.effort === undefined) {
+    const m = [...(info?.permissionModes ?? []), ...(info?.unavailableModes ?? [])].find((x) => x.id === choice.mode);
+    return `Permission mode: ${m?.label ?? choice.mode} (this session${rest ? `; ${rest}` : ''})`;
+  }
+  return note;
 }

@@ -78,6 +78,7 @@ export { restoreReturnedDrafts, type DraftTarget, type RestoreResult } from './d
 export {
   SessionControlStore,
   SessionStores,
+  choiceNote,
   POLL_MS,
   CHANNEL_RETRY_MS,
   type SessionSnapshot,
@@ -87,7 +88,18 @@ export {
 export { AskCard, AskPanel, PreviewView, PREVIEW_LINES, type AskCardProps } from './ui/ask-cards.js';
 export { Markdown } from './ui/markdown.js';
 export type { HostActions } from './ui/actions.js';
-export { SessionControls, openPicker, type ControlsProps } from './ui/controls.js';
+export {
+  SessionControls,
+  openPicker,
+  useFade,
+  FADE_TIMERS,
+  type FadeTimers,
+  NOTE_SHOW_MS,
+  ERROR_SHOW_MS,
+  type ControlsProps,
+} from './ui/controls.js';
+export { CHIP_CLASS, CHIP_CSS, STATUS_CLASS } from './ui/style.js';
+export { AccessNote, accessNoteText } from './ui/access-note.js';
 export { SettingsPanel, type SettingsPanelProps } from './ui/settings-panel.js';
 export {
   mountClient,
@@ -154,6 +166,13 @@ export {
   LIFECYCLE_ENTRY_ID,
   LIFECYCLE_SLOT,
   LIFECYCLE_ORDER,
+  modePopup,
+  isOurPreset,
+  OUR_PRESET_PREFIX,
+  SETTINGS_GENERAL_SLOT,
+  ACCESS_NOTE_ID,
+  ACCESS_NOTE_ORDER,
+  type ModePopupSpec,
   type WorkflowNodeData,
   type AskInteraction,
   type ComposerOwner,

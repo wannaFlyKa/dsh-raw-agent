@@ -8,6 +8,7 @@ import { wakeTriggerOf, type ChildAddress, type WakeTrigger } from '../agents-mo
 import { createApi, type FetchFn, type RawAgentApi } from '../api.js';
 import { ChildLinks } from '../child-links.js';
 import { SessionStores, type SessionControlStore } from '../session-store.js';
+import { modePopupOptions, type ModePopupOption } from '../view-model.js';
 import { UsageReaders } from '../usage-reader.js';
 import type { HostActions } from '../ui/actions.js';
 import { AgentsHeader } from '../ui/agents-panel.js';
@@ -20,6 +21,7 @@ import { RAW_AGENT_CLIENT_SERVICE, type ToolViewPack } from '@dsh-raw-agent/core
 import { createRawAgentClientService } from '../client-service.js';
 import { createPluginApi, type PluginApi } from '../plugin-routes.js';
 import { GrantsPanel } from '../ui/grants-panel.js';
+import { AccessNote } from '../ui/access-note.js';
 import { PluginExtras } from '../ui/plugin-extras.js';
 import { localCommandOf, messageText, type LocalCommandData } from '../commands-model.js';
 import { LocalCommandText, LocalCommandView } from '../ui/local-command.js';
@@ -158,7 +160,7 @@ export function markToolCard(
     const style = doc.createElement('style');
     style.id = TOOL_STYLE_ID;
     style.textContent =
-      `[${TOOL_WAITING_ATTR}]{outline:2px solid var(--raw-agent-ask-border, var(--dsw-alias-border-warning, orange));` +
+      `[${TOOL_WAITING_ATTR}]{outline:2px solid var(--raw-agent-ask-border, var(--dsw-alias-state-warn-primary, orange));` +
       `outline-offset:2px;border-radius:8px}`;
     doc.head?.appendChild(style);
   }
@@ -329,17 +331,65 @@ interface DecorationLike {
   available(session: { sessionId?: string }): boolean;
 }
 
+/** The popup DSH's command runtime draws for a decoration (`PopupSelectSpec`, ui-commands contract). */
+export interface ModePopupSpec {
+  kind: 'popupSelect';
+  searchLabels?(): { placeholder: string; empty: string; noResults: string };
+  options(session: { sessionId?: string }, signal?: unknown): Promise<readonly ModePopupOption[]>;
+  onSelect(option: { id: string }, session: { sessionId?: string }): void | Promise<void>;
+}
+
+/**
+ * 0.1.1: the `/permission` popup of our sessions: the agent's own modes only, and a pick goes the
+ * mode chip's way (`choose`, `setPermissionMode`, this session only). A blocked mode is not sent;
+ * the status line says why.
+ */
+export function modePopup(stores: SessionStores): ModePopupSpec {
+  const infoOf = async (sessionId: string) => {
+    const store = stores.get(sessionId);
+    if (store.getSnapshot().info === undefined) await store.refresh();
+    return store.getSnapshot().info;
+  };
+  return {
+    kind: 'popupSelect',
+    searchLabels: () => ({
+      placeholder: 'Search permission modes',
+      empty: 'The agent has not listed its permission modes yet.',
+      noResults: 'No permission mode matches.',
+    }),
+    async options(session) {
+      const info = typeof session?.sessionId === 'string' ? await infoOf(session.sessionId) : undefined;
+      if (!info) throw new Error('the agent is not attached to this session yet; try again in a moment');
+      return modePopupOptions(info);
+    },
+    async onSelect(option, session) {
+      if (typeof session?.sessionId !== 'string') return;
+      const store = stores.get(session.sessionId);
+      const info = store.getSnapshot().info;
+      const row = info ? modePopupOptions(info).find((o) => o.id === option.id) : undefined;
+      if (row?.blocked !== undefined) {
+        store.showNote(`${row.label}: ${row.blocked} Nothing changed.`);
+        return;
+      }
+      if (row?.active) return;
+      await store.choose({ mode: option.id });
+    },
+  };
+}
+
 /**
  * Keep DSH's preset popup out of our sessions (R1.4 leftover, CLAUDE.md §4).
  *
  * DSH's client hangs a popup on the host command `permission` (`command.decorate`, one per name;
  * a second one throws, `P/dsh-client-ui-commands/lib/client.js:1424`). In our sessions the host
  * command is our own (the Host shadows it per agent), but the popup still opened on a bare
- * `/permission` or a menu pick and marked a DSH preset ("Workspace Write") as active, a level the
- * agent never applies. The command runtime reads the decoration through `live.decorations.get`
- * (lines 1521, 1602) and asks `available(session)` each time. We answer "not available" for our
- * sessions only; DSH then treats `/permission` as a plain host command with an argument (our
- * command: it shows the agent's mode, or switches it). Other sessions keep DSH's popup.
+ * `/permission` or a menu pick and offered DSH presets ("Workspace Write", "Full access"), levels
+ * the agent never applies. The command runtime reads the decoration through `live.decorations.get`
+ * (lines 1521, 1602), asks `available(session)` and then reads `ui` on the same object, in one
+ * synchronous step. For our sessions only, the decoration we hand back is available and its `ui`
+ * is `ours` (0.1.1: a popup of the agent's own modes; without it, no popup and `/permission` is a
+ * plain host command with an argument). Other sessions keep DSH's popup. A typed argument
+ * (`/permission plan`) still goes to our host command.
  *
  * This reads a DSH internal (`commandUi.live.decorations`, a `Map`). If the shape is not there,
  * nothing changes and the caller is told (returns `undefined`).
@@ -347,25 +397,29 @@ interface DecorationLike {
 export function guardPresetDecoration(
   commandUi: unknown,
   isOurs: (sessionId: string) => boolean,
+  ours?: ModePopupSpec,
 ): (() => void) | undefined {
   const map = (commandUi as { live?: { decorations?: unknown } } | undefined)?.live?.decorations;
   if (!(map instanceof Map)) return undefined;
   const base = map.get as (key: unknown) => unknown;
-  const wrapped = new WeakMap<object, DecorationLike>();
+  const isOur = (session: { sessionId?: string } | undefined) =>
+    typeof session?.sessionId === 'string' && isOurs(session.sessionId);
   const get = function (this: Map<unknown, unknown>, key: unknown): unknown {
-    const found = base.call(this, key) as DecorationLike | undefined;
+    const found = base.call(this, key) as (DecorationLike & { ui?: unknown }) | undefined;
     if (key !== PRESET_DECORATION || typeof found?.available !== 'function') return found;
-    let w = wrapped.get(found);
-    if (!w) {
-      const inner = found;
-      w = {
-        ...inner,
-        available: (session) =>
-          !(typeof session?.sessionId === 'string' && isOurs(session.sessionId)) && inner.available(session),
-      };
-      wrapped.set(found, w);
-    }
-    return w;
+    // A fresh wrapper per read keeps the `available` answer and the `ui` read together.
+    let asked: { sessionId?: string } | undefined;
+    return {
+      ...found,
+      available: (session: { sessionId?: string }) => {
+        asked = session;
+        if (isOur(session)) return ours !== undefined;
+        return found.available(session);
+      },
+      get ui() {
+        return ours !== undefined && isOur(asked) ? ours : found.ui;
+      },
+    };
   };
   Object.defineProperty(map, 'get', { value: get, configurable: true, writable: true });
   return () => {
@@ -440,9 +494,15 @@ export function guardModelContribution(
 
 /** A session is ours once our route answered for it (the controls store is `ready`). */
 export function isOurSession(stores: SessionStores, sessionId: string): boolean {
-  const snap = stores.peek(sessionId)?.getSnapshot();
-  return snap?.info !== undefined && snap.status !== 'absent';
+  const store = stores.peek(sessionId);
+  const snap = store?.getSnapshot();
+  return (snap?.info !== undefined && snap.status !== 'absent') || store?.presetOurs === true;
 }
+
+/** Our preset ids (`raw-agent-<kind>`, D81; dsh-host `presetIdFor`). */
+export const OUR_PRESET_PREFIX = 'raw-agent-';
+export const isOurPreset = (preset: unknown): boolean =>
+  typeof preset === 'string' && preset.startsWith(OUR_PRESET_PREFIX);
 
 // --- D38: Shift+Tab, the agent's "next mode" key -------------------------------------------------
 
@@ -928,6 +988,7 @@ export function hostActions(ctx: ClientContext): HostActions {
     },
     copy: copyText,
     hideNativeSeat: (el) => hideNativeSeat(el),
+    isOurPreset,
     markToolCall: (callId, label) => markToolCard(callId, label),
     revealToolCall(callId) {
       const el = findToolCard(callId);
@@ -1003,7 +1064,17 @@ export interface MountClientOptions {
   toolViews?: readonly ToolViewPack[];
   /** Test seam. */
   api?: RawAgentApi;
+  /** 0.1.1: the agents' display names, for the note under DSH's access setting. */
+  agentNames?: readonly string[];
 }
+
+/**
+ * 0.1.1: DSH's access row in Settings > General (`P/dsh-client-ui-permission-presets`,
+ * `settings.general.item` id `permission`, order -20). Our note sits right after it.
+ */
+export const SETTINGS_GENERAL_SLOT = 'settings.general.item';
+export const ACCESS_NOTE_ID = 'raw-agent-access-note';
+export const ACCESS_NOTE_ORDER = -19;
 
 /** Register the session controls. Returns the stores (tests). */
 export function mountClient(ctx: ClientContext, options: MountClientOptions = {}): SessionStores {
@@ -1077,7 +1148,7 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
   // R1.4 leftover: no DSH preset popup on `/permission` in our sessions.
   withService('commandUi', (svc, scope) => {
     scope.effect?.(() => {
-      const undo = guardPresetDecoration(svc, (id) => isOurSession(stores, id));
+      const undo = guardPresetDecoration(svc, (id) => isOurSession(stores, id), modePopup(stores));
       if (!undo) console.warn('[raw-agent] DSH command UI has no decoration map; /permission may open DSH presets');
       return undo ?? (() => {});
     }, 'raw-agent: /permission preset popup');
@@ -1225,6 +1296,18 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
         inject: () => ({ plugin, copy: actions.copy }),
       },
       GrantsPanel as React.ComponentType<never>,
+    ),
+  );
+  // 0.1.1: DSH's access setting does not control our agents; say so under it.
+  ctx.slots.inject(SETTINGS_GENERAL_SLOT, () =>
+    ctx.slots.register(
+      {
+        name: SETTINGS_GENERAL_SLOT,
+        id: ACCESS_NOTE_ID,
+        order: ACCESS_NOTE_ORDER,
+        inject: () => ({ agentNames: options.agentNames ?? [] }),
+      },
+      AccessNote as React.ComponentType<never>,
     ),
   );
   // R9.1, D67: a slot of our own for other plugins. A failed declaration (a DSH version whose

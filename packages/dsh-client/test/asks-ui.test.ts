@@ -828,6 +828,7 @@ describe('port: pending interaction, takeover and Shift+Tab', () => {
       'conversation.input.dock', // M7: the lifecycle banner (M8: the card stack above the composer)
       'conversation.input.left',
       'settings.section', // M8 (R9.2): plugin access
+      'settings.general.item', // 0.1.1: the note under DSH's access setting
       'conversation.input.left', // M8 (R9.1): our slot for other plugins
     ]);
     // DSH tries composer chain entries in ascending priority; ui-subagent's one-shot read-only

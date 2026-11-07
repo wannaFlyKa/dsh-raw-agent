@@ -283,9 +283,9 @@ describe('api and store', () => {
     const store = new SessionControlStore('s1', createApi(fetchFn), manualTimers().timers);
     await store.refresh();
     await store.choose({ mode: 'plan' });
-    expect(store.getSnapshot().note).toBe('applies when Agent starts');
+    expect(store.getSnapshot().note).toBe('Permission mode: Plan (this session; applies when Agent starts)');
     await store.refresh();
-    expect(store.getSnapshot().note).toBe('applies when Agent starts'); // still not started
+    expect(store.getSnapshot().note).toMatch(/applies when Agent starts/); // still not started
     running = true;
     await store.refresh();
     expect(store.getSnapshot().note).toBeUndefined();
@@ -394,6 +394,7 @@ describe('port', () => {
             'conversation.composer.dock',
             'conversation.input.dock',
             'settings.section',
+            'settings.general.item',
           ]).toContain(key);
           cb();
           return () => {};
@@ -407,11 +408,17 @@ describe('port', () => {
       effect: (fn: () => () => void) => void effects.push(fn),
     };
     const stores = mountClient(ctx as never, { fetch: fakeFetch(() => ({ status: 404, body: {} })).fetchFn });
-    expect(registered).toHaveLength(6);
+    expect(registered).toHaveLength(7);
     // R9.2: the plugin access page in DSH's settings panel.
     expect(registered[4]!.options).toMatchObject({ name: 'settings.section', id: 'raw-agent-plugin-access' });
-    // R9.1: our own list slot for other plugins, declared by its own small entry.
+    // 0.1.1: the note under DSH's access setting.
     expect(registered[5]!.options).toMatchObject({
+      name: 'settings.general.item',
+      id: 'raw-agent-access-note',
+      order: -19,
+    });
+    // R9.1: our own list slot for other plugins, declared by its own small entry.
+    expect(registered[6]!.options).toMatchObject({
       name: 'conversation.input.left',
       id: 'raw-agent-plugin-extras',
       children: { 'raw-agent.controls.extra': { kind: 'list', scope: 'session' } },

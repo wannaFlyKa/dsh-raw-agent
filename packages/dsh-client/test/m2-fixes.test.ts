@@ -79,11 +79,25 @@ describe('R1.4 leftover: DSH preset popup', () => {
     expect(Object.hasOwn(ui.live.decorations, 'get')).toBe(false);
   });
 
-  it('the same wrapper object is returned for one decoration (stable identity)', () => {
+  it("0.1.1: our sessions get the agent-mode popup; other sessions keep DSH's", async () => {
     const ui = fakeCommandUi();
-    guardPresetDecoration(ui, () => true);
-    ui.decorate(PRESET_DECORATION, () => true);
-    expect(ui.live.decorations.get(PRESET_DECORATION)).toBe(ui.live.decorations.get(PRESET_DECORATION));
+    const popup = { kind: 'popupSelect' as const, options: async () => [], onSelect: () => {} };
+    guardPresetDecoration(ui, (id) => id === 'ours', popup);
+    const dshUi = { kind: 'popupSelect', name: 'dsh presets' };
+    ui.live.decorations.set(PRESET_DECORATION, { name: PRESET_DECORATION, available: () => true, ui: dshUi } as never);
+    // DSH asks `available` and then reads `ui` on the same object.
+    const forOurs = ui.live.decorations.get(PRESET_DECORATION) as unknown as {
+      available(s: unknown): boolean;
+      ui: unknown;
+    };
+    expect(forOurs.available({ sessionId: 'ours' })).toBe(true);
+    expect(forOurs.ui).toBe(popup);
+    const forOther = ui.live.decorations.get(PRESET_DECORATION) as unknown as {
+      available(s: unknown): boolean;
+      ui: unknown;
+    };
+    expect(forOther.available({ sessionId: 'standard' })).toBe(true);
+    expect(forOther.ui).toBe(dshUi);
   });
 
   it('an unknown command runtime shape changes nothing', () => {

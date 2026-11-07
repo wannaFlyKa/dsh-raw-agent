@@ -204,7 +204,13 @@ export function statusLine(info: SessionInfo, opts: { exitShown?: boolean } = {}
   // The agent's own line (for example a model it refused and the model it used instead).
   // M8 polish: a lifecycle fact (tasks a DSH stop ended, a branch note, a file restore) shows once,
   // in the lifecycle banner, not here too.
-  if (v.live.notice && v.live.notice.topic !== 'lifecycle') return `${info.backend.displayName}: ${v.live.notice.text}`;
+  // 0.1.1: our `/permission` answer names no agent and gets no prefix; a line that already starts
+  // with the agent's name is not prefixed again.
+  if (v.live.notice && v.live.notice.topic !== 'lifecycle') {
+    const { text, topic } = v.live.notice;
+    const name = info.backend.displayName;
+    return topic === 'mode' || text.startsWith(name) ? text : `${name}: ${text}`;
+  }
   if (info.trust && (v.asks ?? []).every((a) => a.kind !== 'trust'))
     return info.trust.state === 'untrusted'
       ? `${info.backend.displayName} does not trust this folder yet${info.trust.effect ? ` (${info.trust.effect})` : ''}. It asks before it starts.`
@@ -328,5 +334,149 @@ export function keyLayerRows(
     if (k.merged) return { key: k.key, text: `combined from ${names.join(' + ')}` };
     if (names.length === 1) return { key: k.key, text: names[0]! };
     return { key: k.key, text: `${names[0]} (overrides ${names.slice(1).join(', ')})` };
+  });
+}
+
+// --- 0.1.1: compact chips ----------------------------------------------------------------------
+
+/** What one compact chip shows; the full text goes in its tooltip and accessible name. */
+export interface ChipModel {
+  /** The short value, for example "Opus 5.5", "xhigh", "Auto". */
+  text: string;
+  /** The value comes from the user's settings (no session choice): the chip shows a small dot. */
+  fromSettings: boolean;
+  /** The full text (the picked option's label), for the tooltip and the accessible name. */
+  full: string;
+  /** The mode chip's colour (`PermissionModeInfo.risk`); other chips leave it out. */
+  risk?: 'neutral' | 'plan' | 'caution' | 'danger';
+  /** The effort chip shows a session mode (Claude: ultracode). */
+  sessionMode?: boolean;
+}
+
+const cap = (s: string) => (s === '' ? s : s.charAt(0).toUpperCase() + s.slice(1));
+
+/**
+ * A short model name: "<brand>-opus-5-5" and "global.<vendor>.<brand>-opus-5-5" both give
+ * "Opus 5.5" (the last word, then the version numbers); a one-word alias such as "sonnet" gives
+ * "Sonnet". Other ids are kept (cut at 24 characters). Backend-neutral (D80): no brand names here.
+ */
+export function shortModelName(id: string): string {
+  let s = id.trim().replace(/^.*\//, ''); // an ARN or a path-like id: the last part
+  const wide = /\[1m\]$/i.test(s);
+  s = s
+    .replace(/\[1m\]$/i, '')
+    .replace(/^(?:[a-z]+\.)+/i, '') // region and vendor prefixes ("global.vendor.")
+    .replace(/-v\d+(?::\d+)?$/i, '')
+    .replace(/-\d{8}$/, '');
+  const tail = wide ? ' (1M)' : '';
+  const parts = s.split('-');
+  const words = parts.filter((p) => /^[a-z]+$/i.test(p));
+  const version = parts.filter((p) => /^\d{1,2}$/.test(p));
+  if (words.length >= 2 && version.length >= 1 && words.length + version.length === parts.length)
+    return `${cap(words[words.length - 1]!.toLowerCase())} ${version.join('.')}${tail}`;
+  if (/^[a-z]+$/i.test(s)) return `${cap(s.toLowerCase())}${tail}`;
+  return s.length > 24 ? `${s.slice(0, 23)}…` : `${s}${tail}`;
+}
+
+const selected = (m: SelectModel) => m.options.find((o) => o.value === m.value)?.label ?? m.value;
+
+/** The model chip (R1.4). */
+export function modelChip(info: SessionInfo): ChipModel {
+  const v = info.view;
+  const model = modelSelect(info);
+  const full = selected(model);
+  const chosen = v.choice.model;
+  if (chosen === undefined || chosen === SETTINGS) {
+    const settingsModel =
+      (v.choice.applied.model === undefined && !v.choice.resetPending ? v.live.model : undefined) ??
+      info.settings?.model;
+    return { text: settingsModel ? shortModelName(settingsModel) : 'Model', fromSettings: true, full };
+  }
+  const running = v.live.model;
+  const sent = v.choice.applied.model === chosen || v.choice.refused?.model === chosen;
+  // The agent runs another model than the one chosen: name the one that runs (as the picker does).
+  const shown = full.includes('(running: ') && running !== undefined && sent ? running : chosen;
+  return { text: shortModelName(shown), fromSettings: false, full };
+}
+
+/** The effort chip (R1.4, D37): the level id, or the session mode (ultracode) when it is on. */
+export function effortChip(info: SessionInfo): ChipModel | undefined {
+  const effort = effortSelect(info);
+  if (!effort) return undefined;
+  const v = info.view;
+  const full = selected(effort);
+  const modeEntry = info.efforts.find((e) => e.kind === 'mode');
+  const chosen = v.choice.effort;
+  const chosenEntry = info.efforts.find((e) => e.id === chosen);
+  if (chosenEntry?.kind === 'mode') return { text: chosenEntry.label, fromSettings: false, full, sessionMode: true };
+  if (chosen !== undefined) return { text: chosen, fromSettings: false, full };
+  if (modeEntry && v.live.ultracode?.on === true)
+    return { text: modeEntry.label, fromSettings: true, full, sessionMode: true };
+  const level = v.live.effort ?? info.settings?.effort;
+  return { text: level ?? 'Effort', fromSettings: true, full };
+}
+
+/** The permission mode chip (D38, R5.1), coloured by the mode's risk. */
+export function modeChip(info: SessionInfo): ChipModel {
+  const v = info.view;
+  const mode = modeSelect(info);
+  const id = mode.value;
+  const entry = [...info.permissionModes, ...(info.unavailableModes ?? [])].find((m) => m.id === id);
+  const fromSettings =
+    v.choice.pendingMode === undefined &&
+    info.settings?.permissionMode !== undefined &&
+    id === info.settings.permissionMode;
+  return {
+    text: entry?.shortLabel ?? entry?.label ?? (id || 'Mode'),
+    fromSettings,
+    full: entry?.label ?? id,
+    risk: entry?.risk ?? 'neutral',
+  };
+}
+
+/** One row of our `/permission` popup (DSH's popupSelect option shape, kept structural). */
+export interface ModePopupOption {
+  id: string;
+  label: string;
+  detail?: string;
+  badge?: string;
+  active?: boolean;
+  /** Why the row cannot be picked now (shown in `detail`; a pick only says it). */
+  blocked?: string;
+  confirmation?: {
+    title: string;
+    description: string;
+    acknowledgeLabel: string;
+    cancelLabel: string;
+    confirmLabel: string;
+  };
+}
+
+/**
+ * 0.1.1: the `/permission` popup of our sessions lists the agent's own modes only (never DSH's
+ * file-access presets). The current mode is active; the settings mode carries a badge; a mode
+ * that needs a plugin option says so; a `danger` mode asks for a confirmation first.
+ */
+export function modePopupOptions(info: SessionInfo): ModePopupOption[] {
+  const name = info.backend.displayName;
+  const current = currentMode(info);
+  const fromSettings = info.settings?.permissionMode;
+  return [...info.permissionModes, ...(info.unavailableModes ?? [])].map((m) => {
+    const blocked = m.id === current ? undefined : modeBlocked(info, m.id);
+    const o: ModePopupOption = { id: m.id, label: m.label };
+    const detail = [m.description, blocked].filter((x): x is string => x !== undefined && x !== '').join(' ');
+    if (detail !== '') o.detail = detail;
+    if (blocked !== undefined) o.blocked = blocked;
+    if (m.id === fromSettings) o.badge = 'your settings';
+    if (m.id === current) o.active = true;
+    if (m.risk === 'danger' && blocked === undefined && m.id !== current)
+      o.confirmation = {
+        title: `Switch to ${m.label}?`,
+        description: `${name} then runs every tool without asking, for this session only. Your settings files are not changed.`,
+        acknowledgeLabel: 'I understand the risk',
+        cancelLabel: 'Cancel',
+        confirmLabel: `Use ${m.label}`,
+      };
+    return o;
   });
 }

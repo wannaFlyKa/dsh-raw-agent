@@ -71,6 +71,8 @@ describe('client bundle (module-loader format)', () => {
       'register conversation.input.left',
       'settings.section', // M8 (R9.2): plugin access
       'register settings.section',
+      'settings.general.item', // 0.1.1: the note under DSH's access setting
+      'register settings.general.item',
       'conversation.input.left', // M8 (R9.1): our slot for other plugins
       'register conversation.input.left',
     ]);

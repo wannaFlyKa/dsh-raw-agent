@@ -18,6 +18,12 @@ export interface HostActions {
    */
   hideNativeSeat?(el: unknown): { found: boolean; undo(): void };
   /**
+   * 0.1.1: whether a session's agent-preset value (DSH's `agentPreset` projection) is one of our
+   * presets. True lets the controls hide DSH's file-access seat before our route answers (a new
+   * session that just picked our preset), and read our route again at once.
+   */
+  isOurPreset?(preset: unknown): boolean;
+  /**
    * D77: mark the tool card of `callId` as waiting for the user while its ask is open, and
    * return the undo. `found` is false while DSH has not drawn the card yet.
    */
