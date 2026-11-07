@@ -201,7 +201,9 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   }, []);
   // 0.1.2 (D89): the side chat is a tab of DSH's right sidebar where DSH has that API. The
   // inline box stays for older DSH versions, and for a sidebar that could not open the tab.
-  const tabbed = actions.sideChatInSidebar?.() === true;
+  const subscribeSide = React.useCallback((fn: () => void) => actions.onSideChatChange?.(fn) ?? (() => {}), [actions]);
+  const readSide = React.useCallback(() => actions.sideChatInSidebar?.() === true, [actions]);
+  const tabbed = React.useSyncExternalStore(subscribeSide, readSide, readSide);
   const openSide = React.useCallback(
     (quiet?: boolean) => {
       if (tabbed && actions.openSideChat?.(store.sessionId, quiet ? { quiet: true } : {}) === true) return;
@@ -249,7 +251,9 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
     if (!done) return;
     prefillSeen.current = done.seq;
     if (done.kind === 'side') {
-      // Tabbed: the tab takes the text from the store (`takeSidePrefill`) when it mounts.
+      // Tabbed: the tab takes the text from the store (`takeSidePrefill`) when it mounts. Only
+      // once per request: a composer that mounts again does not reopen the tab for old text.
+      if (tabbed && !store.claimSideOpen(done.seq)) return;
       if (tabbed && actions.openSideChat?.(store.sessionId) === true) return;
       if (tabbed) store.takeSidePrefill();
       setSideFallback(true);

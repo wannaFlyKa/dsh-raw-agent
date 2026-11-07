@@ -52,6 +52,8 @@ export interface HostActions {
    * a DSH without that sidebar API: the controls then show the old inline side-question box.
    */
   sideChatInSidebar?(): boolean;
+  /** 0.1.2: call `listener` when `sideChatInSidebar()` may have changed (DSH provided the sidebar late). */
+  onSideChatChange?(listener: () => void): () => void;
   /**
    * 0.1.2: open (or focus) the side chat tab of a session in DSH's right sidebar. With `quiet`,
    * a tab that is already the active one in an open sidebar is left alone (no focus move while

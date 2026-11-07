@@ -163,7 +163,16 @@ describe('side chat tab registration (0.1.2)', () => {
         effect: (fn: () => () => void) => void effects.push(fn),
         inject: (deps: string[], fn: (scope: unknown) => void) => {
           if (deps.some((d) => d !== 'slots' && services[d] === undefined)) return; // Cordis waits
-          fn({ ...Object.fromEntries(deps.map((d) => [d, services[d]])), slots, get: ctx.get, effect: ctx.effect });
+          const r: unknown = fn({
+            ...Object.fromEntries(deps.map((d) => [d, services[d]])),
+            slots,
+            get: ctx.get,
+            effect: ctx.effect,
+          });
+          // Cordis: a plugin body may return nothing, a function, a promise or an iterable; any
+          // other value fails with "Invalid effect" and disposes the scope (0.1.2 live bug).
+          if (r !== undefined && r !== null && typeof r !== 'function' && typeof r !== 'object')
+            throw new TypeError('Invalid effect');
         },
       };
       const warn = console.warn;
@@ -328,5 +337,18 @@ describe('controls: tab or inline box (0.1.2)', () => {
     );
     expect(html).toContain('Side questions');
     expect(html).not.toContain('Side chat</button>');
+  });
+});
+
+describe('prefill opens the tab once (0.1.2)', () => {
+  it('claimSideOpen answers true once per request', async () => {
+    const stores = await readyStores();
+    const store = stores.get('s1');
+    store.requestPrefill('q', 'side-question');
+    const seq = store.getSnapshot().prefillRequest!.seq;
+    expect(store.claimSideOpen(seq)).toBe(true);
+    expect(store.claimSideOpen(seq)).toBe(false); // a remounted composer
+    store.requestPrefill('q2', 'side-question');
+    expect(store.claimSideOpen(seq + 1)).toBe(true);
   });
 });

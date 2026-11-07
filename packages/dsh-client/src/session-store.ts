@@ -97,6 +97,7 @@ export class SessionControlStore {
   #inflight: Promise<void> | undefined;
   #absentStreak = 0;
   #sidePrefillTaken = 0;
+  #sideOpenClaimed = 0;
   readonly #observers = new Set<() => void>();
   #channel: AbortController | undefined;
   #channelTimer: unknown;
@@ -438,6 +439,16 @@ export class SessionControlStore {
     if (!req || req.target !== 'side-question' || req.seq <= this.#sidePrefillTaken) return undefined;
     this.#sidePrefillTaken = req.seq;
     return { text: req.text, seq: req.seq };
+  }
+
+  /**
+   * 0.1.2: the controls open the side chat tab once per side-question prefill. A composer that
+   * mounts again (the user came back to the session) does not open it again for old text.
+   */
+  claimSideOpen(seq: number): boolean {
+    if (seq <= this.#sideOpenClaimed) return false;
+    this.#sideOpenClaimed = seq;
+    return true;
   }
 
   requestPanel(panel: PanelName): void {

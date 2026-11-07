@@ -618,9 +618,19 @@ export function sideChatTabDefinition(): Parameters<SidebarRightTabsService['reg
   };
 }
 
-/** Whether our tab type is registered (set by `mountClient`, read by the host actions). */
+/**
+ * Whether our tab type is registered (set by `mountClient`, read by the host actions). DSH may
+ * provide the sidebar after our controls first render, so the controls listen for the change.
+ */
 export interface SideChatState {
   on: boolean;
+  listeners?: Set<() => void>;
+}
+
+function setSideChat(state: SideChatState, on: boolean): void {
+  if (state.on === on) return;
+  state.on = on;
+  for (const fn of [...(state.listeners ?? [])]) fn();
 }
 
 /**
@@ -1048,6 +1058,11 @@ export function hostActions(ctx: ClientContext, sideChat: SideChatState = { on: 
   const sidebar = () => ctx.get('sidebarRight') as SidebarRight | undefined;
   return {
     sideChatInSidebar: () => sideChat.on && typeof sidebar()?.openTabIn === 'function',
+    onSideChatChange(listener) {
+      const set = (sideChat.listeners ??= new Set());
+      set.add(listener);
+      return () => set.delete(listener);
+    },
     openSideChat: (sessionId, options) => openSideChatTab(sidebar(), sideChat, sessionId, options),
     openPreview(sessionId, path) {
       const s = sidebar();
@@ -1172,9 +1187,9 @@ export function registerSideChat(
       console.warn('[raw-agent] could not register the side chat tab; the inline box stays', error);
       return () => {};
     }
-    state.on = true;
+    setSideChat(state, true);
     return () => {
-      state.on = false;
+      setSideChat(state, false);
       off();
     };
   };
@@ -1351,13 +1366,15 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
   // 0.1.2 (D89): the side chat as a right-sidebar tab, through DSH's public tab-type registry.
   // Without it (an older DSH) the controls keep the inline side-question box.
   if (typeof ctx.inject === 'function')
-    ctx.inject(['sidebarRightTabs', 'sidebarRight', 'slots'], (scope) =>
+    // A block body: a Cordis plugin body that returns a value (here `true`) fails with "Invalid
+    // effect" and its scope is disposed at once, silently (0.1.2 live).
+    ctx.inject(['sidebarRightTabs', 'sidebarRight', 'slots'], (scope) => {
       registerSideChat(scope, scope.sidebarRightTabs ?? scope.get('sidebarRightTabs'), sideChat, {
         stores,
         api,
         agentNames: options.agentNames ?? [],
-      }),
-    );
+      });
+    });
   else
     registerSideChat(ctx, ctx.get('sidebarRightTabs'), sideChat, { stores, api, agentNames: options.agentNames ?? [] });
   // D19: the backends' tool views, drawn only in sessions of their backend (and their children).

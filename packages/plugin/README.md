@@ -104,7 +104,8 @@ overrides:
 - Steer and queue during a turn, images and file attachments, resume after a DSH restart, fork, rewind (with file
   restore), and crash reports.
 - Subagents (as DSH child sessions), agent teams, dynamic workflows and ultracode.
-- The CLI's own `/` commands (built-ins, skills, plugin and MCP commands), `/btw` side questions, the MCP panel.
+- The CLI's own `/` commands (built-ins, skills, plugin and MCP commands), `/btw` side questions (in a **Side chat** tab
+  in DSH's right sidebar, one history per session), the MCP panel.
 - Usage as the CLI reports it: per-turn tokens with cache read and write, cost, per-model usage, the context window, and
   plan limits for subscription accounts.
 - Sessions are native DSH sessions: DSH export, search, fork and other plugins work with them.
@@ -118,7 +119,8 @@ overrides:
 - **DSH's own model seat and `/model`** change the profile default, not this session. Use the chips in the composer row.
 - **DSH's token meter** counts the main thread only. Our context pill and usage panel also count subagents, so the totals
   differ.
-- **`/btw` answers** carry no usage numbers (the CLI sends none).
+- **`/btw` answers** carry no usage numbers (the CLI sends none), and do not stream.
+- **Side chat history** is kept in memory only (the last 20 exchanges per session); a DSH restart clears it.
 - **The mode chip** can lag up to 4 seconds after you pick a mode on a plan card.
 - **DSH's terminal tab** opens in the session folder only.
 - **Attached file names** that contain both a space and a `"` do not reach Claude Code (DSH stores `"` as `_`).
