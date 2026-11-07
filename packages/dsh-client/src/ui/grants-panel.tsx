@@ -77,7 +77,7 @@ export function GrantsPanel(props: GrantsPanelProps): React.ReactElement {
   };
   return (
     <div data-raw-agent="grants-panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <strong>Plugin access</strong>
+      <strong>Agent plugin access</strong>
       <p style={css.hint}>
         Other plugins can always read the session state and put text into the composer for you to send. To let one
         plugin send messages and side questions to {name} without asking, create a grant for it and paste the token into

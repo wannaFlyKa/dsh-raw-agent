@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   claudeConfigFiles,
@@ -185,8 +186,9 @@ describe('trustState (D73, S10)', () => {
 
 describe('factory no-process reads (D83)', () => {
   const fs = {
+    // The factory joins with the OS separator (this test runs on every OS).
     readText: (p: string) =>
-      p === '/home/u/.claude.json' ? globalConfig({ '/w': { hasTrustDialogAccepted: true } }) : undefined,
+      p === join('/home/u', '.claude.json') ? globalConfig({ '/w': { hasTrustDialogAccepted: true } }) : undefined,
     realpath: (p: string) => p,
     exists: () => false,
   };

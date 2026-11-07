@@ -229,6 +229,51 @@ describe('rawAgent Host service (R9.2)', () => {
     expect(s.sent[1]![0]).toBe('steer');
   });
 
+  it('an admitted message whose grant was revoked is no longer forwardable', async () => {
+    const s = await setup();
+    await s.service.send('s1', 'hello', s.token);
+    expect(s.registry.pluginSender('msg-1')).toBeDefined();
+    await s.grants.revoke(s.grantId);
+    expect(s.registry.pluginSender('msg-1')).toBeUndefined();
+    expect(s.registry.takePluginMessage('msg-1')).toBeUndefined();
+  });
+
+  it('an admission is consumed once', async () => {
+    const s = await setup();
+    await s.service.send('s1', 'hello', s.token);
+    expect(s.registry.takePluginMessage('msg-1')).toEqual({ grantId: s.grantId, label: 'my-plugin' });
+    expect(s.registry.pluginSender('msg-1')).toBeUndefined();
+    expect(s.registry.takePluginMessage('msg-1')).toBeUndefined();
+  });
+
+  it('keeps no admission when DSH refuses the followup or the steer', async () => {
+    const registry = new SessionRegistry();
+    registry.set('s1', 'k', fakeRuntime().rt);
+    const grants = new GrantStore();
+    const created = await grants.create('my-plugin');
+    if (!created.ok) throw new Error('no grant');
+    let n = 0;
+    const service = createRawAgentService({
+      registry,
+      factories: [factory],
+      grants,
+      agent: () => ({
+        followup: () => {
+          throw new Error('inbox closed');
+        },
+        steer: () => {
+          throw new Error('inbox closed');
+        },
+        cancel: () => undefined,
+      }),
+      newId: () => `msg-${++n}`,
+    });
+    await expect(service.send('s1', 'hi', created.token)).rejects.toMatchObject({ code: 'failed' });
+    await expect(service.steer('s1', 'hi', created.token)).rejects.toMatchObject({ code: 'failed' });
+    expect(registry.pluginSender('msg-1')).toBeUndefined();
+    expect(registry.pluginSender('msg-2')).toBeUndefined();
+  });
+
   it('a revoked grant stops working at once', async () => {
     const s = await setup();
     await s.grants.revoke(s.grantId);

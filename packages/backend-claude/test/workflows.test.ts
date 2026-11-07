@@ -49,9 +49,12 @@ function loadFixture(name: string): Record<string, unknown>[] {
 /** Maps the recorded transcript folder to the fixture folder `<name>.transcripts`. */
 function fixtureFs(name: string): TailFs {
   const local = join(FIXTURES, `${name}.transcripts`);
-  const map = (p: string): string => {
+  // The code joins with the OS separator (backslashes on Windows); the recorded paths use '/'.
+  const posix = (p: string): string => p.replace(/\\/g, '/');
+  const map = (raw: string): string => {
+    const p = posix(raw);
     const i = p.indexOf('/subagents/workflows/');
-    if (!p.startsWith(RECORDED_PROJECTS) || i < 0) return p;
+    if (!p.startsWith(RECORDED_PROJECTS) || i < 0) return raw;
     const rest = p
       .slice(i + '/subagents/workflows/'.length)
       .split('/')
@@ -60,7 +63,7 @@ function fixtureFs(name: string): TailFs {
     return rest === '' ? local : join(local, rest);
   };
   return {
-    realpath: (p) => (p.startsWith(RECORDED_PROJECTS) ? p : nodeTailFs.realpath(p)),
+    realpath: (p) => (posix(p).startsWith(RECORDED_PROJECTS) ? p : nodeTailFs.realpath(p)),
     fileSize: (p) => nodeTailFs.fileSize(map(p)),
     readAt: (p, o, n) => nodeTailFs.readAt(map(p), o, n),
   };

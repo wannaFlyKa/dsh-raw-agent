@@ -1,5 +1,6 @@
 // Read-only settings preview for R1.4 (what a new session runs when the user makes no choice).
 
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   claudeConfigFiles,
@@ -76,7 +77,10 @@ describe('settings defaults preview (R1.4, D83)', () => {
       env: () => ({}),
       homedir: '/home/u',
       fs: {
-        readText: (p) => (seen.push(p), p.endsWith('/home/u/.claude/settings.json') ? '{"model":"m"}' : undefined),
+        readText: (p) => (
+          seen.push(p),
+          p.endsWith(join('/home/u', '.claude', 'settings.json')) ? '{"model":"m"}' : undefined
+        ),
         realpath: (p) => p,
         exists: () => false,
       },

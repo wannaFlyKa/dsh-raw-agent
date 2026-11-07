@@ -70,6 +70,8 @@ export function createRawAgentService(deps: PluginServiceDeps): RawAgentService 
   const { registry, factories, grants } = deps;
   const newId = deps.newId ?? (() => globalThis.crypto.randomUUID());
   const backends = backendInfos(factories);
+  // A revoked grant also stops its admitted, not yet forwarded messages (D66).
+  registry.setPluginGrantCheck((grantId) => grants.active(grantId));
   const backendOf = (sessionId: string): RawAgentBackendInfo | undefined => {
     const kind = registry.kindOf(sessionId);
     return backends.find((b) => b.kind === kind);
@@ -116,6 +118,8 @@ export function createRawAgentService(deps: PluginServiceDeps): RawAgentService 
       if (mode === 'send') agent.followup(message);
       else agent.steer(message);
     } catch (error) {
+      // Not queued: keep no admission for an id that never reached the inbox.
+      registry.forgetPluginMessage(message.id);
       throw fail('failed', `DSH refused the message: ${String((error as Error)?.message ?? error)}`);
     }
     return { messageId: message.id };

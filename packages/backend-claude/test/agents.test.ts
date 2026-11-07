@@ -2,6 +2,7 @@
 // (D45, D46, D47, D50, D68), against wire recordings from CLI 2.1.318 (fixtures/README.md).
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { SentInputTracker, type AgentRef, type BackendEvent } from '@dsh-raw-agent/core';
 import {
@@ -559,7 +560,9 @@ describe('factory no-process reads for agents (D15, D49)', () => {
         realpath: (p) => p,
         exists: () => true,
         readHead: (p) =>
-          p === '/cfg/projects/-w/s.jsonl' ? '{"type":"agent-setting","agentSetting":"pirate"}\n' : undefined,
+          p === join('/cfg', 'projects', '-w', 's.jsonl')
+            ? '{"type":"agent-setting","agentSetting":"pirate"}\n'
+            : undefined,
         listDir: () => [],
       },
     });

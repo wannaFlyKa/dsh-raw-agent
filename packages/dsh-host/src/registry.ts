@@ -92,6 +92,7 @@ export class SessionRegistry {
   readonly apiVersion = 1;
   readonly #runtimes = new Map<string, { kind: string; runtime: RegisteredRuntime }>();
   readonly #pluginMessages = new Map<string, PluginSender>();
+  #grantCheck: ((grantId: string) => boolean) | undefined;
   readonly #added = new Set<(hostSessionId: string) => void>();
   readonly #drafts = new Map<string, ReturnedDraft[]>();
   readonly #opts: SessionRegistryOptions;
@@ -150,10 +151,47 @@ export class SessionRegistry {
     }
   }
 
-  /** The grant a plugin message was admitted under, if it was. */
+  /**
+   * The grant a plugin message was admitted under, if it was and that grant is still live. A
+   * message whose grant the user revoked (or that left the entry config) is no longer forwarded.
+   */
   pluginSender(messageId: string): PluginSender | undefined {
     const s = this.#pluginMessages.get(messageId);
-    return s ? { ...s } : undefined;
+    if (!s) return undefined;
+    if (!this.#grantLive(s.grantId)) {
+      this.#pluginMessages.delete(messageId);
+      return undefined;
+    }
+    return { ...s };
+  }
+
+  /**
+   * Consume one admission: the message was forwarded (claimed by a turn, or claimed as a steer).
+   * A later message that reuses the id (for example copied from the log) is not admitted.
+   */
+  takePluginMessage(messageId: string): PluginSender | undefined {
+    const s = this.pluginSender(messageId);
+    this.#pluginMessages.delete(messageId);
+    return s;
+  }
+
+  /** Drop one admission without forwarding it (DSH refused the message). */
+  forgetPluginMessage(messageId: string): void {
+    this.#pluginMessages.delete(messageId);
+  }
+
+  /** The Host service tells the registry how to see whether a grant is still live (D66). */
+  setPluginGrantCheck(check: ((grantId: string) => boolean) | undefined): void {
+    this.#grantCheck = check;
+  }
+
+  #grantLive(grantId: string): boolean {
+    if (!this.#grantCheck) return true;
+    try {
+      return this.#grantCheck(grantId) === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Remove and end one runtime. */

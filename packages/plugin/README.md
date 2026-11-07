@@ -21,6 +21,10 @@ DSH installs plugins into a profile. Pick the profile you use (for example `web`
 dsh plugin --profile web add dsh-raw-agent
 ```
 
+Until the package is on npm, add a packed tarball instead (`dsh plugin --profile web add /absolute/path/to/dsh-raw-agent-0.1.0.tgz`).
+The [project README](https://github.com/wannaFlyKa/dsh-raw-agent#install) shows how to pack it from source, and the
+first-run steps (folder dialog, starting Claude Code from the model picker, the trust question).
+
 Restart DSH, start a new session, and pick the **Claude Code** agent preset. To remove the plugin:
 
 ```sh

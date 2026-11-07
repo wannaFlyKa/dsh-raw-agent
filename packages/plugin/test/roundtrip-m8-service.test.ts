@@ -67,7 +67,7 @@ async function setup(onSend: ScriptStep[][]) {
     grants,
     agent: (id) => agentOps(ctx, id),
   });
-  return { handle, agent: handle.agent, stub, sessionId, service, token: created.token, host };
+  return { handle, agent: handle.agent, stub, sessionId, service, token: created.token, host, grants, created };
 }
 
 describe.skipIf(dsh === undefined)(`M8 plugin service round trip (installed DSH ${dsh?.version})`, () => {
@@ -102,6 +102,40 @@ describe.skipIf(dsh === undefined)(`M8 plugin service round trip (installed DSH 
     expect(s.stub.record.sent).toEqual([]);
     const evs = s.agent.session.snapshotEvents();
     expect(evs.some((e: any) => e.type === 'user/message')).toBe(false);
+  });
+
+  it('an admission is used once: a later message that reuses the id is dropped', async () => {
+    const s = await setup([textTurn('Hello, plugin.'), textTurn('never')]);
+    const { messageId } = await s.service.send(s.sessionId, 'first', s.token);
+    await idle(s.agent);
+    expect(s.stub.record.sent).toHaveLength(1);
+    // A plugin without a grant copies the id from the log and pushes its own text.
+    s.agent.followup({
+      id: messageId,
+      role: 'user',
+      content: [{ type: 'text', text: 'copied id' }],
+      source: { kind: PLUGIN_SOURCE_KIND, grant: 'sample-plugin', grantId: s.created.grant.id },
+    });
+    await idle(s.agent);
+    expect(s.stub.record.sent).toHaveLength(1);
+    const users = s.agent.session.snapshotEvents().filter((e: any) => e.type === 'user/message');
+    expect(users).toHaveLength(1);
+  });
+
+  it('an admitted message whose grant was revoked before the turn is dropped', async () => {
+    const s = await setup([textTurn('never')]);
+    const id = randomUUID();
+    s.host.sessions.admitPluginMessage(id, { grantId: s.created.grant.id, label: 'sample-plugin' });
+    await s.grants.revoke(s.created.grant.id);
+    s.agent.followup({
+      id,
+      role: 'user',
+      content: [{ type: 'text', text: 'after revoke' }],
+      source: { kind: PLUGIN_SOURCE_KIND, grant: 'sample-plugin', grantId: s.created.grant.id },
+    });
+    await idle(s.agent);
+    expect(s.stub.record.sent).toEqual([]);
+    expect(s.agent.session.snapshotEvents().some((e: any) => e.type === 'user/message')).toBe(false);
   });
 
   it('refuses a call without a valid grant and leaves the inbox alone', async () => {

@@ -186,6 +186,11 @@ export class GrantStore {
     return { ok: true, saved: written || !this.#durable() };
   }
 
+  /** True while the grant with this id exists and is not revoked. Counts no use. */
+  active(id: string): boolean {
+    return this.#all().some((r) => r.id === id);
+  }
+
   /** The grant a token names, if any. Counts the use. */
   check(token: unknown): GrantRecord | undefined {
     if (typeof token !== 'string' || !token.startsWith(GRANT_TOKEN_PREFIX) || token.length > 200) return undefined;

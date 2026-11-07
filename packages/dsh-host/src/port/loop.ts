@@ -149,7 +149,7 @@ export async function saveResultImages(
 }
 
 /** The writer seen through the driver's neutral interface. */
-function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext): TurnSink {
+function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext, onClaimed?: (id: string) => void): TurnSink {
   return {
     get stepOpen() {
       return log.stepOpen;
@@ -157,7 +157,11 @@ function sinkFor(log: TurnLog, agent: DshAgent, ctx: CordisContext): TurnSink {
     get hasMessage() {
       return log.hasMessage;
     },
-    claim: (id) => log.claim(id, agent.inbox),
+    claim: (id) => {
+      const claimed = log.claim(id, agent.inbox);
+      if (claimed) onClaimed?.(id);
+      return claimed;
+    },
     get openCallIds() {
       return log.openCallIds;
     },
@@ -377,6 +381,11 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     (m.source.kind === PLUGIN_SOURCE_KIND && typeof registry.pluginSender === 'function'
       ? registry.pluginSender(m.id) !== undefined
       : false);
+  // D66: an admission is used once. A forwarded plugin message consumes its id, so a later
+  // message that reuses the id (copied from the log) is dropped.
+  const consume = (id: string): void => {
+    if (typeof registry.takePluginMessage === 'function') registry.takePluginMessage(id);
+  };
 
   // D47: our own scoped controller; this context serves exactly the agents of our preset.
   const j = jobs();
@@ -513,7 +522,10 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
       warn,
       ...o.writer,
     });
-    for (const m of human) log.writeUser(m);
+    for (const m of human) {
+      if (m.source.kind === PLUGIN_SOURCE_KIND) consume(m.id);
+      log.writeUser(m);
+    }
     const runtime = runtimeFor(agent);
     let userInputs: UserInput[];
     try {
@@ -528,7 +540,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
         },
       );
     }
-    const outcome = await runtime.runTurn(sinkFor(log, agent, ctx), { userInputs, wake }, signal);
+    const outcome = await runtime.runTurn(sinkFor(log, agent, ctx, consume), { userInputs, wake }, signal);
     log.close();
     if (outcome.kind === 'error') throw new Error(outcome.message);
     signal.throwIfAborted();
