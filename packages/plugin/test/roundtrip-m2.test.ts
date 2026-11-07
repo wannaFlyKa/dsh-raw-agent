@@ -187,8 +187,8 @@ describe.skipIf(dsh === undefined)(`M2 host channel round trip (installed DSH ${
     expect(await run(plain.agent, '/permission')).toEqual({ kind: 'success', text: 'dsh preset' });
     const shown = await run(ours.agent, '/permission');
     expect(shown.kind).toBe('success');
-    expect(shown.text).toMatch(/Stub agent permission mode/);
-    expect(shown.text).toMatch(/DSH permission presets do not apply/);
+    expect(shown.text).toMatch(/^Permission mode: /);
+    expect(shown.text).toMatch(/DSH file access does not apply to Stub agent/);
     expect(await run(ours.agent, '/permission read-only')).toMatchObject({ kind: 'error' });
     const switched = await run(ours.agent, '/permission Plan');
     expect(switched).toMatchObject({ kind: 'success' });

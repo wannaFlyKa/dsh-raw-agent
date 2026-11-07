@@ -43,8 +43,11 @@ export interface SessionViewWire {
     model?: string;
     mode?: string;
     version?: string;
-    /** `topic: 'lifecycle'`: the lifecycle banner shows this fact; the status line does not repeat it. */
-    notice?: { level: string; text: string; at: number; topic?: 'lifecycle' };
+    /**
+     * `topic: 'lifecycle'`: the lifecycle banner shows this fact; the status line does not repeat it.
+     * `topic: 'mode'`: our `/permission` answer, shown without the agent-name prefix.
+     */
+    notice?: { level: string; text: string; at: number; topic?: 'lifecycle' | 'mode' };
     /** D15: the main-thread agent the process runs with. */
     agent?: string;
     /** D37: the agent's own ultracode state, once the live process reported it. */

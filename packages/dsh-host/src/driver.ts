@@ -322,9 +322,10 @@ export interface LiveInfo {
   /**
    * The last line the agent showed the user outside the conversation (`notice` event). `topic:
    * 'lifecycle'` marks a line the lifecycle view also holds (M8 polish): the plugin UI shows that
-   * fact once, as a banner note, not again in the status line.
+   * fact once, as a banner note, not again in the status line. `topic: 'mode'`: our `/permission`
+   * answer; it names no agent, so the status line shows it without the agent-name prefix.
    */
-  notice?: { level: string; text: string; at: number; topic?: 'lifecycle' };
+  notice?: { level: string; text: string; at: number; topic?: 'lifecycle' | 'mode' };
   /** D15: the main-thread agent the process was started with (passed at spawn, or read on resume). */
   agent?: string;
   /**
@@ -932,7 +933,7 @@ export class SessionRuntime {
    * Show one line to the user outside the conversation (the plugin's status line), for example
    * the answer of our `/permission` command: DSH does not show a command's result in the chat.
    */
-  showNotice(level: 'info' | 'warning', text: string, topic?: 'lifecycle'): void {
+  showNotice(level: 'info' | 'warning', text: string, topic?: 'lifecycle' | 'mode'): void {
     if (this.#disposed) return;
     this.#live.notice = { level, text, at: this.#now(), ...(topic ? { topic } : {}) };
     this.#notify();

@@ -64,6 +64,8 @@ export {
 export {
   runModeCommand,
   findMode,
+  isDshPresetName,
+  presetAnswer,
   modeCommandDescription,
   type ModeCommandResult,
   type ModeCommandRuntime,

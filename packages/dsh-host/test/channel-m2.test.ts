@@ -30,6 +30,7 @@ import {
   checkQuestionReply,
   fallbackVerb,
   findMode,
+  isDshPresetName,
   interactionsRoute,
   parseAnswer,
   channelLine,
@@ -729,8 +730,8 @@ describe('/permission in our sessions (R1.4 leftover)', () => {
   it('shows the agent mode and says DSH presets do not apply', async () => {
     const r = await runModeCommand(runtime('plan'), factory, '');
     expect(r.kind).toBe('success');
-    expect(r.text).toMatch(/Agent permission mode: Plan mode \(plan\)/);
-    expect(r.text).toMatch(/DSH permission presets do not apply/);
+    expect(r.text).toMatch(/^Permission mode: Plan mode \(plan\)/);
+    expect(r.text).toMatch(/DSH file access does not apply to Agent/);
   });
 
   it('switches by id or label; a DSH preset name changes nothing', async () => {
@@ -762,3 +763,69 @@ describe('/permission in our sessions (R1.4 leftover)', () => {
     expect(channelLine(r.view())).toMatch(/"live":\{"notice":\{"level":"info","text":"hello"/);
   });
 });
+
+describe('/permission with a DSH preset name (0.1.1)', () => {
+  const factory = CLAUDE_LIKE();
+  const rt = () => {
+    const calls: string[] = [];
+    const notices: Array<[string, string, string | undefined]> = [];
+    return {
+      calls,
+      notices,
+      view: () => ({ state: {}, live: { mode: 'default' }, choice: { applied: {}, resetPending: false } }) as any,
+      choose: async (req: { mode: string }) => {
+        calls.push(req.mode);
+        return { ok: true, note: 'applied', view: {} as any };
+      },
+      showNotice: (l: string, t: string, topic?: string) => void notices.push([l, t, topic]),
+    };
+  };
+
+  it('names DSH presets, changes nothing and points to bypassPermissions or auto', async () => {
+    for (const name of ['danger-full-access', 'workspace-write', 'read-only', 'Full access', 'Workspace Write'])
+      expect(isDshPresetName(name)).toBe(true);
+    expect(isDshPresetName('auto')).toBe(false);
+    const r = rt();
+    const out = await runModeCommand(r, factory, 'danger-full-access');
+    expect(out.kind).toBe('error');
+    expect(out.text).toBe(
+      'DSH file access ("danger-full-access") does not apply to Claude Code, so nothing changed. ' +
+        'Claude Code runs its own tools under its permission mode. For full access use bypassPermissions ' +
+        '(needs the plugin option allowDangerouslySkipPermissions, as the CLI needs --dangerously-skip-permissions), or auto. ' +
+        'Modes: default, plan, auto, bypassPermissions.',
+    );
+    expect(r.calls).toEqual([]); // never forced
+    expect(r.notices[0]).toEqual(['warning', out.text, 'mode']);
+  });
+
+  it('auto is the agent mode, and a switch says "Permission mode: … (this session)" once', async () => {
+    const r = rt();
+    const out = await runModeCommand(r, factory, 'auto');
+    expect(r.calls).toEqual(['auto']);
+    expect(out.text).toBe('Permission mode: Auto (this session).');
+    expect(out.text).not.toMatch(/Claude Code/);
+  });
+});
+
+function CLAUDE_LIKE() {
+  const base = fake().factory;
+  return {
+    ...base,
+    displayName: 'Claude Code',
+    staticCapabilities: {
+      ...base.staticCapabilities,
+      permissionModes: [
+        { id: 'default', label: 'Ask before edits', risk: 'neutral' as const },
+        { id: 'plan', label: 'Plan mode', risk: 'plan' as const },
+        { id: 'auto', label: 'Auto', risk: 'caution' as const },
+        {
+          id: 'bypassPermissions',
+          label: 'Bypass permissions',
+          risk: 'danger' as const,
+          requiresOption: 'allowDangerouslySkipPermissions',
+          requiresNote: 'as the CLI needs --dangerously-skip-permissions',
+        },
+      ],
+    },
+  };
+}
