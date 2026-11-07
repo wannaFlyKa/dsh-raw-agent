@@ -366,13 +366,14 @@ Then check `sessionInfo(props.sessionId)` (or follow `onEvent`) and render nothi
 
 | Slot | `id` / `key` | Order or priority | What it is |
 | --- | --- | --- | --- |
-| `conversation.input.left` | id `raw-agent-session-controls` | order 50 | Model, effort, mode and agent pickers, MCP, Rewind, Settings files, status line, side-question panel |
+| `conversation.input.left` | id `raw-agent-session-controls` | order 50 | Model, effort, mode and agent chips (0.1.1: compact chips in DSH's pill style), MCP, Rewind, Settings files, status line, side-question panel |
 | `conversation.composer.dock` | id `raw-agent-context` | order 2 | Context pill and usage panel |
 | `conversation.input.dock` | id `raw-agent-lifecycle` | order 30 | Crash or exit banner with Restart; fork and recovery notes |
 | `conversation.session.header.actions` | id `raw-agent-agents` | order 20 | Agents button (children, team, background tasks); child strip in a child session |
 | `conversation.composer` | (selected by interaction kind `raw-agent-ask`) | priority -20 | Permission, question, plan and elicitation cards that take over the composer. To replace it, register below -20 and select only `raw-agent-ask`. **Unverified** for third parties. |
 | `settings.section` | id `raw-agent-plugin-access` | order 900 | The **Agent plugin access** (grants) page. Live M8: it renders; DSH's nav row may cut the name short. |
 | `conversation.input.left` | id `raw-agent-plugin-extras` | order 51 | Declares our slot `raw-agent.controls.extra` (section 3.2) and renders what fills it. |
+| `settings.general.item` | id `raw-agent-access-note` | order -19 | 0.1.1: a note right under DSH's own access row (order -20) in Settings > General: DSH's file access does not control Claude Code sessions. |
 
 Our entries render nothing in sessions that are not ours (the Host answers 404).
 
@@ -405,31 +406,43 @@ Tool names DSH's own tools use (`bash`, `read`, `edit`, …, lower case) are not
 
 ### 3.5 CSS variables
 
-Our components use `var(--raw-agent-<name>, var(--dsw-alias-<token>, <system colour>))`. Set any of these on a parent element or `:root`. **Known gap:** the DSH alias names in the middle column do not exist in DSH 0.2.2-rc.1 (a search of its packages finds none; its tokens are named like `--dsw-alias-label-primary` and `--dsw-alias-state-error-primary`). So today, unless you set a `--raw-agent-*` variable, our components use the system colour fallback, not DSH's theme. A later version maps them to DSH's real tokens; the `--raw-agent-*` names stay.
+Our components use `var(--raw-agent-<name>, var(--dsw-alias-<token>, <system colour>))`. Set any of these on a parent element or `:root`. Since 0.1.1 the middle column names DSH 0.2.2-rc.1's real theme tokens, so with no override our components follow DSH's light and dark themes. (0.1.0 used alias names DSH does not define, so it fell back to system colours.)
 
 | Variable | Falls back to | Used for |
 | --- | --- | --- |
-| `--raw-agent-text` | `--dsw-alias-text-primary` | Text in panels and dialogs |
-| `--raw-agent-muted` | `--dsw-alias-text-secondary` | Hints, secondary text |
-| `--raw-agent-surface` | `--dsw-alias-surface-elevated` | Dialog and panel backgrounds |
-| `--raw-agent-border` | `--dsw-alias-border-default` | Borders |
-| `--raw-agent-accent` | `--dsw-alias-surface-accent` | Primary buttons |
-| `--raw-agent-on-accent` | `--dsw-alias-text-on-accent` | Text on primary buttons |
-| `--raw-agent-link` | `--dsw-alias-text-link` | Links |
-| `--raw-agent-danger` | `--dsw-alias-text-danger` | Errors, failed rows |
-| `--raw-agent-done` | `--dsw-alias-text-success` | Finished rows |
-| `--raw-agent-running` | `--dsw-alias-text-accent` | Running rows |
-| `--raw-agent-warn` | `--dsw-alias-text-warning` | Warnings in the MCP panel |
-| `--raw-agent-warning` | `--dsw-alias-border-warning` | The exit banner's warning border |
-| `--raw-agent-ask-border` | `--dsw-alias-border-warning` | Ask cards and the waiting tool card outline |
-| `--raw-agent-code-bg` | `--dsw-alias-surface-muted` | Code and previews |
-| `--raw-agent-secret` | `--dsw-alias-surface-muted` | Masked values in the settings preview |
-| `--raw-agent-diff-add` | `--dsw-alias-surface-success` | Added diff lines |
-| `--raw-agent-diff-del` | `--dsw-alias-surface-danger` | Removed diff lines |
-| `--raw-agent-context-warn` | `--dsw-alias-border-warning` | Context pill, high use |
-| `--raw-agent-context-high` | `--dsw-alias-border-danger` | Context pill, near the limit |
-| `--raw-agent-context-busy` | `--dsw-alias-border-accent` | Context pill while compacting |
+| `--raw-agent-text` | `--dsw-alias-label-primary` | Text in panels and dialogs |
+| `--raw-agent-muted` | `--dsw-alias-label-secondary` | Hints, secondary text |
+| `--raw-agent-surface` | `--dsw-alias-bg-layer-1` | Dialog and panel backgrounds |
+| `--raw-agent-border` | `--dsw-alias-border-l2` | Borders |
+| `--raw-agent-accent` | `--dsw-alias-button-primary-fill` | Primary buttons |
+| `--raw-agent-on-accent` | `--dsw-alias-label-primary-foreground` | Text on primary buttons |
+| `--raw-agent-link` | `--dsw-alias-link` | Links |
+| `--raw-agent-danger` | `--dsw-alias-state-error-primary` | Errors, failed rows |
+| `--raw-agent-done` | `--dsw-alias-state-success-primary` | Finished rows |
+| `--raw-agent-running` | `--dsw-alias-state-business-primary` | Running rows |
+| `--raw-agent-warn` | `--dsw-alias-state-warn-label` | Warnings in the MCP panel |
+| `--raw-agent-warning` | `--dsw-alias-state-warn-primary` | The exit banner's warning border |
+| `--raw-agent-ask-border` | `--dsw-alias-state-warn-primary` | Ask cards and the waiting tool card outline |
+| `--raw-agent-code-bg` | `--dsw-alias-markdown-code-block` | Code and previews |
+| `--raw-agent-secret` | `--dsw-alias-markdown-code-block` | Masked values in the settings preview |
+| `--raw-agent-diff-add` | `--dsw-alias-code-diff-added` | Added diff lines |
+| `--raw-agent-diff-del` | `--dsw-alias-code-diff-deleted` | Removed diff lines |
+| `--raw-agent-context-warn` | `--dsw-alias-state-warn-primary` | Context pill, high use |
+| `--raw-agent-context-high` | `--dsw-alias-state-error-primary` | Context pill, near the limit |
+| `--raw-agent-context-busy` | `--dsw-alias-state-business-primary` | Context pill while compacting |
 | `--raw-agent-mono` | system monospace | Monospaced text (no DSH alias) |
+| `--raw-agent-chip-text` | `--dsw-alias-label-tertiary` | 0.1.1: chip text (as DSH's composer pills) |
+| `--raw-agent-chip-text-hover` | `--dsw-alias-label-secondary` | Chip text on hover and focus |
+| `--raw-agent-chip-hover` | `--dsw-alias-interactive-bg-hover` | Chip background on hover and focus |
+| `--raw-agent-chip-radius` | `--dsw-radius-sm` | Chip corner radius |
+| `--raw-agent-chip-plan` | `--dsw-alias-state-business-primary` | Mode chip, plan (blue) |
+| `--raw-agent-chip-caution` | `--dsw-alias-state-warn-primary` | Mode chip, accept edits, auto and don't ask (amber) |
+| `--raw-agent-chip-danger` | `--dsw-alias-state-error-primary` | Mode chip, bypass permissions (red) |
+| `--raw-agent-chip-session-mode` | `--dsw-alias-state-done-primary` | Effort chip while ultracode is on |
+
+The mode chip's text colour mixes its tone with `--dsw-alias-label-primary`, so it stays readable in both themes.
+
+**Chips (0.1.1).** Each picker is a `.raw-agent-chip` element with `data-raw-agent="model-chip"` (also `effort-chip`, `mode-chip`, `agent-chip`). An invisible native `<select>` with the old `data-raw-agent="model"` (`effort`, `mode`, `agent`) lies on top, so the browser's list and the keyboard work. Attributes you can style: `data-risk="neutral|plan|caution|danger"` (mode chip), `data-from-settings` (the value comes from the user's settings; the chip shows a small dot), `data-session-mode` (ultracode on), `data-disabled`. MCP, Rewind and Settings files are `.raw-agent-chip` buttons. The status line is `.raw-agent-status` (`data-level="info|error"`); it fades after a few seconds (`data-fading`, then `data-faded`, which hides it visually but keeps it in the `role="status"` live region).
 
 ### 3.6 DOM hooks
 

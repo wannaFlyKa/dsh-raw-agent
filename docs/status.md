@@ -19,6 +19,24 @@ Status values:
 
 Count: 40 rows done, 3 partial (R1.3, R6.3, R8.3), none deferred.
 
+**0.1.1 (UI polish), checked live in a throwaway DSH profile, light and dark theme:**
+
+- The model, effort and mode pickers are compact chips in DSH's own pill style (DSH theme tokens). They show short
+  values ("Opus 5.5", "xhigh", "Auto"; ultracode as "Ultracode"). A value that comes from your settings has a small
+  dot; the tooltip and the accessible name say "from your settings" and give the full text. MCP, Rewind and Settings
+  files are chips of the same style.
+- The mode chip is coloured by risk: default grey, plan blue, accept edits, auto and don't ask amber (they act
+  without asking you), bypass permissions red.
+- DSH's file-access choice ("Full access") does not apply to Claude Code. It was still reachable in our sessions: in
+  a new session, DSH's access seat stayed in the composer after "Claude Code" was picked, until our route's next
+  retry (seen live: about 2 s; the retry delay grows to 20 s while a new-session page waits). Now DSH's `agentPreset` value hides the seat
+  at once (live: about 0.1 s). `/permission` (bare or from the menu) opens a list of the Claude Code modes only, and
+  `/permission danger-full-access` (or another DSH preset name) answers that DSH file access does not apply and
+  names `bypassPermissions` (needs the plugin option) or `auto`. Nothing changes and no mode is forced. Settings >
+  General shows a note under DSH's own access row. Standard sessions keep DSH's seat and popup.
+- The status line no longer doubles the name ("Permission mode: Auto (this session)"). A note fades after about 5 s
+  (errors after 12 s); it stays in the `role="status"` live region for screen readers.
+
 The requirement texts and checks are in [requirements.md](requirements.md). Design decisions (D-numbers) are in
 [architecture.md](architecture.md).
 
@@ -132,7 +150,9 @@ table above says partial.
   `/debug` in the composer (visible, and it needs a second Enter).
 - **Pickers lag:** the mode picker can trail the CLI by one 4 s poll after a pick; the "MCP n/m" count can show the
   connect-time count right after a start.
-- **Ultracode** shows as its own picker entry, which hides the level under it.
+- **Ultracode** shows as its own picker entry, which hides the level under it (the chip says "Ultracode"; the
+  tooltip has the level).
+- **A focused chip loses focus** while its choice is sent (the select is disabled while busy, as in 0.1.0).
 - **Workflows:** no live token count for running workflow agents, no script `log()` lines, no large-workflow warning.
   Agents stopped with the whole workflow show too short a run time afterwards (cosmetic).
 - **Rewind:** "Restore code" needs a running process; no rewind before the first message; attachments of a rewound

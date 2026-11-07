@@ -2,7 +2,7 @@
 
 Run your **own, unmodified Claude Code** inside [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), and use DSH plugins to change how everything looks and behaves.
 
-> **Status: 0.1.0, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
+> **Status: 0.1.1, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
 > 2.1.318). macOS and Windows run in CI only. The package is **not on npm yet**: install it from a packed tarball or from
 > source (below). The full user guide is [packages/plugin/README.md](packages/plugin/README.md).
 
@@ -29,7 +29,7 @@ new profile name makes a profile without the web app. To use a new name, make it
 ### From the GitHub Release (recommended)
 
 ```sh
-dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.0/dsh-raw-agent-0.1.0.tgz
+dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.1/dsh-raw-agent-0.1.1.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Restart DSH
@@ -54,7 +54,7 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
-dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.0.tgz"
+dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.1.tgz"
 ```
 
 pnpm 11 resolves `--pack-destination` from the folder you run it in, so the tarball lands in `dist/` at the repo
@@ -64,8 +64,10 @@ root. Pass an absolute path to a local tarball. Restart DSH after the add.
 
 1. Open DSH. A profile with no workspace first shows DSH's **folder dialog**. Pick the project folder.
 2. Start a new session and pick the **Claude Code** agent preset.
-3. The model picker in the composer row shows only **Start Claude Code to list models** until the process runs. Pick
-   that row (or just send your first message) to start your `claude`. Then the picker lists your models.
+3. The composer row has small chips for the model, the effort and the permission mode (for example "Opus 5.5",
+   "xhigh", "Auto"). A small dot means the value comes from your settings. The model chip lists only **Start Claude
+   Code to list models** until the process runs. Pick that row (or just send your first message) to start your
+   `claude`. Then the chip lists your models.
 4. In a folder you have not trusted yet, the plugin asks Claude Code's own **trust question** first, as the terminal app
    does. Until you accept, Claude Code ignores the project's `permissions` rules. Claude Code writes the trust record
    itself.
@@ -79,7 +81,8 @@ root. Pass an absolute path to a local tarball. Restart DSH after the add.
 | Shift+Tab cycles the permission mode | The same: Shift+Tab in the composer of a Claude Code session (unless another plugin owns the key). The mode picker in the composer row does the same. |
 | Esc stops the turn | DSH's **Stop** button. It interrupts the turn only: background agents, workflows and shells keep running. |
 | Esc Esc opens rewind | No double-Esc key. Use **Rewind** in the composer row (conversation, code, or both). |
-| `/model`, `/permission` | Our pickers in the composer row. DSH's own model seat changes the DSH profile default, not this session. |
+| `/model`, `/permission` | Our chips in the composer row, or `/model` and `/permission` (it lists only Claude Code's modes). The mode chip is grey (default), blue (plan), amber (accept edits, auto, don't ask) or red (bypass). DSH's own model seat changes the DSH profile default, not this session. |
+| Full access (`--dangerously-skip-permissions`) | DSH's file access ("Workspace Write", "Full access") does not apply to Claude Code; it is hidden in Claude Code sessions. Use the `bypassPermissions` mode (turn on the plugin option `allowDangerouslySkipPermissions` first: the `raw-agent` row, `config.options`, in your profile's `cordis.patch.yml`) or `auto`. |
 | `/btw` | Works: the answer shows in our side-question panel. |
 | Background tasks in the footer | DSH jobs. The session stays free while they run. |
 | Subagents inline | DSH child sessions (the **Agents** button in the session header). |
