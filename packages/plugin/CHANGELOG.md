@@ -3,7 +3,32 @@
 All notable changes to `dsh-raw-agent`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package follows [Semantic Versioning](https://semver.org/). The plugin service API has its own number (`apiVersion`, now 1).
 
-## 0.1.0 (unreleased)
+## 0.1.1 (2026-11-07)
+
+UI polish. No change to what reaches Claude Code.
+
+### Changed
+
+- **Compact chips.** The model, effort and permission-mode pickers are small chips in the style of DSH's own composer
+  pills, built on DSH's theme tokens (light and dark). They show short values ("Opus 5.5", "xhigh", "Auto"; ultracode
+  as "Ultracode"). A value from your settings has a small dot; its tooltip and screen-reader name say "from your
+  settings" with the full text. The native list, Shift+Tab and keyboard use work as before. MCP, Rewind and Settings
+  files use the same chip style.
+- **Mode colours.** The mode chip is grey for default, blue for plan, amber for accept edits, auto and don't ask (they
+  act without asking you), and red for bypass permissions.
+- **Full access.** DSH's file-access choice does not control Claude Code. In a new Claude Code session DSH's access
+  seat (with "Full access") stayed visible for a short time; it is now hidden as soon as DSH reports the preset.
+  `/permission` lists only Claude Code's modes. `/permission danger-full-access` (or another DSH preset name) says
+  that DSH file access does not apply and points to `bypassPermissions` (needs the plugin option
+  `allowDangerouslySkipPermissions`, as the CLI needs `--dangerously-skip-permissions`) or `auto`. Nothing is changed
+  for you. Settings > General shows a short note under DSH's access row. Standard sessions are not changed.
+- **Status line.** No doubled name ("Permission mode: Auto (this session)"). A note fades after about 5 seconds
+  (errors after 12); screen readers still get it.
+- **Theme tokens.** Our panels now use DSH's real theme token names (0.1.0 used names DSH does not define, so it fell
+  back to system colours). The `--raw-agent-*` variables are unchanged; new `--raw-agent-chip-*` variables are listed
+  in `docs/plugin-api.md`.
+
+## 0.1.0 (2026-11-07)
 
 First public pre-release. Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 (Linux).
 
