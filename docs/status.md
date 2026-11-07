@@ -19,6 +19,19 @@ Status values:
 
 Count: 40 rows done, 3 partial (R1.3, R6.3, R8.3), none deferred.
 
+**0.1.2 (side chat tab), checked live in a throwaway DSH profile (Sonnet session), light and dark theme:**
+
+- `/btw` answers now show in a **Side chat** tab in DSH's right sidebar, registered through DSH's public tab API
+  (`ctx.sidebarRightTabs`, `ctx.sidebarRight`). Live: `/btw` typed while a main turn ran opened the tab, showed
+  "Thinking…" and then the Markdown answer while the main turn still ran. Nothing reached the DSH log or the Claude
+  transcript.
+- Each session has its own tab and history. Live: questions in two sessions, then a switch to the first and back; each
+  showed only its own exchange. A Standard session shows no Side chat button and no tab.
+- The **Side chat** button in the composer row and `rawAgentClient.prefill(…, 'side-question')` open the tab (live,
+  through the sample plugin: the text was in the box, nothing was sent). With no CLI running, a question waits with
+  **Start Claude Code**, as before; no process started.
+- On a DSH without the right-sidebar tab API the old inline box is used (unit tests only).
+
 **0.1.1 (UI polish), checked live in a throwaway DSH profile, light and dark theme:**
 
 - The model, effort and mode pickers are compact chips in DSH's own pill style (DSH theme tokens). They show short
@@ -74,7 +87,7 @@ The requirement texts and checks are in [requirements.md](requirements.md). Desi
 | R6.5 Dynamic workflows and ultracode | done | A two-phase workflow showed live phases, agents, status, tokens and output, and its final report came in a wake turn while the session stayed free. "Stop entire workflow" stopped both agents and their processes, in the same CLI process. Ultracode turned on from the picker. After a fix, picking a plain level again turns ultracode off. | Per-agent stop, pause, skip and retry are not offered: the CLI has no SDK control (D48). The typed ultracode keyword is checked only through an SDK probe, not typed in DSH. |
 | R7.1 The `/` menu is the CLI's command list | done | 91 menu rows equal the CLI's latest list, in the CLI's order and with the CLI's names; terminal-only and DSH-taken rows carry a note. A skill, a custom command and an MCP prompt ran, and the CLI's stdin got exactly the typed text. | — |
 | R7.2 Local command output | done | `/context` shows its categories; `/usage` shows in a monospace box. The DSH log keeps the CLI's text byte for byte. DSH's token meter and cost stayed unchanged around them; our context pill follows the CLI's own `getContextUsage()`. | — |
-| R7.3 `/btw` | done | Side questions answered from earlier turns with no tools, with history, during a running turn, and after a page reload, in the same CLI process. Nothing reached the DSH log or the Claude transcript. | A warm cache cannot be measured: the side answers carry no usage. |
+| R7.3 `/btw` | done | Side questions answered from earlier turns with no tools, with history, during a running turn, and after a page reload, in the same CLI process. Nothing reached the DSH log or the Claude transcript. 0.1.2: the answers show in a **Side chat** tab in DSH's right sidebar (live: `/btw` typed during a running turn opened the tab and the answer showed while the turn still ran; each session kept its own history across session switches). | A warm cache cannot be measured: the side answers carry no usage. |
 | R7.4 MCP status, reconnect, toggle | done | The panel matched each MCP status reply (connected, failed, needs sign-in). Reconnect, disable, enable and sign-in start went through the CLI's own controls. | Completing an MCP sign-in was not checked live. "Clear authentication" is not offered. |
 | R7.5 Skill cards name the skill | done | The Skill card showed the skill name, its arguments and the CLI's launch line. | — |
 | R8.1 Per-turn tokens, cost, `modelUsage`, subagent tokens | done | Turn and session figures (input, output, cache read, cache write, cost, per-model usage, subagent tokens) equal the CLI's `result` and the sum of the transcript's calls. | — |
@@ -129,6 +142,7 @@ table above says partial.
   read the user's `showThinkingSummaries`. So a user who sees thinking summaries in the TUI sees none here. Passing that
   setting would be a TUI-default restoration and needs a maintainer decision.
 - **`/btw` warm cache** cannot be measured (side answers carry no usage). `/btw` answers do not stream.
+- **Side chat history** lives in memory (the last 20 exchanges per session, as in the TUI): a DSH restart clears it.
 - **"Summarize from here"** is not offered on rewind (no SDK control).
 
 ### Limits of DSH 0.2.2-rc.1

@@ -3,6 +3,24 @@
 All notable changes to `dsh-raw-agent`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package follows [Semantic Versioning](https://semver.org/). The plugin service API has its own number (`apiVersion`, now 1).
 
+## 0.1.2 (2026-11-07)
+
+The side chat moves into DSH's right sidebar. No change to what reaches Claude Code.
+
+### Changed
+
+- **Side chat tab.** `/btw` questions and answers now show in a **Side chat** tab in DSH's right sidebar, not in a box
+  over the page. It opens when you type `/btw <question>`, press the new **Side chat** button in the composer row, or
+  when another plugin prefills a side question. The tab shows that session's questions and answers (newest at the
+  bottom, answers in Markdown), a box to ask the next one, "Thinking…" while it waits, errors, Cancel, and **Start
+  Claude Code** when no CLI runs. Each session has its own tab and history (in memory, the last 20 exchanges). Nothing
+  is added to the conversation, and no extra `claude` process starts: the question goes to the session's live CLI.
+- **Only in Claude Code sessions.** Other sessions show no Side chat button; a Side chat tab there says it works only
+  in Claude Code sessions.
+- **Plugin API.** `rawAgentClient.prefill(sessionId, text, 'side-question')` now opens the tab and puts the text in
+  its box, once: coming back to the session later does not open it again. The method names did not change.
+- **Older DSH.** Without DSH's right-sidebar tab API the old side-question box is used, as in 0.1.1.
+
 ## 0.1.1 (2026-11-07)
 
 UI polish. No change to what reaches Claude Code.

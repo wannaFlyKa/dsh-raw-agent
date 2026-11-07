@@ -16,7 +16,8 @@ It is plain JavaScript in DSH's module-loader format, so it needs no build step.
    sessions. The sample adds a **Sample** button there.
 3. **Calls every `rawAgentClient` method** (R9.2) from the button's panel:
    - **Info**: `sessionInfo` (and the `backends` list).
-   - **Prefill composer** and **Prefill side question**: `prefill`. Nothing is sent; you press Enter.
+   - **Prefill composer** and **Prefill side question**: `prefill`. Nothing is sent; you press Enter. 0.1.2: **Prefill
+     side question** opens our **Side chat** tab in DSH's right sidebar with the text in its box (checked live).
    - **Stop turn**: `interrupt` (DSH's own Stop; background tasks keep running).
    - **Send**, **Steer**, **Side question**: `send`, `steer`, `askSideQuestion`. Each needs a grant token. Without one,
      the panel shows the refusal (`Refused (no-grant): …`).

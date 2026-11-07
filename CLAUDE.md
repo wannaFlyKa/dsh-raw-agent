@@ -52,6 +52,9 @@ Every change must keep all of these true. If a feature seems to need breaking on
 
 - **Writing `tool/call` events** without a matching advertised tool-call block in `assistant/message` corrupted DSH v4 session logs (dsh-claude issue #57). Prove the native event sequence in a spike before building on it.
 - **`/btw`** is TUI-only as a typed command. Headless mode answers "/btw isn't available in this environment". The SDK's `Query.askSideQuestion(question, {history})` exists (not declared in the types) and uses the same engine.
+- **Side chat tab (0.1.2, D89):** our `/btw` view is a right-sidebar page type (`ctx.sidebarRightTabs.register`, body in the keyed `sidebar.right.pane.tab` seat under the type id, opened with `ctx.sidebarRight.openTabIn`). DSH keeps one sidebar layout per session in localStorage, so each session has its own tab, and a restored layout reopens it. No guide entry (the guide is shared by every session). Re-check the registry and `openTabIn` on a DSH upgrade; without them the inline box is used.
+- **A Cordis plugin body must not return a value.** `ctx.inject(deps, (scope) => fn())` where `fn` returns `true` fails with "Invalid effect" and disposes the scope at once, with no console message: the side chat tab registered, then vanished on most page loads. Use a block body. Allowed returns: nothing, a function, a promise or an iterable.
+- **`keepMounted` tab bodies stay in the DOM** (hidden) for other sessions. Live drivers must select the visible one (`[data-raw-agent="side-chat"]:visible`).
 - **Workflows:** the CLI sends `workflow_progress` (phases and agents) on `system/task_progress`. It is not in the public SDK types.
 - **`interrupt()`** spares background tasks only when `perTaskStopAffordance: true` is set at start. Never dispose the process on Stop.
 - **Model aliases:** with `enforceAvailableModels`, the `haiku`, `sonnet` and `default` aliases can resolve to the user's default model. Never assume an alias is cheap.
@@ -193,6 +196,7 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **The release URL install** (`dsh plugin add <release .tgz URL>`) was checked live in a fresh web-template profile:
   with the README `overrides` block, `node_modules` is 6.3 MB (329 MB without) and the installed files equal the asset.
 - **Copying `.dsh-dev` for a parallel test:** its `node_modules/dsh-raw-agent` is a relative `link:` symlink; re-point it to the repo in the copy.
+- **Clean env and Bedrock:** an `env -i` test DSH must keep the user's `AWS_EC2_METADATA_DISABLED` and the PATH entry of their AWS credential helper. Without them the CLI falls back to the instance role (403 on every model) or finds no credentials, and every turn fails.
 - **Fresh profile drivers:** a profile with no workspace opens DSH's folder dialog first; before the first message our model picker shows only "Start Claude Code to list models", and the start asks the trust question.
 - **Windows tests:** the code joins paths with the OS separator, so a test file seam must compare with `path.join(...)` (or normalise `\` to `/` for recorded POSIX fixture paths), never a hard-coded `/a/b` string. CI run 1 failed 8 tests on Windows for this reason only.
 - **Live grant checks:** after a DSH restart the plugin routes answer `not-our-session` until the session is opened in the UI (DSH mounts its agent then). The stored grants are under `<DSH_HOME>/storages/raw_agent_grants/grants/` (one json file per grant, hash only).

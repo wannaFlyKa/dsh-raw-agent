@@ -110,7 +110,10 @@ interface RawAgentService {
 }
 
 interface RawAgentClientService extends RawAgentService {
-  /** Text into our composer (at the caret) or the side-question box. Nothing is sent. No grant. */
+  /**
+   * Text into our composer (at the caret) or the side chat's box. Nothing is sent. No grant.
+   * 'side-question' (0.1.2): opens or focuses our Side chat tab in DSH's right sidebar and puts the text in its box.
+   */
   prefill(sessionId: string, text: string, target?: 'composer' | 'side-question'): Promise<boolean>;
 }
 
@@ -216,7 +219,7 @@ Facts about grants:
 - A granted message goes into the DSH inbox with `source: { kind: 'raw-agent-plugin', grant: '<grant name>', grantId: '<id>' }` and is written to the session log unchanged. It is **never** `source.kind: 'user'`, which DSH reads as typed by the human. So the log, exports and DSH's title rule can tell plugin text from typed text.
 - A `raw-agent-plugin` message that did not come through our service (a plugin that calls `agent.followup` itself) is dropped like any DSH notice and never reaches the agent.
 - Each admitted message id is used once. A later message that reuses the id (for example one copied from the session log) is dropped. If the user revokes the grant before the agent took the message, the message is dropped too. If DSH refuses the message (`failed`), nothing stays admitted.
-- `askSideQuestion` writes nothing to any log. The question and its answer also show in our side-question panel, so the user sees them.
+- `askSideQuestion` writes nothing to any log. The question and its answer also show in our side chat, so the user sees them (0.1.2: the **Side chat** tab in DSH's right sidebar opens for it).
 - The grant routes (`api/raw-agent/grants…`) use DSH's own cookie authentication. Any page script with that cookie can call them, which is the same trust level as above.
 
 #### 2.5.1 A grant can end: handle it
@@ -264,6 +267,16 @@ Client: offer a canned prompt the user can edit and send (`sessionId` from the e
 
 ```ts
 await ctx.rawAgentClient.prefill(sessionId, 'Explain the last diff in plain words.');
+```
+
+A side question the user can edit and ask (0.1.2): the target `'side-question'` opens our **Side chat** tab in DSH's
+right sidebar (or focuses it) and puts the text in its box. The method name and arguments did not change. On a DSH
+without the right-sidebar tab API (`ctx.sidebarRightTabs`), the text goes into the old side-question box near the
+composer, as in 0.1.1. The tab opens in the session the user is looking at; text for another session waits until the
+user opens that session.
+
+```ts
+await ctx.rawAgentClient.prefill(sessionId, 'What does the failing test check?', 'side-question');
 ```
 
 ### 2.7 The client plugin format
@@ -366,13 +379,14 @@ Then check `sessionInfo(props.sessionId)` (or follow `onEvent`) and render nothi
 
 | Slot | `id` / `key` | Order or priority | What it is |
 | --- | --- | --- | --- |
-| `conversation.input.left` | id `raw-agent-session-controls` | order 50 | Model, effort, mode and agent chips (0.1.1: compact chips in DSH's pill style), MCP, Rewind, Settings files, status line, side-question panel |
+| `conversation.input.left` | id `raw-agent-session-controls` | order 50 | Model, effort, mode and agent chips (0.1.1: compact chips in DSH's pill style), MCP, Side chat button (0.1.2), Rewind, Settings files, status line; the inline side-question box only on a DSH without the right-sidebar tab API |
 | `conversation.composer.dock` | id `raw-agent-context` | order 2 | Context pill and usage panel |
 | `conversation.input.dock` | id `raw-agent-lifecycle` | order 30 | Crash or exit banner with Restart; fork and recovery notes |
 | `conversation.session.header.actions` | id `raw-agent-agents` | order 20 | Agents button (children, team, background tasks); child strip in a child session |
 | `conversation.composer` | (selected by interaction kind `raw-agent-ask`) | priority -20 | Permission, question, plan and elicitation cards that take over the composer. To replace it, register below -20 and select only `raw-agent-ask`. **Unverified** for third parties. |
 | `settings.section` | id `raw-agent-plugin-access` | order 900 | The **Agent plugin access** (grants) page. Live M8: it renders; DSH's nav row may cut the name short. |
 | `conversation.input.left` | id `raw-agent-plugin-extras` | order 51 | Declares our slot `raw-agent.controls.extra` (section 3.2) and renders what fills it. |
+| `sidebar.right.pane.tab` | key `dsh-raw-agent/side-chat` (tab kind `raw-agent-side-chat`, registered in `ctx.sidebarRightTabs`) | — | 0.1.2: the **Side chat** tab in DSH's right sidebar: this session's side questions and answers, and a box to ask. A page type with no guide entry: it opens from our Side chat button, `/btw` and `prefill(…, 'side-question')`. |
 | `settings.general.item` | id `raw-agent-access-note` | order -19 | 0.1.1: a note right under DSH's own access row (order -20) in Settings > General: DSH's file access does not control Claude Code sessions. |
 
 Our entries render nothing in sessions that are not ours (the Host answers 404).
