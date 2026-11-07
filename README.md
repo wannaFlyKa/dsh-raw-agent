@@ -24,15 +24,24 @@ See [docs/requirements.md](docs/requirements.md) for the full list.
 You need DSH `>=0.2.2-rc.1 <0.3.0-0`, Node.js 24.9 or newer, pnpm (through `corepack enable`), and your own `claude`,
 signed in. Use a profile name of your choice in place of `<profile>` (for example `web`).
 
-### From a packed tarball
-
-If someone gave you `dsh-raw-agent-<version>.tgz` (or you packed it yourself, see the next section):
+### From the GitHub Release (recommended)
 
 ```sh
-dsh plugin --profile <profile> add /absolute/path/to/dsh-raw-agent-0.1.0.tgz
+dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.0/dsh-raw-agent-0.1.0.tgz
 ```
 
-Pass an absolute path. Restart DSH after the add.
+`dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Restart DSH
+after the add. Each [release](https://github.com/wannaFlyKa/dsh-raw-agent/releases) has the URL for its version.
+
+Optional: the install pulls one large SDK platform package that the plugin never runs. To drop it, add the `overrides`
+block from [packages/plugin/README.md](packages/plugin/README.md#optional-drop-the-sdk-platform-package) to the
+profile's `pnpm-workspace.yaml` before the add.
+
+To remove the plugin: `dsh plugin --profile <profile> remove dsh-raw-agent`. Removing or upgrading it ends every running
+Claude Code process of that profile, as quitting the terminal app does.
+
+The package is not on npm yet. npm publishing is planned for later; then `dsh plugin --profile <profile> add
+dsh-raw-agent` will do the same.
 
 ### From source
 
@@ -46,11 +55,8 @@ pnpm --filter dsh-raw-agent pack --pack-destination dist/
 dsh plugin --profile <profile> add "$PWD/packages/plugin/dist/dsh-raw-agent-0.1.0.tgz"
 ```
 
-`pnpm --filter` runs in the package folder, so the tarball lands in `packages/plugin/dist/`. Restart DSH after the add.
-To remove the plugin: `dsh plugin --profile <profile> remove dsh-raw-agent`. Removing or upgrading it ends every running
-Claude Code process of that profile, as quitting the terminal app does.
-
-When the package is on npm, `dsh plugin --profile <profile> add dsh-raw-agent` will do the same.
+`pnpm --filter` runs in the package folder, so the tarball lands in `packages/plugin/dist/`. Pass an absolute path to a
+local tarball. Restart DSH after the add.
 
 ### First run
 

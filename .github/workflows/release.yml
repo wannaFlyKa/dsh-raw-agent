@@ -1,0 +1,81 @@
+# Release: on a `v*` tag, run the full check and attach the packed plugin to a GitHub Release.
+# npm publishing is planned later; for now users install from the release asset URL.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # The DSH version our tests load in-process (same as ci.yml).
+  DSH_TESTED: 0.2.2-rc.1
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check the tag matches the package version
+        id: version
+        run: |
+          version="$(node -p "require('./packages/plugin/package.json').version")"
+          tag="${GITHUB_REF_NAME}"
+          if [ "${tag}" != "v${version}" ]; then
+            echo "::error::Tag ${tag} does not match packages/plugin/package.json version ${version}"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: Enable pnpm (corepack)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Install DSH for the in-process round-trip tests
+        run: |
+          npm install --global "@deepseek-ai/dsh@${DSH_TESTED}"
+          echo "DSH_PKG=$(npm root --global)/@deepseek-ai/dsh/node_modules" >> "$GITHUB_ENV"
+      - name: Build
+        run: pnpm build
+      - name: Lint
+        run: pnpm lint
+      - name: Type check
+        run: pnpm typecheck
+      - name: Test
+        run: pnpm test
+      - name: Check the packed file list
+        run: pnpm check-pack
+      - name: Pack
+        run: |
+          pnpm --filter dsh-raw-agent pack --pack-destination dist/
+          ls -l "packages/plugin/dist/dsh-raw-agent-${{ steps.version.outputs.version }}.tgz"
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          asset="packages/plugin/dist/dsh-raw-agent-${VERSION}.tgz"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-raw-agent-${VERSION}.tgz"
+          {
+            echo "## Install"
+            echo
+            echo '```sh'
+            echo "dsh plugin --profile <profile> add ${url}"
+            echo '```'
+            echo
+            echo "Restart DSH, start a new session and pick the **Claude Code** agent preset."
+            echo "See the [README](https://github.com/${GITHUB_REPOSITORY}#install) for the optional \`overrides\` block and the first-run steps."
+          } > notes.md
+          gh release create "${GITHUB_REF_NAME}" "${asset}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag

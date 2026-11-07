@@ -74,7 +74,10 @@ describe('published manifest (§8)', () => {
   it('the user README covers install, overrides, settings access, support limits and privacy', () => {
     const readme = readFileSync(`${dir}README.md`, 'utf8');
     expect(readme).toContain('dsh plugin --profile');
-    expect(readme).toContain('add dsh-raw-agent');
+    // The install URL names the current version (a release bump must update it).
+    expect(readme).toContain(
+      `add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v${pkg.version}/dsh-raw-agent-${pkg.version}.tgz`,
+    );
     expect(readme).toContain('overrides:');
     for (const p of ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64', 'win32-arm64'])
       expect(readme).toContain(`@anthropic-ai/claude-agent-sdk-${p}': '-'`);

@@ -136,7 +136,9 @@ packages/plugin/          the one published bundle (dsh-raw-agent) and compositi
 examples/sample-restyle/  sample plugin (plain JS, module-loader format): shadows the context pill, fills
                           raw-agent.controls.extra, calls every rawAgentClient method
 .github/workflows/ci.yml  CI: ubuntu/macos/windows test job, nightly dsh-next job
-scripts/                  check-imports.mjs, bundle.mjs, api-types.mjs, check-pack.mjs, live/ (isolated DSH setup, Playwright)
+.github/workflows/release.yml  on a v* tag: full check, pack, GitHub Release with the tarball
+scripts/                  check-imports.mjs, bundle.mjs, client-bundle.mjs, api-types.mjs, check-pack.mjs, clean.mjs,
+                          test-cli-constants.mjs (live Playwright drivers are local only, under research/)
 research/                 local only, git-ignored evaluation material
 ```
 
@@ -154,12 +156,18 @@ pnpm lint           # eslint, prettier --check, import check
 pnpm typecheck
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
 pnpm check-pack     # after pnpm build: pack and compare the exact tarball file list
-pnpm live           # Playwright suites against the isolated DSH on port 8790 (see §5)
 pnpm test:cli-constants  # check our env lists and reject texts against the installed claude binary
 ```
 
 - **Published files:** the tarball list is fixed in `scripts/check-pack.mjs` (no source maps, no `lib/types`). Adding a shipped file means updating `files` in `packages/plugin/package.json` and that list. `lib/api.d.ts` is generated from `core/src/plugin-api.ts`, which must keep importing nothing.
 - **In-process DSH tests** (round trips, `route-security`) load DSH from `DSH_PKG` or a `dsh` on `PATH`; CI sets `DSH_PKG` to the global install's `@deepseek-ai/dsh/node_modules`. Without DSH they skip.
+- **Live checks:** there is no `pnpm live` script. The Playwright drivers are local (git-ignored `research/`) and run
+  against the isolated DSH on port 8790 (see §5).
+- **Cut a release:** bump `version` in `packages/plugin/package.json` (and `CHANGELOG.md`, and the version in the README
+  install URLs), commit, push `main` and wait for CI green. Then `git tag vX.Y.Z` and push the tag the same way as `main`
+  (`... push origin vX.Y.Z`). `release.yml` checks that the tag matches the package version, runs the full check and
+  attaches `dsh-raw-agent-X.Y.Z.tgz` to the GitHub Release. npm publishing is planned later. A failed release: delete
+  the release and the tag (`gh release delete vX.Y.Z --cleanup-tag`, `git tag -d vX.Y.Z`), fix, tag again.
 - **Push:** this machine's git has no credential helper. Push with
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`.
 - **Ignore rules** are anchored (`/research/`, `/.dsh-dev/`) so that `docs/research/` is tracked.
