@@ -1,8 +1,10 @@
 // The public services in DSH (R9.2, D62, D66, D87): the Host service `rawAgent`, the routes the
 // Client service `rawAgentClient` calls, the grant panel's routes, and where grants are stored.
 //
-// Grant storage (D24, D87): the grants live in the Host entry's DSH plugin config, field
-// `grants`. A write goes through Cordis `ctx.fiber.update(config)` (`P/cordis/src/fiber.ts`
+// Grant storage (D24, D87, D88): the grants live in a DSH storage domain (`grant-storage.ts`), so
+// they are kept across a DSH restart. The Host entry config's `grants` field is the old place: its
+// grants are taken in once, and it is the fallback when `ctx.storageDomain` is missing or cannot
+// open. A write to the config goes through Cordis `ctx.fiber.update(config)` (`P/cordis/src/fiber.ts`
 // `update`: it emits `internal/commit`, which the loader saves into the entry tree,
 // `P/cordis-plugin-loader/src/index.ts` `internal/commit`). An ordinary config update restarts
 // the entry, and a restart would end every agent process (D75), so the entry keeps an
@@ -10,8 +12,8 @@
 // `executablePath`, `options`; all read at use time) it takes the new config and
 // does not call `next()` ("omitting `next()` keeps the current instance",
 // `P/cordis/src/events.ts` `internal/update`). Live (M8, S7) a user's edit of the profile patch goes through this hook, but our own
-// write is not saved to any profile file for a bundle row, so grants last for one DSH run and the
-// panel says so (`durable: false`). Moving them to a DSH-owned store is the D87 fallback (open).
+// write is not saved to any profile file for a bundle row, so fallback grants last for one DSH run
+// and the panel says so (`durable: false`).
 
 import {
   RAW_AGENT_SERVICE,
@@ -21,6 +23,7 @@ import {
   type RawAgentService,
 } from '@dsh-raw-agent/core';
 import { GrantStore, type GrantPersistence, type GrantRecord } from '../grants.js';
+import { domainGrantPersistence } from './grant-storage.js';
 import { createRawAgentService, type PluginAgentOps, type PluginMessage } from '../plugin-service.js';
 import type { SessionRegistry } from '../registry.js';
 import { readJson } from './routes.js';
@@ -208,12 +211,18 @@ export function onlyRuntimeFieldsChanged(before: unknown, after: unknown): boole
  * Store grants in the Host entry config without a restart (see the file comment). Returns the
  * persistence for the grant store.
  */
-export function configGrantPersistence(ctx: CordisContext, config: HostConfigAccess): GrantPersistence {
+export function configGrantPersistence(
+  ctx: CordisContext,
+  config: HostConfigAccess,
+  /** Called after a config change was taken in place (the grant storage takes in new grants). */
+  onChange?: () => void,
+): GrantPersistence {
   // Our own fiber's update hook (not global): a change of runtime fields only applies in place.
   try {
     ctx.on('internal/update', ((resolved: unknown, next: () => unknown) => {
       if (resolved !== null && typeof resolved === 'object' && onlyRuntimeFieldsChanged(config.get() ?? {}, resolved)) {
         config.set(resolved as HostConfigShape);
+        onChange?.();
         return undefined;
       }
       return next();
@@ -242,7 +251,7 @@ export function configGrantPersistence(ctx: CordisContext, config: HostConfigAcc
 export interface MountServicesOptions {
   registry: SessionRegistry;
   factories: readonly AgentBackendFactory[];
-  /** The Host entry config; without it grants are kept in memory only. */
+  /** The Host entry config: old grants to take in, and the fallback store (D88). */
   hostConfig?: HostConfigAccess;
   /** Test seam. */
   grants?: GrantStore;
@@ -253,11 +262,31 @@ export interface MountedServices {
   grants: GrantStore;
 }
 
+/** Nothing stored: the fallback when there is no entry config. */
+const NO_PERSISTENCE: GrantPersistence = { load: () => undefined, save: async () => false, durable: () => false };
+
+/**
+ * The grant persistence (D88): a DSH storage domain once it is open, else the entry config (kept for
+ * this DSH run only). Old config grants are taken in once.
+ */
+export function grantPersistence(ctx: CordisContext, hostConfig: HostConfigAccess | undefined): GrantPersistence {
+  // Called only after the hook took a config change, so `durable` is set by then.
+  const takeIn = () =>
+    void durable
+      .importConfig()
+      .catch((e: unknown) => ctx.logger?.warn('[raw-agent] could not take in config grants', String(e)));
+  const fallback = hostConfig ? configGrantPersistence(ctx, hostConfig, takeIn) : NO_PERSISTENCE;
+  const durable = domainGrantPersistence(ctx, {
+    fallback,
+    ...(hostConfig ? { importable: () => hostConfig.get()?.grants } : {}),
+  });
+  return durable;
+}
+
 /** Provide `rawAgent` and register the Client service's and the grant panel's routes. */
 export function mountServices(ctx: CordisContext, o: MountServicesOptions): MountedServices {
   const warn = (note: string, detail?: unknown) => ctx.logger?.warn(`[raw-agent] ${note}`, detail ?? '');
-  const grants =
-    o.grants ?? new GrantStore(o.hostConfig ? { persistence: configGrantPersistence(ctx, o.hostConfig) } : {});
+  const grants = o.grants ?? new GrantStore({ persistence: grantPersistence(ctx, o.hostConfig) });
   const service = createRawAgentService({
     registry: o.registry,
     factories: o.factories,

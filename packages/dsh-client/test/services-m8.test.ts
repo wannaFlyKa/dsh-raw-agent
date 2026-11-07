@@ -227,6 +227,11 @@ describe('plugin access panel (D66)', () => {
     );
     expect(html).toContain('not a security boundary');
     expect(html).toContain('Create grant');
-    expect(grantNote({ id: 'g', label: 'L', created: 0, saved: false, uses: 2 })).toMatch(/2 times.*DSH restarts/);
+    expect(grantNote({ id: 'g', label: 'L', created: 0, saved: false, uses: 2 })).toMatch(
+      /2 times.*kept until DSH restarts/,
+    );
+    expect(grantNote({ id: 'g', label: 'L', created: 0, saved: true, uses: 0 })).toMatch(
+      /saved: kept after a DSH restart/,
+    );
   });
 });

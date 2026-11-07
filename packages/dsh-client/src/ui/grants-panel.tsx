@@ -20,7 +20,7 @@ const msg = (e: unknown) => String((e as Error)?.message ?? e);
 export function grantNote(g: GrantWire): string {
   const parts = [`created ${new Date(g.created).toLocaleString()}`];
   if (g.uses > 0) parts.push(`used ${g.uses === 1 ? 'once' : `${g.uses} times`} in this run`);
-  if (!g.saved) parts.push('kept until DSH restarts (not saved to a file)');
+  parts.push(g.saved ? 'saved: kept after a DSH restart' : 'kept until DSH restarts (not saved)');
   return parts.join(' · ');
 }
 

@@ -98,6 +98,7 @@ export {
   onlyRuntimeFieldsChanged,
   RUNTIME_CONFIG_FIELDS,
   configGrantPersistence,
+  grantPersistence,
   PLUGIN_SESSION_INFO_ROUTE,
   PLUGIN_INTERRUPT_ROUTE,
   PLUGIN_SEND_ROUTE,
@@ -110,6 +111,18 @@ export {
   type MountServicesOptions,
   type MountedServices,
 } from './services.js';
+export {
+  domainGrantPersistence,
+  GRANTS_DOMAIN_NAME,
+  GRANTS_DOMAIN_VERSION,
+  GRANTS_DOMAIN_SPEC,
+  type DomainGrantPersistence,
+  type DomainGrantOptions,
+  type DomainFacilityLike,
+  type GrantDomainLike,
+  type DomainTableLike,
+  type ImportedMark,
+} from './grant-storage.js';
 export { createChildSession, childPreStep, liveChildCount, type ChildPortOptions } from './children.js';
 export { WORKFLOW_EVENT_TYPES, workflowEventData, appendWorkflowRecord, openWorkflowRuns } from './workflows.js';
 

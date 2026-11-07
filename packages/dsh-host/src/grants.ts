@@ -9,9 +9,9 @@
 // service. It stops a well-behaved plugin from sending text to the agent without the user's
 // consent (rule 3).
 //
-// Storage (D24, D87): the records live in the Host entry's DSH plugin config (`grants`), written
-// through the persistence the port gives. A record created while the write fails is kept in
-// memory for this run only, and the panel says so. A persistence that is not durable (M8 live:
+// Storage (D24, D87, D88): the records are written through the persistence the port gives: a DSH
+// storage domain, kept across a DSH restart. A record created while the write fails is kept in
+// memory for this run only, and the panel says so. A persistence that is not durable (the fallback:
 // DSH 0.2.2-rc.1 keeps a bundle row's config change in memory only) marks every grant that way.
 
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -30,7 +30,7 @@ export interface GrantView {
   id: string;
   label: string;
   created: number;
-  /** false: kept in memory only (the config write failed); it ends with this DSH run. */
+  /** true: saved in DSH storage, kept after a restart. false: it ends with this DSH run. */
   saved: boolean;
   /** Calls made with it in this DSH run. */
   uses: number;
