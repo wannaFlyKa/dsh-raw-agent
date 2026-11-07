@@ -41,10 +41,20 @@ export interface SessionSnapshot {
    * `seq` changes. Browser state only; nothing is sent.
    */
   panelRequest?: { panel: PanelName; seq: number };
+  /**
+   * R9.2: text another plugin put toward our composer or side-question box with
+   * `rawAgentClient.prefill`. The controls take it when `seq` changes. Nothing is sent: the user
+   * presses Enter.
+   */
+  prefillRequest?: { text: string; target: PrefillTarget; seq: number };
 }
 
+/** Where `prefill` puts its text. */
+export type PrefillTarget = 'composer' | 'side-question';
+
 /** The panels the `/` source can open: MCP (D55) and rewind (D30, M7). */
-export type PanelName = 'mcp' | 'rewind';
+/** `model`: DSH's `/model` in our sessions focuses (and opens) our model picker (M8 polish). */
+export type PanelName = 'mcp' | 'rewind' | 'model';
 
 export interface PollTimings {
   ready: number;
@@ -394,6 +404,11 @@ export class SessionControlStore {
 
   /** "Start <displayName>" (D4): spawn without a message, for controls that need a process. */
   /** Ask the controls of this session to open one of our panels (D55 `/mcp`, D30 `/rewind`). */
+  /** R9.2: hand prefill text to the controls (browser state only; nothing is sent). */
+  requestPrefill(text: string, target: PrefillTarget): void {
+    this.#set({ prefillRequest: { text, target, seq: (this.#snapshot.prefillRequest?.seq ?? 0) + 1 } });
+  }
+
   requestPanel(panel: PanelName): void {
     this.#set({ panelRequest: { panel, seq: (this.#snapshot.panelRequest?.seq ?? 0) + 1 } });
   }

@@ -1,5 +1,5 @@
-// M7 (R3.6, D29, D30, D75): the lifecycle banner of one of our sessions, in the dock below the
-// composer. A crash or an exit of the agent shows its own words and a Restart button (it resumes
+// M7 (R3.6, D29, D30, D75): the lifecycle banner of one of our sessions, in the card stack above
+// the composer. A crash or an exit of the agent shows its own words and a Restart button (it resumes
 // the same conversation, D28); the fork, restore, recovery and restart facts show as short notes.
 // Each can be dismissed; a new fact shows again. Renders nothing in a session that is not ours.
 
@@ -23,7 +23,22 @@ const box = (color: string): React.CSSProperties => ({
   fontSize: 12,
   margin: '4px 0',
   maxWidth: '100%',
+  background: 'var(--raw-agent-surface, var(--dsw-alias-bg-base, transparent))',
 });
+
+// M8 polish: a card in DSH's stack above the composer (`conversation.input.dock`), sized as DSH's
+// own todo and goal cards there, so it never shares the pill row below the composer.
+const inset = 'var(--dsh-composer-dock-inset, 0px)';
+const clearance = 'var(--dsh-composer-side-clearance, 0px)';
+export const stackStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  boxSizing: 'border-box',
+  minWidth: 0,
+  width: `calc(100% - ${clearance} - ${clearance} - ${inset} - ${inset} - ${inset} - ${inset})`,
+  maxWidth: `calc(var(--dsh-composer-card-max-width, 100%) - ${inset} - ${inset} - ${inset} - ${inset})`,
+  margin: '0 auto',
+};
 
 const detailStyle: React.CSSProperties = {
   margin: 0,
@@ -51,10 +66,7 @@ export function LifecycleBanner(props: LifecycleBannerProps): React.ReactElement
   const showExit = exit !== undefined && !dismissed.has(exit.key);
   if (!showExit && notes.length === 0) return null;
   return (
-    <div
-      data-raw-agent="lifecycle"
-      style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flexBasis: '100%' }}
-    >
+    <div data-raw-agent="lifecycle" style={stackStyle}>
       {showExit && exit && (
         <div style={box(exit.level === 'error' ? danger : warn)} role="alert" data-raw-agent="exit-banner">
           <strong>{exit.title}</strong>

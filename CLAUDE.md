@@ -57,7 +57,7 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Model aliases:** with `enforceAvailableModels`, the `haiku`, `sonnet` and `default` aliases can resolve to the user's default model. Never assume an alias is cheap.
 - **Sandboxing:** inside a DSH file sandbox, Claude Code can fail with `EROFS` on `~/.claude/session-env`. Spawn the CLI from a process that can write to `~/.claude`.
 - **Host session variables:** a DSH started from inside a Claude Code session inherits `CLAUDE*` variables (see rule 5).
-- **DSH's model seat and `/model` save the profile default** (`agentDefaultModel.saveSelection`). Our catalog lists no model rows, so they cannot pick our provider; our own pickers live in `conversation.input.left` and call `agent.model.select` (session only) plus `setModel`.
+- **DSH's model seat and `/model` save the profile default** (`agentDefaultModel.saveSelection`). Our catalog lists no model rows, so they cannot pick our provider; our own pickers live in `conversation.input.left` and call `agent.model.select` (session only) plus `setModel`. In our sessions DSH's `/model` contribution is wrapped (`commandUi.live.contributions.get`, a DSH internal: re-check on every DSH upgrade) into an action that opens our picker.
 - **Single DSH slots** (`conversation.input.model`, `conversation.input.permission`) cannot be replaced per session. To hide the permission seat in our sessions only, mark the ancestor that holds `[data-slot="conversation.input.permission"]`. The seat wrapper is `display: contents`, so a visibility probe must look at its children.
 - **DSH `/permission`** changes only DSH's approval policy, which Claude ignores. Our preset registers its own `/permission` (shows or switches the Claude mode). DSH's client still opens its preset popup from a decoration keyed by name, so our client marks that decoration unavailable in our sessions. This reads a DSH client internal (`commandUi.live.decorations`); re-check it on every DSH upgrade. DSH shows no command result in the chat, so we show the answer in our status line.
 - **A mode set before the CLI reports one** (for example plan picked before the first message) produces a `status` frame before `init`. Seed the process start mode first (start option, else the settings `defaultMode`, else `default`), or the plan card loses "use auto mode".
@@ -72,6 +72,7 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Child asks:** a child session has its own (empty) client store. Keep asks published on a child in a separate map, or the child's store removes the parent's publication on every poll.
 - **Child usage numbers:** the last `task_progress` comes early. Use the `task_notification`'s final `usage`, and never show a finished child's run time below its wall time.
 - **SIGKILL of DSH leaves the CLI running** while a background task runs (it re-parents to pid 1 and may run one wake turn by itself). A normal stop or restart is clean. Handled by the D75 orphan guard (one `node -e` watcher per CLI); live, no CLI is left about 3 s after the kill.
+- **Our lifecycle banner lives in `conversation.input.dock`** (the card stack above the composer). The `conversation.composer.dock` row below it is one non-wrapping flex line: a wide entry there squeezes DSH's usage pills.
 - **DSH's job-list Stop needs two presses** (arm, then confirm). A live driver that presses once only arms it.
 - **Track an input only after its SDK message is built.** A send that throws after `tracker.sent()` leaves a pending id, and every later turn end then waits for it forever.
 - **Workflow transcripts:** the Workflow launch result names `<session>/subagents/workflows/wf_…` before the CLI creates that folder. Keep the folder pending and check it again at each read; never give up after one failed check.
@@ -92,6 +93,9 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **`resumeDropsTurn` refusal** comes as a boot `result error_during_execution`. The plain-cut restart needs its own `AbortController` (closing the refused query aborts the old one) and must get the session's model, effort and mode choices again, or it runs on the settings model (D29).
 - **The real `rewind_files` answer** (CLI 2.1.318) is only `{canRewind, skippedLinks}`. Run a dry run first to get the file list and line counts (D30). A forked process can restore the source's checkpoints.
 - **DSH offers no Branch button on an aborted (stopped) turn.** A fork right after a Stop goes through our rewind dialog.
+- **Plugin messages (D66):** a granted plugin message has `source.kind: 'raw-agent-plugin'` and is forwarded only when the Host service admitted its id in the registry (`admitPluginMessage`). Never widen the `'user'` checks to the plugin kind without that admission check. Grants are stored as hashes in the Host entry config `grants`; the entry's own `internal/update` hook takes a change of `grants`, `executablePath` or `options` without a remount (D87, live M8: same pid). DSH 0.2.2-rc.1 does not save our write for a bundle-inserted row, so grants end at a DSH restart (`durable: false`; panel says so).
+- **`--public-url` alone gives 403** on every API route (DSH's own trusted-host gate, ours and DSH's). Behind a proxy, also pass a matching `--trusted-host`.
+- **Plugin text reaches the CLI as `origin: {kind: 'human'}`** (same input path as typed text). The model cannot tell it from typed text; only the DSH log does (`source.kind`).
 - **DSH 0.2.2-rc.1 stores attached files with `"` replaced by `_`**, so a path with both a space and a `"` does not reach us from the UI (the unit test still covers it).
 
 ## 5. Development workflow
@@ -109,6 +113,7 @@ CLAUDE.md                 this file (single source of truth)
 AGENTS.md                 pointer to CLAUDE.md
 docs/requirements.md      requirement list with acceptance checks and a status column
 docs/architecture.md      design decisions (D-numbers), event mapping, backend interface
+docs/plugin-api.md        public services (rawAgent, rawAgentClient), grants, restyle points (R9.1, R9.2)
 docs/research/            public research notes (no local paths or ids)
 packages/core/            backend interface, event union, shared pure logic
 packages/backend-claude/  the ONLY package that imports the Claude Agent SDK
@@ -118,8 +123,10 @@ packages/dsh-client/      browser half (TSX). DSH touch points only in src/port/
 packages/views-claude/    Claude tool views
 packages/testkit/         stub backend, fake CLI, recorded fixtures, in-process DSH loop harness
 packages/plugin/          the one published bundle (dsh-raw-agent) and composition root
-examples/sample-restyle/  sample plugin that restyles our UI through our services
-scripts/                  check-imports.mjs, bundle.mjs, live/ (isolated DSH setup, Playwright)
+examples/sample-restyle/  sample plugin (plain JS, module-loader format): shadows the context pill, fills
+                          raw-agent.controls.extra, calls every rawAgentClient method
+.github/workflows/ci.yml  CI: ubuntu/macos/windows test job, nightly dsh-next job
+scripts/                  check-imports.mjs, bundle.mjs, api-types.mjs, check-pack.mjs, live/ (isolated DSH setup, Playwright)
 research/                 local only, git-ignored evaluation material
 ```
 
@@ -136,10 +143,13 @@ pnpm test           # unit + fake-CLI contract + DSH round-trip tests
 pnpm lint           # eslint, prettier --check, import check
 pnpm typecheck
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
+pnpm check-pack     # after pnpm build: pack and compare the exact tarball file list
 pnpm live           # Playwright suites against the isolated DSH on port 8790 (see §5)
 pnpm test:cli-constants  # check our env lists and reject texts against the installed claude binary
 ```
 
+- **Published files:** the tarball list is fixed in `scripts/check-pack.mjs` (no source maps, no `lib/types`). Adding a shipped file means updating `files` in `packages/plugin/package.json` and that list. `lib/api.d.ts` is generated from `core/src/plugin-api.ts`, which must keep importing nothing.
+- **In-process DSH tests** (round trips, `route-security`) load DSH from `DSH_PKG` or a `dsh` on `PATH`; CI sets `DSH_PKG` to the global install's `@deepseek-ai/dsh/node_modules`. Without DSH they skip.
 - **Push:** this machine's git has no credential helper. Push with
   `git -c credential.helper= -c credential.helper='!gh auth git-credential' push origin main`.
 - **Ignore rules** are anchored (`/research/`, `/.dsh-dev/`) so that `docs/research/` is tracked.
@@ -153,4 +163,6 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live command checks:** set `executablePath` to a `tee` wrapper and compare the CLI's stdin lines with what was typed; a menu open on Enter replaces the line with the picked row (for example `/cost` becomes `/usage`).
 - **Live rewind refusal test:** a `tee` wrapper (`executablePath`) that replaces the `--resume-drops-turn` value with a bogus id once forces the CLI's refusal. Restore `cordis.patch.yml` afterwards.
 - **Live crash test:** match the test CLI by binary and cwd before `kill -9` (other `claude` processes run on this machine, and a `pgrep -f` can match the driver's own command line).
+- **Copying `.dsh-dev` for a parallel test:** its `node_modules/dsh-raw-agent` is a relative `link:` symlink; re-point it to the repo in the copy.
+- **Fresh profile drivers:** a profile with no workspace opens DSH's folder dialog first; before the first message our model picker shows only "Start Claude Code to list models", and the start asks the trust question.
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

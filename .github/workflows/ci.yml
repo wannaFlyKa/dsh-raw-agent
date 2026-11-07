@@ -1,0 +1,81 @@
+# CI (architecture §9, R10.2, R10.4, K18). Live tests run locally only: they need the user's own
+# `claude` and an account.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # The dsh-next job: each night, against DSH's newest `next` tag.
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The DSH version our tests load in-process (the DSH loop round trips, the route fence test).
+  DSH_TESTED: 0.2.2-rc.1
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    if: github.event_name != 'schedule'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Enable pnpm (corepack)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Install DSH for the in-process round-trip tests
+        run: |
+          npm install --global "@deepseek-ai/dsh@${DSH_TESTED}"
+          echo "DSH_PKG=$(npm root --global)/@deepseek-ai/dsh/node_modules" >> "$GITHUB_ENV"
+      - name: Build
+        run: pnpm build
+      - name: Lint
+        run: pnpm lint
+      - name: Type check
+        run: pnpm typecheck
+      - name: Test
+        run: pnpm test
+      - name: Check the packed file list
+        run: pnpm check-pack
+
+  dsh-next:
+    # K18: catch DSH drift early. The DSH packages come from the newest `next` tag; the writer
+    # round trips (with the stream replay check) and the fake-CLI and stub suites run against them.
+    name: dsh-next (newest DSH next tag)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Install DSH next
+        run: |
+          npm install --global @deepseek-ai/dsh@next
+          echo "DSH_PKG=$(npm root --global)/@deepseek-ai/dsh/node_modules" >> "$GITHUB_ENV"
+          echo "DSH next: $(npm view @deepseek-ai/dsh@next version)"
+      - run: pnpm build
+      - name: Round trips, fake CLI, stub backend and route fence against DSH next
+        run: pnpm exec vitest run packages/plugin/test packages/backend-claude/test packages/dsh-host/test

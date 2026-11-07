@@ -240,6 +240,8 @@ export interface RuntimeState {
     reason?: ExitReason;
     code?: number;
     signal?: string;
+    /** The end of the agent's error output: shown by the plugin UI, never written to the log (M8). */
+    stderr?: string;
   };
 }
 
@@ -283,6 +285,13 @@ export interface RewindPoint {
   messageId: string;
   /** Its text, cut to `REWIND_TEXT_MAX` characters (the dialog's label). */
   text: string;
+  /**
+   * M8: the whole text when `text` is cut and the message is not too long (`REWIND_DRAFT_MAX`);
+   * "restore conversation" puts it back in the branch's composer.
+   */
+  draft?: string;
+  /** M8: `text` is cut (the label ends with "…"). */
+  cut?: boolean;
   /** Non-text parts (images, files) of the message. */
   attachments?: number;
   /** When it was written (host time). */
@@ -310,8 +319,12 @@ export interface LiveInfo {
   model?: string;
   mode?: string;
   version?: string;
-  /** The last line the agent showed the user outside the conversation (`notice` event). */
-  notice?: { level: string; text: string; at: number };
+  /**
+   * The last line the agent showed the user outside the conversation (`notice` event). `topic:
+   * 'lifecycle'` marks a line the lifecycle view also holds (M8 polish): the plugin UI shows that
+   * fact once, as a banner note, not again in the status line.
+   */
+  notice?: { level: string; text: string; at: number; topic?: 'lifecycle' };
   /** D15: the main-thread agent the process was started with (passed at spawn, or read on resume). */
   agent?: string;
   /**
@@ -382,6 +395,8 @@ export interface SessionView {
   mcp?: Array<{ name: string; status: string }>;
   /** M7: fork, rewind, recovery and restart facts. */
   lifecycle?: LifecycleView;
+  /** M8 (R9.2): the agent's own session id while a process runs (the public service shows it). */
+  backendSessionId?: string;
 }
 
 /** The commands route's answer (R7.1). Never starts a process. */
@@ -688,6 +703,8 @@ export class SessionRuntime {
   #recoveryTurn = false;
   /** The backend session id recovered steps are bound to while no process runs. */
   #recoverySession: string | undefined;
+  /** The open check (`#checkOnOpen`) ran; it runs once, at the latest before the first spawn. */
+  #openChecked = false;
 
   constructor(factory: AgentBackendFactory, port: HostSessionPort, opts: SessionRuntimeOptions) {
     this.#factory = factory;
@@ -738,15 +755,16 @@ export class SessionRuntime {
    * host stop (D75), a branch of a child's session, and replies the agent wrote that the log does
    * not hold (R3.6). No process starts (rule 9); the record read is a file read.
    */
-  #checkOnOpen(): void {
+  #checkOnOpen(beforeSpawn = false): void {
     const port = this.#port;
-    if (!port || this.#disposed) return;
+    if (this.#openChecked || !port || this.#disposed) return;
+    this.#openChecked = true;
     const name = this.#factory.displayName;
     try {
       const ended = port.tasksEndedByStop?.() ?? [];
       if (ended.length > 0) {
         this.#lifecycle.endedByStop = ended;
-        this.showNotice('warning', endedByStopNotice(name, ended));
+        this.showNotice('warning', endedByStopNotice(name, ended), 'lifecycle');
       }
     } catch (error) {
       this.#warn('could not read the jobs of the last run', String((error as Error)?.message ?? error));
@@ -754,12 +772,13 @@ export class SessionRuntime {
     try {
       if (port.forkedFromChild?.() === true) {
         this.#lifecycle.forkedFromChild = true;
-        this.showNotice('info', childForkNotice(name));
+        this.showNotice('info', childForkNotice(name), 'lifecycle');
       }
     } catch (error) {
       this.#warn('could not read the fork prefix', String((error as Error)?.message ?? error));
     }
-    if (!this.#backend && !this.#starting) this.#recovery = this.#recoverTail('restart');
+    // A spawn that started before this check ran (a message sent at once) runs it first itself.
+    if (!this.#backend && (beforeSpawn || !this.#starting)) this.#recovery = this.#recoverTail('restart');
   }
 
   /**
@@ -808,7 +827,8 @@ export class SessionRuntime {
       if (unseen) {
         const note = `${name} has more than this session shows: ${list.join('; ')}.`;
         this.#lifecycle.recovered = { at: this.#now(), why, steps: 0, note };
-        this.showNotice('warning', note);
+        // The banner shows a restart's read-back as a note; a crash's is in the exit banner text only.
+        this.showNotice('warning', note, why === 'restart' ? 'lifecycle' : undefined);
       }
       return;
     }
@@ -823,19 +843,26 @@ export class SessionRuntime {
     this.#flushRecovery();
   }
 
-  /** Open the recovery turn once no turn runs or waits (its steps must not split another turn). */
-  #flushRecovery(): void {
+  /**
+   * Open the recovery turn once no turn runs or waits (its steps must not split another turn).
+   * `join`: the turn that is starting takes the steps itself, before its input is sent, so the
+   * newest turn's binding stays the last one in the log (no wake is asked for).
+   */
+  #flushRecovery(join = false): void {
     const r = this.#pendingRecovery;
-    if (!r || this.#turnActive || this.#wakeBuffer !== undefined || this.#disposed) return;
+    if (!r || this.#wakeBuffer !== undefined || this.#disposed) return;
+    if (this.#turnActive && !join) return;
     this.#pendingRecovery = undefined;
     this.#wakeBuffer = [...r.items];
     this.#wakeRecovery = true;
     this.#recoverySession = r.sessionId;
     this.#wakeText = r.text;
     this.#wakeItems = r.list;
-    const port = this.#port;
-    if (port) port.wake(r.text);
-    else this.#wakePending = true;
+    if (!join) {
+      const port = this.#port;
+      if (port) port.wake(r.text);
+      else this.#wakePending = true;
+    }
     this.#notify();
   }
 
@@ -898,9 +925,9 @@ export class SessionRuntime {
    * Show one line to the user outside the conversation (the plugin's status line), for example
    * the answer of our `/permission` command: DSH does not show a command's result in the chat.
    */
-  showNotice(level: 'info' | 'warning', text: string): void {
+  showNotice(level: 'info' | 'warning', text: string, topic?: 'lifecycle'): void {
     if (this.#disposed) return;
-    this.#live.notice = { level, text, at: this.#now() };
+    this.#live.notice = { level, text, at: this.#now(), ...(topic ? { topic } : {}) };
     this.#notify();
   }
 
@@ -1061,16 +1088,24 @@ export class SessionRuntime {
 
   /** D30: record a file restore (a fork's first start, or "Restore code" in place) for the UI. */
   #noteRewind(inputId: string, result: FileRewindResult): void {
+    // A preview (dry run) changes nothing: it must not replace the outcome of a real restore that
+    // the banner shows (the rewind dialog previews several points, M8 polish).
+    if (result.dryRun) return;
     this.#lifecycle.rewind = { inputId, result, at: this.#now() };
     const name = this.#factory.displayName;
-    if (result.dryRun) {
-      this.#notify();
-      return;
-    }
     if (result.ok) {
       const n = result.filesChanged.length;
-      this.showNotice('info', n === 0 ? 'No file needed restoring.' : `Restored ${n} ${n === 1 ? 'file' : 'files'}.`);
-    } else this.showNotice('warning', `${name} did not restore the files: ${result.error ?? 'no reason given'}`);
+      this.showNotice(
+        'info',
+        n === 0 ? 'No file needed restoring.' : `Restored ${n} ${n === 1 ? 'file' : 'files'}.`,
+        'lifecycle',
+      );
+    } else
+      this.showNotice(
+        'warning',
+        `${name} did not restore the files: ${result.error ?? 'no reason given'}`,
+        'lifecycle',
+      );
   }
 
   /** The session is a fork that has not started its own process yet (D29). */
@@ -1177,6 +1212,7 @@ export class SessionRuntime {
     if (this.#ultracode !== undefined) v.live.ultracode = { ...this.#ultracode };
     if (this.#models) v.models = this.#models.map((m) => ({ ...m }));
     if (this.#port) v.cwd = this.#port.cwd;
+    if (this.#backend) v.backendSessionId = this.#backend.sessionId;
     const asks = this.#desk.list();
     if (asks.length > 0) v.asks = asks;
     if (this.#hub.size > 0) v.children = this.#hub.views();
@@ -1783,6 +1819,7 @@ export class SessionRuntime {
     this.#starting ??= (async () => {
       const f = this.#factory;
       // M7 (R3.6): the record read decides first, so a spawn never runs ahead of what it shows.
+      this.#checkOnOpen(true);
       await this.#recovery?.catch(() => undefined);
       const binding = port.latestBinding();
       const bound = binding?.sessionId;
@@ -2159,6 +2196,7 @@ export class SessionRuntime {
       if (e.reason !== undefined) this.#lastExit.reason = e.reason;
       if (e.code !== undefined) this.#lastExit.code = e.code;
       if (e.signal !== undefined) this.#lastExit.signal = e.signal;
+      if (e.stderr !== undefined) this.#lastExit.stderr = e.stderr;
       // R3.6: what the agent recorded but never sent before it died is read back (no process).
       this.#recovery = this.#recoverTail('crash');
     }
@@ -2404,7 +2442,7 @@ export class SessionRuntime {
     this.#requestStep = false;
     this.#lateStopped = false; // a new turn takes what comes; a late turn end has pendingInputs > 0
     // A recovery the record read found while this turn started joins it, before its input.
-    if (this.#wakeBuffer === undefined && this.#pendingRecovery) this.#flushRecovery();
+    if (this.#wakeBuffer === undefined && this.#pendingRecovery) this.#flushRecovery(true);
     const recovering = this.#wakeRecovery && this.#wakeBuffer !== undefined;
     for (const e of this.#wakeBuffer ?? []) box.push(e);
     this.#wakeBuffer = undefined;

@@ -29,6 +29,11 @@ export default tseslint.config(
     },
   },
   {
+    // The sample plugin: a browser client in DSH's module-loader format, plain JavaScript.
+    files: ['examples/**/client.js'],
+    languageOptions: { globals: { ...globals.browser } },
+  },
+  {
     files: ['packages/backend-claude/**'],
     rules: { 'no-restricted-imports': ['error', { patterns: [dshRuntime] }] },
   },

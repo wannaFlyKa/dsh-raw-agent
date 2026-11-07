@@ -1,33 +1,59 @@
 {
   "name": "dsh-raw-agent",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Run your own, unmodified Claude Code inside DeepSeek Harness.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "claude-code",
+    "agent"
+  ],
+  "homepage": "https://github.com/wannaFlyKa/dsh-raw-agent#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wannaFlyKa/dsh-raw-agent.git",
+    "directory": "packages/plugin"
+  },
+  "bugs": {
+    "url": "https://github.com/wannaFlyKa/dsh-raw-agent/issues"
+  },
   "license": "MIT",
   "type": "module",
   "main": "./lib/host.js",
   "exports": {
     ".": "./lib/host.js",
     "./agent": "./lib/agent.js",
+    "./client": "./lib/client.js",
+    "./api": {
+      "types": "./lib/api.d.ts"
+    },
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json",
-    "./client": "./lib/client.js"
+    "./package.json": "./package.json"
   },
   "files": [
     "lib/host.js",
-    "lib/host.js.map",
     "lib/agent.js",
-    "lib/agent.js.map",
     "lib/client.js",
-    "lib/client.js.map",
+    "lib/api.d.ts",
     "cordis.patch.yml",
     "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=24.9.0",
     "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh": {
+      "optional": true
+    }
   },
   "scripts": {
     "build": "tsc -b && node ../../scripts/bundle.mjs"

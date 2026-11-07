@@ -122,6 +122,27 @@ describe('exit banner (R3.6, D75)', () => {
     expect(b?.reply).toContain('resumes the same conversation');
   });
 
+  it("shows the agent's error output under its short reason (M8: the log has the reason only)", () => {
+    const b = exitBanner(
+      info({
+        state: {
+          process: 'none',
+          turn: false,
+          backgroundTasks: 0,
+          lastExit: {
+            at: 6,
+            duringTurn: false,
+            reason: 'crashed',
+            code: 1,
+            error: 'it exited with code 1',
+            stderr: 'Invalid API key',
+          },
+        },
+      }),
+    );
+    expect(b?.detail).toBe('it exited with code 1\n\nIts last error output:\nInvalid API key');
+  });
+
   it('says when the reply was read back after the crash', () => {
     const b = exitBanner(
       info({

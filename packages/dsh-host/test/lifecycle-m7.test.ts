@@ -23,6 +23,7 @@ import {
   rewindPoints,
   tasksEndedByStop,
   REWIND_TEXT_MAX,
+  REWIND_DRAFT_MAX,
   type HostBinding,
   type HostSessionPort,
   type TurnSink,
@@ -38,6 +39,8 @@ interface Opts {
   fileRewind?: boolean;
   /** send() answers nothing (a turn that keeps running). */
   hold?: boolean;
+  /** The record read takes this long (ms). */
+  tailDelay?: number;
 }
 
 function fakeFactory(o: Opts = {}) {
@@ -64,6 +67,7 @@ function fakeFactory(o: Opts = {}) {
       ? {
           readSessionTail: async (id: string, _cwd: string, after: string) => {
             tailReads.push([id, after]);
+            if (o.tailDelay !== undefined) await tick(o.tailDelay);
             return o.tail!;
           },
         }
@@ -350,6 +354,32 @@ describe('R3.6: replies read back from the agent record', () => {
     await rt.dispose();
   });
 
+  it('a slow record read that ends while a typed turn starts joins that turn (M8 fix)', async () => {
+    for (const hops of [0, 1]) {
+      const f = fakeFactory({ tail: recoveredTail, tailDelay: 30 });
+      const { port, log } = fakePort({ sessionId: 'own', hostSessionId: 'h2', chainId: 'a1' });
+      const rt = new SessionRuntime(f.factory, port, { env: {} });
+      for (let i = 0; i < hops; i++) await Promise.resolve();
+      const s = recSink();
+      await rt.runTurn(s.sink, { userInputs: [input('u1')], wake: false }, signal());
+      // The read-back steps come first, in the typed turn; the newest turn's binding is the last.
+      expect(s.ops).toEqual([
+        'open',
+        'commit late reply,tool-call',
+        'result t2',
+        'close',
+        'open',
+        'commit new',
+        'close',
+      ]);
+      expect(f.tailReads).toEqual([['own', 'a1']]);
+      expect(s.triggers).toHaveLength(1);
+      expect(log.wakes).toHaveLength(0); // no own wake turn after the typed one
+      expect(s.bindings.at(-1)?.lastChainId).not.toBe('a2');
+      await rt.dispose();
+    }
+  });
+
   it('never reads past an inherited (fork) binding', async () => {
     const f = fakeFactory({ tail: recoveredTail });
     const { port, log } = fakePort({ sessionId: 'src', hostSessionId: 'h1', chainId: 'a1' });
@@ -400,6 +430,31 @@ describe('R3.6: replies read back from the agent record', () => {
     expect(f.tailReads).toEqual([['live-1', 'a1']]);
     expect(log.wakes).toHaveLength(1);
     expect(rt.view().lifecycle?.recovered?.why).toBe('crash');
+    await rt.dispose();
+  });
+});
+
+describe('M8: the crash text in the log holds no error output of the agent', () => {
+  it('the turn end has the short reason; the error output stays in the view state', async () => {
+    const f = fakeFactory({ hold: true });
+    const { port } = fakePort(undefined);
+    const rt = new SessionRuntime(f.factory, port, { env: {} });
+    await tick();
+    const running = rt.runTurn(recSink().sink, { userInputs: [input('u1')], wake: false }, signal());
+    await tick();
+    f.queues[0]!.push({
+      type: 'exit',
+      error: 'it exited with code 1',
+      reason: 'crashed',
+      code: 1,
+      stderr: 'Invalid API key at /home/someone/.claude',
+    });
+    f.queues[0]!.end();
+    const out = await running;
+    expect(out.kind).toBe('error');
+    expect((out as { message: string }).message).toContain('it exited with code 1');
+    expect((out as { message: string }).message).not.toContain('Invalid API key');
+    expect(rt.state().lastExit).toMatchObject({ stderr: 'Invalid API key at /home/someone/.claude' });
     await rt.dispose();
   });
 });
@@ -658,5 +713,66 @@ describe('D30: rewind points and the rewind command (client-lifecycle)', () => {
       { rewindCommand: 'rewind', displayName: 'Agent' },
     );
     expect(plan.rows.map((r) => r.menu)).toEqual(['rewind-panel', 'terminal-only']);
+  });
+});
+
+// ---- M8 polish: lifecycle notices once, previews keep the restore outcome, full rewound text ----
+
+describe('M8 polish (host)', () => {
+  it('a lifecycle notice is tagged, so the status line does not repeat the banner note', async () => {
+    const f = fakeFactory();
+    const { port } = fakePort(undefined, { tasksEndedByStop: () => ['Wait 20 s'] });
+    const rt = new SessionRuntime(f.factory, port, { env: {} });
+    await tick();
+    expect(rt.view().live.notice).toMatchObject({ level: 'warning', topic: 'lifecycle' });
+    rt.showNotice('info', 'Mode: plan');
+    expect(rt.view().live.notice?.topic).toBeUndefined();
+    await rt.dispose();
+  });
+
+  it('a preview (dry run) does not replace the outcome of a real restore', async () => {
+    const f = fakeFactory({
+      fileRewind: true,
+      rewind: async (_id, o) => ({
+        ok: true,
+        filesChanged: o?.dryRun ? [] : ['a.txt'],
+        ...(o?.dryRun ? { dryRun: true } : {}),
+      }),
+    });
+    const { port } = fakePort(undefined);
+    const rt = new SessionRuntime(f.factory, port, { env: {} });
+    await rt.start();
+    await rt.rewindFiles('m1', false);
+    expect(rt.view().live.notice).toMatchObject({ text: 'Restored 1 file.', topic: 'lifecycle' });
+    await rt.rewindFiles('m2', true);
+    expect(rt.view().lifecycle?.rewind).toMatchObject({
+      inputId: 'in-m1',
+      result: { ok: true, filesChanged: ['a.txt'] },
+    });
+    expect(rt.view().lifecycle?.rewind?.result.dryRun).toBeUndefined();
+    await rt.dispose();
+  });
+
+  it('a cut point carries its whole text for the branch composer, up to REWIND_DRAFT_MAX', () => {
+    let seq = 0;
+    const ev = (type: string, data: Record<string, unknown> = {}) => ({ type, seq: ++seq, time: seq, data });
+    const human = (id: string, text: string) =>
+      ev('user/message', { id, source: { kind: 'user' }, content: [{ type: 'text', text }] });
+    const long = 'y'.repeat(REWIND_TEXT_MAX + 5);
+    const huge = 'z'.repeat(REWIND_DRAFT_MAX + 1);
+    const points = rewindPoints([
+      ev('turn/start'),
+      human('short', 'hello'),
+      ev('turn/end'),
+      ev('turn/start'),
+      human('long', long),
+      ev('turn/end'),
+      ev('turn/start'),
+      human('huge', huge),
+    ]);
+    expect(points[0]).toEqual({ messageId: 'short', text: 'hello', at: 2 });
+    expect(points[1]).toMatchObject({ cut: true, draft: long });
+    expect(points[2]!.cut).toBe(true);
+    expect(points[2]!.draft).toBeUndefined();
   });
 });

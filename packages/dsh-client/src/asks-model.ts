@@ -99,14 +99,39 @@ export function permissionPreview(input: unknown): Preview | undefined {
   }
   // Leftover M4: a workflow launch shows its script, not the input as JSON.
   if (str(input.script) && input.script !== '') {
-    const name = str(input.name) && input.name !== '' ? `Workflow: ${input.name}` : undefined;
-    return { kind: 'text', label: 'Script', text: input.script, ...(name ? { note: name } : {}) };
+    // M8 polish: the phases the script declares, as the TUI's launch dialog lists them.
+    const phases = scriptPhases(input.script);
+    const parts = [
+      ...(str(input.name) && input.name !== '' ? [`Workflow: ${input.name}`] : []),
+      ...(phases.length > 0 ? [`Phases: ${phases.join(' → ')}`] : []),
+    ];
+    return {
+      kind: 'text',
+      label: 'Script',
+      text: input.script,
+      ...(parts.length > 0 ? { note: parts.join(' · ') } : {}),
+    };
   }
   if (str(input.url)) {
     const prompt = str(input.prompt) ? input.prompt : undefined;
     return { kind: 'text', label: 'URL', text: input.url, ...(prompt ? { note: prompt } : {}) };
   }
   return { kind: 'json', text: prettyJson(input) };
+}
+
+/**
+ * The phase titles a workflow script names with a literal `phase("…")` call, in order, without
+ * repeats (at most 12). A title built at run time is not known before the run and is left out.
+ */
+export function scriptPhases(script: string): string[] {
+  const out: string[] = [];
+  const re = /\bphase\(\s*(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'|`((?:[^`\\$]|\\.)*)`)\s*[,)]/g;
+  for (const m of script.matchAll(re)) {
+    const title = (m[1] ?? m[2] ?? m[3] ?? '').replace(/\\(.)/g, '$1').trim();
+    if (title !== '' && !out.includes(title)) out.push(title);
+    if (out.length >= 12) break;
+  }
+  return out;
 }
 
 /** The first `max` lines, and how many more there are (the card offers "Show all"). */
@@ -134,6 +159,24 @@ export function permissionGroups(choices: readonly AskChoiceWire[]): {
     else allow.push(c);
   }
   return { allow, always, reject };
+}
+
+/**
+ * M8 polish (M2 leftover): an editable "always" row as it reads after the user edited its rule. The
+ * agent's label and effect lines name its own rule (`Bash(ln -s a b)`); after an edit they name the
+ * rule the click saves, as in the TUI, where the edited field is the row itself. An empty or
+ * unchanged edit keeps the agent's text.
+ */
+export function editedAlwaysChoice(c: AskChoiceWire, edited: string | undefined): AskChoiceWire {
+  const e = c.editable;
+  const next = edited?.trim();
+  if (!e || next === undefined || next === '' || next === e.value) return c;
+  const from = `${e.toolName}(${e.value})`;
+  const to = `${e.toolName}(${next})`;
+  const swap = (t: string) => t.split(from).join(to);
+  const out: AskChoiceWire = { ...c, label: swap(c.label) };
+  if (c.effects) out.effects = c.effects.map(swap);
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------

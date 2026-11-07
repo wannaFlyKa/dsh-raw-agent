@@ -8,13 +8,34 @@ import {
   mountConfigRoutes,
   mountHost,
   mountLifecycleRoutes,
+  mountServices,
   type AgentMount,
+  type HostConfigAccess,
+  type MountedServices,
   type AgentMountOptions,
   type HostContext,
 } from './port/index.js';
 
 export * from './port/index.js';
 export { readUserConfig, type RawUserConfig } from './user-config.js';
+export {
+  GrantStore,
+  hashToken,
+  parseGrantRecords,
+  GRANT_TOKEN_PREFIX,
+  GRANTS_MAX,
+  type GrantRecord,
+  type GrantView,
+  type GrantPersistence,
+  type GrantStoreOptions,
+} from './grants.js';
+export {
+  createRawAgentService,
+  backendInfos,
+  type PluginMessage,
+  type PluginAgentOps,
+  type PluginServiceDeps,
+} from './plugin-service.js';
 export {
   AskDesk,
   inputSummary,
@@ -80,6 +101,8 @@ export {
   SESSIONS_SERVICE,
   REAP_CHECK_MS,
   isSessionRegistry,
+  PLUGIN_MESSAGES_KEPT,
+  type PluginSender,
   type ReturnedDraft,
   type SessionRegistryOptions,
   type RegisteredRuntime,
@@ -159,6 +182,7 @@ export {
   tasksEndedByStop,
   rewindPoints,
   REWIND_TEXT_MAX,
+  REWIND_DRAFT_MAX,
   REWIND_POINTS_MAX,
   type ForkCut,
 } from './port/lifecycle.js';
@@ -184,6 +208,11 @@ export interface RawAgentHostOptions {
   userConfig?: () => BackendUserConfig;
   /** Idle-reap timeout in minutes (D6); off when unset or 0. Read at every check (volatile, D87). */
   idleReapMinutes?: () => number | undefined;
+  /**
+   * The Host entry config (R9.2, D66): plugin grants are stored in its `grants` field without a
+   * restart. Without it, grants are kept in memory for one DSH run.
+   */
+  hostConfig?: HostConfigAccess;
 }
 
 /** The agent row's config (D81): only the backend kind. */
@@ -195,6 +224,8 @@ export interface RawAgentHost {
   readonly factories: readonly AgentBackendFactory[];
   /** The Host entry's backend-session registry (D87), provided as the `rawAgentSessions` service. */
   readonly sessions: SessionRegistry;
+  /** The public services (R9.2), once `apply` ran. */
+  readonly services: MountedServices | undefined;
   /** The Host entry: catalog providers (D34) and the settings-preview routes (D63). */
   apply(ctx: HostContext): void;
   /** The agent entry mounted by a `raw-agent-<kind>` preset row (D81). */
@@ -212,9 +243,13 @@ export function createRawAgentHost(options: RawAgentHostOptions): RawAgentHost {
   if (minutes) registryOpts.idleReapMs = () => Math.max(0, Number(minutes() ?? 0)) * 60_000;
   if (options.userConfig) registryOpts.userConfig = options.userConfig;
   const sessions = new SessionRegistry(registryOpts);
+  let services: MountedServices | undefined;
   return {
     factories: options.factories,
     sessions,
+    get services() {
+      return services;
+    },
     apply(ctx) {
       mountHost(ctx, options.factories, options.seedModels ?? []);
       // Settings quick access (D63): masked, read-only, only the factory's own files.
@@ -226,6 +261,16 @@ export function createRawAgentHost(options: RawAgentHostOptions): RawAgentHost {
         ctx.logger?.warn('[raw-agent] could not provide the session registry', String(error));
       }
       mountLifecycleRoutes(ctx, sessions, { factories: options.factories, seedModels: options.seedModels ?? [] });
+      // R9.2, D66: `rawAgent` for other Host plugins, and the routes of `rawAgentClient`.
+      try {
+        services = mountServices(ctx, {
+          registry: sessions,
+          factories: options.factories,
+          ...(options.hostConfig ? { hostConfig: options.hostConfig } : {}),
+        });
+      } catch (error) {
+        ctx.logger?.warn('[raw-agent] could not mount the plugin services', String(error));
+      }
       ctx.effect(() => {
         const stop = sessions.startReaper();
         return () => {

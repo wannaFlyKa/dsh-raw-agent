@@ -1,0 +1,37 @@
+{
+  "name": "dsh-raw-agent-sample-restyle",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sample DSH plugin that restyles dsh-raw-agent through its slots and its rawAgentClient service.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "dsh-raw-agent"
+      ]
+    }
+  }
+}

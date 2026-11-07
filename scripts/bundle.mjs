@@ -3,9 +3,10 @@
 // bundled (D65: no runtime import at all). Node built-ins stay external.
 import { build } from 'esbuild';
 import { builtinModules } from 'node:module';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { clientBuildOptions } from './client-bundle.mjs';
+import { apiTypes } from './api-types.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const plugin = `${root}packages/plugin`;
@@ -75,3 +76,7 @@ if (existsSync(clientIn)) {
   const options = clientBuildOptions({ root, alias });
   checkInputs(await build(options), options.outfile);
 }
+
+// The public plugin API types (lib/api.d.ts, export `dsh-raw-agent/api`, types only).
+writeFileSync(`${plugin}/lib/api.d.ts`, apiTypes(root));
+console.log('wrote packages/plugin/lib/api.d.ts');

@@ -20,3 +20,17 @@ export {
   cacheHitRatio,
   worstCostBasis,
 } from './usage.js';
+export type * from './plugin-api.js';
+export {
+  RAW_AGENT_SERVICE,
+  RAW_AGENT_CLIENT_SERVICE,
+  RAW_AGENT_API_VERSION,
+  PLUGIN_SOURCE_KIND,
+  PLUGIN_TEXT_MAX,
+  GRANT_LABEL_MAX,
+  RawAgentServiceError,
+  isRawAgentServiceError,
+  sessionInfoFromView,
+  PublicEventTracker,
+  checkGrantLabel,
+} from './plugin-api.js';

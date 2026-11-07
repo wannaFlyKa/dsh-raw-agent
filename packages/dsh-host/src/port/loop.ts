@@ -16,6 +16,7 @@
 // - a steer the agent cancelled on Stop is removed with the public `inbox.remove()` (D25 r4).
 
 import type { AgentBackendFactory, BackendUserConfig, ContentBlock, Usage, UserInput } from '@dsh-raw-agent/core';
+import { PLUGIN_SOURCE_KIND } from '@dsh-raw-agent/core';
 import {
   SessionRuntime,
   imageUnavailableText,
@@ -368,6 +369,14 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   const warn = (note: string, detail?: unknown) => ctx.logger?.warn(`[raw-agent] ${note}`, detail ?? '');
   const jobs = () => ctx.get('jobs') as DshJobs | undefined;
   const presetId = o.presetId ?? presetIdFor(factory.kind);
+  // D22, D27, D66: what reaches the agent: typed human text, and a plugin message the Host
+  // service admitted after its grant check. A `raw-agent-plugin` message another plugin put into
+  // the inbox by itself is not admitted, so it is dropped like any DSH notice.
+  const forwardable = (m: DshUserMessage): boolean =>
+    m.source.kind === 'user' ||
+    (m.source.kind === PLUGIN_SOURCE_KIND && typeof registry.pluginSender === 'function'
+      ? registry.pluginSender(m.id) !== undefined
+      : false);
 
   // D47: our own scoped controller; this context serves exactly the agents of our preset.
   const j = jobs();
@@ -496,7 +505,7 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
     if (messages.length === 0) return { kind: 'enter', messages: [] };
     // D45: a child session never spawns or sends. A live child runs its writer; a cold one nothing.
     if (agent.session.header.origin === 'subagent') return (await childPreStep(p)) ?? { kind: 'enter', messages: [] };
-    const human = messages.filter((m) => m.source.kind === 'user');
+    const human = messages.filter(forwardable);
     const wake = messages.some((m) => m.source.kind === WAKE_SOURCE_KIND);
     // D22: every other claimed message (inject()ed DSH notices) is dropped, never sent.
     const log = new TurnLog(agent.session, liveChannel(ctx, agent, counters.get(agent) ?? newCounters(agent)), turn, {
@@ -566,8 +575,9 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
   ctx.on('agent/inbox/inserted', ((p: { agent: DshAgent; message: DshUserMessage }) => {
     const { agent, message } = p;
     if (!agent || !message || agent.session.header.origin === 'subagent') return;
-    // Only typed human text (r3). inject()ed DSH notices share the lane and are dropped at the claim (D22).
-    if (message.source.kind !== 'user') return;
+    // Only typed human text (r3) or an admitted plugin message (D66). inject()ed DSH notices share
+    // the lane and are dropped at the claim (D22).
+    if (!forwardable(message)) return;
     // 'queue': the backend takes no mid-turn input; the message waits for DSH's next turn.
     if (factory.staticCapabilities.steer === 'queue') return;
     if (!agent.inbox.nextStep.some((m) => m.id === message.id)) return;

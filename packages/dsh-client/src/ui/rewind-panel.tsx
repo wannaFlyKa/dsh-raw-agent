@@ -5,16 +5,19 @@
 // checkpoints, after a preview. Nothing here starts a process.
 
 import * as React from 'react';
-import type { RawAgentApi, RewindOptionsWire, RewindPointWire } from '../api.js';
+import type { FileRewindWire, RawAgentApi, RewindOptionsWire, RewindPointWire } from '../api.js';
 import {
+  REWIND_STATS_MAX,
   REWIND_SUMMARIZE_NOTE,
   pointLabel,
+  pointStats,
   rewindChoices,
+  rewindDraft,
   rewindResultText,
   type RewindChoiceId,
   type RewindPreview,
 } from '../lifecycle-model.js';
-import { requestRestoreAtStart, type RestoreRetry } from '../rewind-actions.js';
+import { handBackDraft, requestRestoreAtStart, type RestoreRetry } from '../rewind-actions.js';
 import type { SessionControlStore, SessionStores } from '../session-store.js';
 import type { HostActions } from './actions.js';
 import { css } from './style.js';
@@ -28,7 +31,13 @@ export interface RewindPanelProps {
   stores?: SessionStores;
   onClose(): void;
   /** Test seams. */
-  initial?: { options?: RewindOptionsWire; picked?: string; preview?: RewindPreview };
+  initial?: {
+    options?: RewindOptionsWire;
+    picked?: string;
+    preview?: RewindPreview;
+    /** Row figures by message id; given, no dry run is asked for the rows. */
+    stats?: Record<string, FileRewindWire>;
+  };
   retry?: RestoreRetry;
 }
 
@@ -86,6 +95,33 @@ export function RewindPanel(props: RewindPanelProps): React.ReactElement {
   const point: RewindPointWire | undefined = opts?.points.find((p) => p.messageId === picked);
   const name = opts?.displayName ?? 'The agent';
 
+  // M8 polish: the change figure of the newest rows, one dry run at a time on the live process (a
+  // control call; no process starts). Rows without one show text only, as before.
+  const [stats, setStats] = React.useState<Record<string, FileRewindWire>>(props.initial?.stats ?? {});
+  React.useEffect(() => {
+    if (!opts || !opts.running || !opts.fileRewind || !api.rewindFiles || props.initial?.stats) return undefined;
+    const rewindFiles = api.rewindFiles.bind(api);
+    let live = true;
+    const ids = [...opts.points]
+      .reverse()
+      .slice(0, REWIND_STATS_MAX)
+      .map((p) => p.messageId);
+    void (async () => {
+      for (const id of ids) {
+        if (!live) return;
+        try {
+          const r = await rewindFiles(sessionId, id, true);
+          if (live && r.result) setStats((all) => ({ ...all, [id]: r.result! }));
+        } catch {
+          // no figure for this row
+        }
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [api, sessionId, opts, props.initial?.stats]);
+
   // The "Restore code" preview: the agent's own dry run, read when a point is picked.
   React.useEffect(() => {
     if (!opts || !point || !opts.running || !opts.fileRewind || !api.rewindFiles) return undefined;
@@ -114,6 +150,10 @@ export function RewindPanel(props: RewindPanelProps): React.ReactElement {
     setBusy(true);
     try {
       const child = await actions.forkSession(sessionId, point.forkSeq);
+      // M8 polish: the rewound message goes back to the branch's composer (at the caret, never
+      // sent), as the TUI's rewind puts it back in the draft. Asked before the branch opens, so its
+      // controls take it when they mount.
+      handBackDraft(props.stores?.get(child), rewindDraft(point));
       actions.openSession?.(child);
       if (restoreCode) {
         // The branch's runtime appears once DSH opens it; ask until it answers (D30).
@@ -209,6 +249,11 @@ export function RewindPanel(props: RewindPanelProps): React.ReactElement {
               >
                 {pointLabel(p)}
                 {p.inherited ? ' (before this branch)' : ''}
+                {pointStats(stats[p.messageId]) !== undefined && (
+                  <span style={css.optionDesc} data-raw-agent="rewind-point-stats">
+                    {pointStats(stats[p.messageId])}
+                  </span>
+                )}
               </button>
             ))}
           </div>

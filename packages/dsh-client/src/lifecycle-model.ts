@@ -58,7 +58,11 @@ export function exitBanner(info: SessionInfo): ExitBanner | undefined {
     title,
     restartLabel: `Restart ${name}`,
   };
-  if (e.error !== undefined && e.error.trim() !== '') b.detail = e.error.trim();
+  // The agent's error output is shown here only; the session log holds the short reason (M8).
+  const detail = [e.error?.trim(), e.stderr?.trim() ? `Its last error output:\n${e.stderr.trim()}` : undefined]
+    .filter((x): x is string => x !== undefined && x !== '')
+    .join('\n\n');
+  if (detail !== '') b.detail = detail;
   if (e.duringTurn) {
     const r = v.lifecycle?.recovered;
     b.reply =
@@ -214,6 +218,43 @@ export function pointLabel(p: RewindPointWire): string {
   const text = p.text.replace(/\s+/g, ' ').trim();
   const att = p.attachments ? ` [+${p.attachments} ${p.attachments === 1 ? 'attachment' : 'attachments'}]` : '';
   return (text === '' ? '(no text)' : text) + att;
+}
+
+/**
+ * M8 polish: what "restore conversation" puts back in the branch's composer, as the TUI puts the
+ * rewound prompt back in its draft (`restoreDraftFrom`). Images and files cannot go back into DSH's
+ * composer from a plugin, and a very long message has no full text here: the note says so.
+ */
+export function rewindDraft(p: RewindPointWire): { text?: string; note?: string } {
+  const text = p.cut ? p.draft : p.text;
+  const out: { text?: string; note?: string } = {};
+  if (text !== undefined && text.trim() !== '') out.text = text;
+  const lost: string[] = [];
+  if (p.cut && p.draft === undefined) lost.push('the message is too long to put back');
+  if (p.attachments)
+    lost.push(
+      `its ${p.attachments === 1 ? 'attachment was' : `${p.attachments} attachments were`} not put back; attach ${p.attachments === 1 ? 'it' : 'them'} again if you need ${p.attachments === 1 ? 'it' : 'them'}`,
+    );
+  if (lost.length > 0)
+    out.note = `${out.text ? 'Your rewound message is in the composer, but ' : 'Your rewound message: '}${lost.join('; ')}.`;
+  return out;
+}
+
+/** The newest rows the rewind dialog previews by itself (one dry run each, on the live process). */
+export const REWIND_STATS_MAX = 10;
+
+/**
+ * M8 polish (M7 leftover): a row's change figure, as the TUI's rewind list shows files changed per
+ * message. Ours is what "Restore code" at that message would undo (the agent's own dry run), so
+ * it counts every change since the message, not that one turn's alone. Undefined: not known.
+ */
+export function pointStats(r: FileRewindWire | undefined): string | undefined {
+  if (!r?.ok) return undefined;
+  const n = r.filesChanged.length;
+  if (n === 0) return 'no file changed since';
+  const lines =
+    r.insertions !== undefined || r.deletions !== undefined ? ` +${r.insertions ?? 0} −${r.deletions ?? 0}` : '';
+  return `${n} ${n === 1 ? 'file' : 'files'}${lines} since`;
 }
 
 /** The dialog's note under the list. */

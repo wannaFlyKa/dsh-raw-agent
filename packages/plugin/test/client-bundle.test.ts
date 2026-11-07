@@ -65,9 +65,13 @@ describe('client bundle (module-loader format)', () => {
       'register conversation.session.header.actions',
       'conversation.composer.dock',
       'register conversation.composer.dock',
-      'conversation.composer.dock', // M7: the lifecycle banner
-      'register conversation.composer.dock',
+      'conversation.input.dock', // M7: the lifecycle banner (M8: above the composer)
+      'register conversation.input.dock',
       'conversation.input.left',
+      'register conversation.input.left',
+      'settings.section', // M8 (R9.2): plugin access
+      'register settings.section',
+      'conversation.input.left', // M8 (R9.1): our slot for other plugins
       'register conversation.input.left',
     ]);
   });

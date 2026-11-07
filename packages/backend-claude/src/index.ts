@@ -133,5 +133,12 @@ export {
   type ExitDescription,
 } from './lifecycle.js';
 export { sessionTail } from './session-tail.js';
+export {
+  findSessionHoldingInput,
+  sessionOfInput,
+  INPUT_HEAD_BYTES,
+  INPUT_SCAN_FILES,
+  type InputScanDeps,
+} from './input-scan.js';
 export { startOrphanGuard, guardSettings, ORPHAN_GUARD_SCRIPT, type OrphanGuard } from './orphan-guard.js';
 export { createSpawner, STDERR_KEEP_BYTES, type ClaudeSpawner, type SpawnerOptions } from './spawn.js';

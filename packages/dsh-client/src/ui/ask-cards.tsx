@@ -9,6 +9,7 @@ import {
   askHeading,
   askTitle,
   cardKey,
+  editedAlwaysChoice,
   numberedChoices,
   clipLines,
   diffHunks,
@@ -317,54 +318,57 @@ function PermissionBody(props: AskCardProps): React.ReactElement {
             />
           ))}
         </span>
-        {groups.always.map((c) => (
-          <span key={c.id} style={css.always} data-raw-agent="always">
-            <span>
-              <Button
-                choice={c}
-                disabled={busy || (c.editable !== undefined && (rules[c.id] ?? c.editable.value).trim() === '')}
-                onClick={() => {
-                  const edited = c.editable ? (rules[c.id] ?? c.editable.value).trim() : undefined;
-                  onAnswer(
-                    c.editable && edited !== undefined && edited !== c.editable.value
-                      ? { choice: c.id, rule: edited }
-                      : { choice: c.id },
-                  );
-                }}
-              />
-            </span>
-            {c.editable && (
-              <label style={css.choiceRow}>
-                <span style={css.cardNote}>Don&apos;t ask again for: {c.editable.toolName}(</span>
-                <input
-                  type="text"
-                  style={{ ...css.input, minWidth: '16em' }}
-                  value={rules[c.id] ?? c.editable.value}
-                  placeholder={c.editable.placeholder}
-                  aria-label={c.editable.placeholder ?? 'Rule'}
-                  data-raw-agent="always-rule"
-                  onChange={(e) => {
-                    const v = e.currentTarget.value;
-                    setRules((all) => ({ ...all, [c.id]: v }));
+        {groups.always.map((original) => {
+          const c = editedAlwaysChoice(original, rules[original.id]);
+          return (
+            <span key={c.id} style={css.always} data-raw-agent="always">
+              <span>
+                <Button
+                  choice={c}
+                  disabled={busy || (c.editable !== undefined && (rules[c.id] ?? c.editable.value).trim() === '')}
+                  onClick={() => {
+                    const edited = c.editable ? (rules[c.id] ?? c.editable.value).trim() : undefined;
+                    onAnswer(
+                      c.editable && edited !== undefined && edited !== c.editable.value
+                        ? { choice: c.id, rule: edited }
+                        : { choice: c.id },
+                    );
                   }}
                 />
-                <span style={css.cardNote}>)</span>
-              </label>
-            )}
-            {c.destination && (
-              <span style={css.cardNote} data-raw-agent="always-destination">
-                Saved to: {c.destination}
               </span>
-            )}
-            {(c.effects?.length ?? 0) > 0 && (
-              <ul style={css.effects}>
-                {c.effects!.map((e, i) => (
-                  <li key={i}>{e}</li>
-                ))}
-              </ul>
-            )}
-          </span>
-        ))}
+              {c.editable && (
+                <label style={css.choiceRow}>
+                  <span style={css.cardNote}>Don&apos;t ask again for: {c.editable.toolName}(</span>
+                  <input
+                    type="text"
+                    style={{ ...css.input, minWidth: '16em' }}
+                    value={rules[c.id] ?? c.editable.value}
+                    placeholder={c.editable.placeholder}
+                    aria-label={c.editable.placeholder ?? 'Rule'}
+                    data-raw-agent="always-rule"
+                    onChange={(e) => {
+                      const v = e.currentTarget.value;
+                      setRules((all) => ({ ...all, [c.id]: v }));
+                    }}
+                  />
+                  <span style={css.cardNote}>)</span>
+                </label>
+              )}
+              {c.destination && (
+                <span style={css.cardNote} data-raw-agent="always-destination">
+                  Saved to: {c.destination}
+                </span>
+              )}
+              {(c.effects?.length ?? 0) > 0 && (
+                <ul style={css.effects}>
+                  {c.effects!.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              )}
+            </span>
+          );
+        })}
         {reject?.feedback && (
           <Feedback
             value={feedback}

@@ -825,8 +825,10 @@ describe('port: pending interaction, takeover and Shift+Tab', () => {
       'conversation.composer',
       'conversation.session.header.actions',
       'conversation.composer.dock',
-      'conversation.composer.dock', // M7: the lifecycle banner
+      'conversation.input.dock', // M7: the lifecycle banner (M8: the card stack above the composer)
       'conversation.input.left',
+      'settings.section', // M8 (R9.2): plugin access
+      'conversation.input.left', // M8 (R9.1): our slot for other plugins
     ]);
     // DSH tries composer chain entries in ascending priority; ui-subagent's one-shot read-only
     // composer is at -10, so ours must come first or a child's ask never takes over (M3 live).

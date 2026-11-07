@@ -16,7 +16,11 @@ import { SessionControls } from '../ui/controls.js';
 import { ContextPill } from '../ui/usage-panel.js';
 import { WakeTriggerCard } from '../ui/wake-card.js';
 import { WorkflowNodeView } from '../ui/workflow-panel.js';
-import type { ToolViewPack } from '@dsh-raw-agent/core';
+import { RAW_AGENT_CLIENT_SERVICE, type ToolViewPack } from '@dsh-raw-agent/core';
+import { createRawAgentClientService } from '../client-service.js';
+import { createPluginApi, type PluginApi } from '../plugin-routes.js';
+import { GrantsPanel } from '../ui/grants-panel.js';
+import { PluginExtras } from '../ui/plugin-extras.js';
 import { localCommandOf, messageText, type LocalCommandData } from '../commands-model.js';
 import { LocalCommandText, LocalCommandView } from '../ui/local-command.js';
 import { commandMarkerOf, type CommandMarker } from '../lifecycle-model.js';
@@ -94,6 +98,8 @@ export const TERMINAL_TAB_KIND = 'terminal';
 
 /** What this port uses of the client Cordis context (structural, D65). */
 export interface ClientContext {
+  /** Cordis `ctx.provide(name, value)`: a client service owned by this plugin's fiber. */
+  provide?(name: string, value: unknown): unknown;
   slots: {
     inject(key: string, callback: () => (() => void) | Iterable<() => void>): () => void;
     register(options: Record<string, unknown>, component: React.ComponentType<never>): () => void;
@@ -367,6 +373,71 @@ export function guardPresetDecoration(
   };
 }
 
+// --- M6 leftover: DSH's `/model` popup ----------------------------------------------------------
+
+/** The command DSH's model popup contributes (`P/dsh-client-ui-model-selection/lib/client.js:2030`). */
+export const MODEL_CONTRIBUTION = 'model';
+
+interface ContributionLike {
+  available(session: { sessionId?: string }): boolean;
+  ui: unknown;
+}
+
+/**
+ * `/model` + Enter (or the menu's "Model" row) in one of our sessions opens our own model picker,
+ * as the terminal app's `/model` opens its picker (M8 polish, M6 leftover).
+ *
+ * DSH's model-selection plugin contributes `/model` as a popup over DSH's model catalog
+ * (`command.register`, kind `popupSelect`). Our catalog lists no model rows (CLAUDE.md §4), so in
+ * our sessions it opened "No models available." and a pick there would save DSH's profile default,
+ * not the agent's model. The command runtime reads the contribution through
+ * `live.contributions.get` on Enter and on a menu pick (`P/dsh-client-ui-commands/lib/client.js`
+ * 1511, 1586). For our sessions only, the contribution we hand back is an `action` that removes the
+ * typed token and calls `open(sessionId)`; other sessions keep DSH's popup. The menu row itself
+ * (read through `values()`) stays as DSH draws it.
+ *
+ * This reads a DSH internal (`commandUi.live.contributions`, a `Map`), like the `/permission` guard.
+ * If the shape is not there, nothing changes (returns `undefined`).
+ */
+export function guardModelContribution(
+  commandUi: unknown,
+  isOurs: (sessionId: string) => boolean,
+  open: (sessionId: string) => void,
+): (() => void) | undefined {
+  const map = (commandUi as { live?: { contributions?: unknown } } | undefined)?.live?.contributions;
+  if (!(map instanceof Map)) return undefined;
+  const base = map.get as (key: unknown) => unknown;
+  const ours = (session: { sessionId?: string } | undefined): session is { sessionId: string } =>
+    typeof session?.sessionId === 'string' && isOurs(session.sessionId);
+  const action = {
+    kind: 'action' as const,
+    run: (session: { sessionId?: string }) => {
+      if (ours(session)) open(session.sessionId);
+    },
+  };
+  const get = function (this: Map<unknown, unknown>, key: unknown): unknown {
+    const found = base.call(this, key) as ContributionLike | undefined;
+    if (key !== MODEL_CONTRIBUTION || typeof found?.available !== 'function') return found;
+    // The runtime asks `available(session)` and then reads `ui` on the same object, in one
+    // synchronous step (lines 1512-1513, 1587-1590). A fresh wrapper per read keeps that pair together.
+    let asked: { sessionId?: string } | undefined;
+    return {
+      ...found,
+      available: (session: { sessionId?: string }) => {
+        asked = session;
+        return ours(session) || found.available(session);
+      },
+      get ui() {
+        return ours(asked) ? action : found.ui;
+      },
+    };
+  };
+  Object.defineProperty(map, 'get', { value: get, configurable: true, writable: true });
+  return () => {
+    if ((map as { get: unknown }).get === get) delete (map as { get?: unknown }).get;
+  };
+}
+
 /** A session is ours once our route answered for it (the controls store is `ready`). */
 export function isOurSession(stores: SessionStores, sessionId: string): boolean {
   const snap = stores.peek(sessionId)?.getSnapshot();
@@ -469,9 +540,15 @@ export const CONTEXT_PILL_ENTRY_ID = 'raw-agent-context';
 /** After DSH's token pill, where the ring sat. */
 export const CONTEXT_PILL_ORDER = 2;
 
-/** M7: the lifecycle banner, in the same dock, before DSH's stat pills and our context pill. */
+/**
+ * M7: the lifecycle banner. M8 polish: it sits in the card stack above the composer
+ * (`conversation.input.dock`, a session list beside DSH's todo 0, goal 10 and queue 20 cards), not in
+ * the pill row below it: that row is one flex line, and a full-width banner there squeezed DSH's
+ * usage pills ("2 tur…"). Order 30 puts it last, next to the composer.
+ */
+export const LIFECYCLE_SLOT = 'conversation.input.dock';
 export const LIFECYCLE_ENTRY_ID = 'raw-agent-lifecycle';
-export const LIFECYCLE_ORDER = -1;
+export const LIFECYCLE_ORDER = 30;
 
 /** Title-adjacent session actions of the session header (`P/dsh-client-ui-conversation` slots). */
 export const AGENTS_SLOT = 'conversation.session.header.actions';
@@ -903,8 +980,25 @@ export function hostActions(ctx: ClientContext): HostActions {
   };
 }
 
+/** R9.2, D66: the plugin access page in DSH's settings panel (a `settings.section` entry). */
+export const SETTINGS_SECTION_SLOT = 'settings.section';
+export const GRANTS_SECTION_ID = 'raw-agent-plugin-access';
+
+/**
+ * R9.1, D67: our own list slot for other plugins, declared by a small entry in the composer row
+ * right after our controls. Declaring is claiming: only that entry renders the key
+ * (`P/dsh-client-ui-conversation/lib/types/client/contract/slots.d.ts`, `children` declarations;
+ * probe svc-a/svc-b in the plugin-service-api research note filled a root-scoped one live). A
+ * session-scoped declaration in a session slot is **unverified** live.
+ */
+export const PLUGIN_EXTRAS_ENTRY_ID = 'raw-agent-plugin-extras';
+export const PLUGIN_EXTRAS_SLOT = 'raw-agent.controls.extra';
+export const PLUGIN_EXTRAS_ORDER = 51;
+
 export interface MountClientOptions {
   fetch?: FetchFn;
+  /** Test seam: the plugin routes. */
+  plugin?: PluginApi;
   /** D19, D80: the tool view packs of the backends (the composition root passes them). */
   toolViews?: readonly ToolViewPack[];
   /** Test seam. */
@@ -917,7 +1011,15 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
     options.fetch ??
     ((input, init) => globalThis.fetch(input, { credentials: 'same-origin', ...init }) as ReturnType<FetchFn>);
   const api = options.api ?? createApi(fetchFn);
+  const plugin = options.plugin ?? createPluginApi(fetchFn);
   const stores = new SessionStores(api);
+  // R9.2, D66: `rawAgentClient` for other browser plugins. A failed provide must not fail the
+  // client: the rest of the UI works without it.
+  try {
+    ctx.provide?.(RAW_AGENT_CLIENT_SERVICE, createRawAgentClientService(stores, plugin));
+  } catch (error) {
+    console.warn('[raw-agent] could not provide the rawAgentClient service', error);
+  }
   const links = new ChildLinks(api);
   const readers = new UsageReaders(stores, api);
   const actions = hostActions(ctx);
@@ -979,6 +1081,16 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       if (!undo) console.warn('[raw-agent] DSH command UI has no decoration map; /permission may open DSH presets');
       return undo ?? (() => {});
     }, 'raw-agent: /permission preset popup');
+    // M8 polish: `/model` opens our model picker in our sessions, not DSH's empty popup.
+    scope.effect?.(() => {
+      const undo = guardModelContribution(
+        svc,
+        (id) => isOurSession(stores, id),
+        (id) => stores.get(id).requestPanel('model'),
+      );
+      if (!undo) console.warn('[raw-agent] DSH command UI has no contribution map; /model opens DSH models');
+      return undo ?? (() => {});
+    }, 'raw-agent: /model popup');
   });
   // D38: Shift+Tab cycles the mode, where DSH's shortcut service lets a plugin bind it.
   withService('shortcuts', (svc, scope) => {
@@ -1069,10 +1181,10 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
     ),
   );
   // M7 (R3.6): the crash or exit banner with Restart, and the fork and recovery notes.
-  ctx.slots.inject(CONTEXT_PILL_SLOT, () =>
+  ctx.slots.inject(LIFECYCLE_SLOT, () =>
     ctx.slots.register(
       {
-        name: CONTEXT_PILL_SLOT,
+        name: LIFECYCLE_SLOT,
         id: LIFECYCLE_ENTRY_ID,
         order: LIFECYCLE_ORDER,
         inject: (sessionId: string) => ({ store: stores.get(sessionId) }),
@@ -1092,6 +1204,7 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
           api,
           actions,
           stores,
+          plugin,
           // Read at render: the session service may arrive after the controls mount.
           asksInComposer: () => takeover.on,
         }),
@@ -1099,5 +1212,39 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       SessionControls as React.ComponentType<never>,
     ),
   );
+  // R9.2, D66: plugin access (grants) as a page in DSH's settings panel. The settings shell
+  // declares the slot (`P/dsh-client-ui-settings` contract `settings.section`); without it the
+  // page is in our settings dialog only. Live M8: the page renders.
+  ctx.slots.inject(SETTINGS_SECTION_SLOT, () =>
+    ctx.slots.register(
+      {
+        name: SETTINGS_SECTION_SLOT,
+        id: GRANTS_SECTION_ID,
+        order: 900,
+        label: 'Agent plugin access',
+        inject: () => ({ plugin, copy: actions.copy }),
+      },
+      GrantsPanel as React.ComponentType<never>,
+    ),
+  );
+  // R9.1, D67: a slot of our own for other plugins. A failed declaration (a DSH version whose
+  // registry refuses it) must not take the rest of the client down.
+  ctx.slots.inject(CONTROLS_SLOT, () => {
+    try {
+      return ctx.slots.register(
+        {
+          name: CONTROLS_SLOT,
+          id: PLUGIN_EXTRAS_ENTRY_ID,
+          order: PLUGIN_EXTRAS_ORDER,
+          children: { [PLUGIN_EXTRAS_SLOT]: { kind: 'list', scope: 'session' } },
+          inject: (sessionId: string) => ({ store: stores.get(sessionId), slotKey: PLUGIN_EXTRAS_SLOT }),
+        },
+        PluginExtras as React.ComponentType<never>,
+      );
+    } catch (error) {
+      console.warn('[raw-agent] could not declare the plugin slot', error);
+      return () => {};
+    }
+  });
   return stores;
 }

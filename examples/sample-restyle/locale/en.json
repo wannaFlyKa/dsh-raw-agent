@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "dsh-raw-agent sample restyle",
+    "description": "Sample plugin: restyles the Claude Code context pill and adds a button that uses the rawAgentClient service."
+  }
+}

@@ -299,8 +299,8 @@ export type BackendEvent =
   /**
    * The process ended (R3.6). `reason`: 'disposed' and 'force-stopped' were asked for; 'ended'
    * means the agent stopped by itself with success; 'crashed' means it failed or was killed.
-   * `error` is a plain sentence for the user (with the agent's last error output when it wrote
-   * any). Absent for an asked-for end.
+   * `error` is a short plain reason for the user; it may go into the host log, so it never holds
+   * the agent's error output (M8). Absent for an asked-for end.
    */
   | {
       type: 'exit';
@@ -310,6 +310,11 @@ export type BackendEvent =
       code?: number;
       /** The signal that ended it, when one did (POSIX names). */
       signal?: string;
+      /**
+       * The end of the agent's error output (ANSI stripped, a few lines). For the plugin UI only:
+       * the host never writes it to its log (M8).
+       */
+      stderr?: string;
     };
 
 export type ExitReason = 'disposed' | 'force-stopped' | 'ended' | 'crashed';

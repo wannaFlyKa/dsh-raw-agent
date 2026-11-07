@@ -2,7 +2,8 @@
 // restore on a rewind fork, resume of a missing transcript, clear exit reasons, orphan guard.
 
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { EventEmitter } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -14,6 +15,8 @@ import {
   describeExit,
   dropsTurnRefusal,
   DROPS_TURN_REFUSAL_PREFIX,
+  INPUT_HEAD_BYTES,
+  INPUT_SCAN_FILES,
   ORPHAN_GUARD_SCRIPT,
   projectSlug,
   refusalInText,
@@ -118,13 +121,28 @@ describe('R3.6: exit reasons', () => {
       proc: { code: 1, signal: null, stderr: '\u001b[31mInvalid API key\u001b[0m\nPlease run /login\n' },
     });
     expect(failed).toMatchObject({ reason: 'crashed', code: 1 });
-    expect(failed.error).toBe('it exited with code 1; its last error output was:\nInvalid API key\nPlease run /login');
+    // M8: the log gets the short reason only; the CLI's error output is for the plugin UI.
+    expect(failed.error).toBe('it exited with code 1');
+    expect(failed.stderr).toBe('Invalid API key\nPlease run /login');
     expect(describeExit({ proc: { code: 0, signal: null, stderr: '' } })).toEqual({
       reason: 'ended',
       code: 0,
       error: 'it ended by itself (exit code 0)',
     });
     expect(describeExit({ sdkError: 'stream broke' })).toEqual({ reason: 'crashed', error: 'stream broke' });
+  });
+
+  it("keeps the SDK error's own stderr tail out of the reason (M8)", () => {
+    const viaSdk = describeExit({ sdkError: 'Claude Code process exited with code 2. stderr: secret path /x\nboom' });
+    expect(viaSdk.error).toBe('Claude Code process exited with code 2');
+    expect(viaSdk.stderr).toBe('secret path /x\nboom');
+    const both = describeExit({
+      sdkError: 'Claude Code process exited with code 1. stderr: from sdk',
+      proc: { code: 1, signal: null, stderr: 'from spawn\n' },
+    });
+    expect(both).toEqual({ reason: 'crashed', code: 1, error: 'it exited with code 1', stderr: 'from spawn' });
+    const multi = describeExit({ sdkError: 'first line\nsecond line with output' });
+    expect(multi.error).toBe('first line');
   });
 
   it('keeps only the end of a long stderr', () => {
@@ -144,6 +162,65 @@ describe('R3.6: exit reasons', () => {
     } as never);
     const info = await spawner.exitInfo(3000);
     expect(info).toEqual({ code: 3, signal: null, stderr: 'Not logged in\n' });
+  });
+});
+
+describe('M8: each CLI keeps its own exit', () => {
+  const fakeChild = () => {
+    const c = new EventEmitter() as EventEmitter & {
+      pid: number;
+      stderr: EventEmitter;
+      exitCode: null;
+      signalCode: null;
+    };
+    c.pid = 4242;
+    c.stderr = new EventEmitter();
+    c.exitCode = null;
+    c.signalCode = null;
+    return c;
+  };
+  const spawnOpts = { command: 'claude', args: [], cwd: '/', env: {}, signal: new AbortController().signal } as never;
+
+  it("a late close of the refused CLI never stands for the plain restart's CLI", async () => {
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawner = createSpawner({}, 'linux', {
+      orphanGuard: false,
+      spawn: (() => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      }) as never,
+    });
+    spawner.spawn(spawnOpts);
+    // The refused cut: the session asks for a new CLI; the old one closes before the new spawns.
+    spawner.expectNew();
+    children[0]!.stderr.emit('data', 'refused\n');
+    children[0]!.emit('close', 143, null);
+    expect(await spawner.exitInfo(20)).toBeUndefined();
+    spawner.spawn(spawnOpts);
+    expect(await spawner.exitInfo(20)).toBeUndefined(); // the new CLI runs
+    children[1]!.stderr.emit('data', 'Invalid API key\n');
+    children[1]!.emit('close', 1, null);
+    expect(await spawner.exitInfo(20)).toEqual({ code: 1, signal: null, stderr: 'Invalid API key\n' });
+  });
+
+  it("an old CLI closing after the new one spawned leaves the new one's exit alone", async () => {
+    const children: ReturnType<typeof fakeChild>[] = [];
+    const spawner = createSpawner({}, 'linux', {
+      orphanGuard: false,
+      spawn: (() => {
+        const c = fakeChild();
+        children.push(c);
+        return c;
+      }) as never,
+    });
+    spawner.spawn(spawnOpts);
+    spawner.expectNew();
+    spawner.spawn(spawnOpts);
+    children[0]!.emit('close', 143, null);
+    expect(await spawner.exitInfo(20)).toBeUndefined();
+    children[1]!.emit('close', null, 'SIGKILL');
+    expect(await spawner.exitInfo(20)).toMatchObject({ code: null, signal: 'SIGKILL' });
   });
 });
 
@@ -179,11 +256,13 @@ type Fake = {
   /** Controls never answer (a process that refused its fork cut). */
   hang?: boolean;
   closed: boolean;
+  /** Called at close() (the SDK rejects pending controls then). */
+  onClose: Array<() => void>;
   /** The CLI dies: the SDK iterator throws this after the buffered frames. */
   fail(error: Error): void;
 };
 
-function fakeQueries(rewind?: (id: string, o: unknown) => unknown) {
+function fakeQueries(rewind?: (id: string, o: unknown, q: Fake) => unknown) {
   const made: Fake[] = [];
   const queryFn: QueryFn = (p) => {
     let failure: Error | undefined;
@@ -194,6 +273,7 @@ function fakeQueries(rewind?: (id: string, o: unknown) => unknown) {
       calls: [],
       seq: [],
       closed: false,
+      onClose: [],
       fail(error) {
         failure = error;
         f.out.end();
@@ -224,10 +304,12 @@ function fakeQueries(rewind?: (id: string, o: unknown) => unknown) {
       close: () => {
         f.closed = true;
         f.out.end();
+        for (const c of f.onClose.splice(0)) c();
       },
       rewindFiles: async (id: string, o: unknown) => {
         f.calls.push(['rewindFiles', [id, o]]);
-        return rewind ? rewind(id, o) : { canRewind: true, filesChanged: ['x.txt'], insertions: 1, deletions: 0 };
+        f.seq.push('rewindFiles');
+        return rewind ? rewind(id, o, f) : { canRewind: true, filesChanged: ['x.txt'], insertions: 1, deletions: 0 };
       },
     };
     return q as never;
@@ -324,6 +406,38 @@ describe('D28, D29, D70: the start the factory really makes', () => {
     expect(await factory.sessionHoldingInput!('in-1', s.cwd, 'old')).toBe('old');
     expect(await factory.sessionHoldingInput!('in-clear', s.cwd, 'old')).toBe('new');
     expect(await factory.sessionHoldingInput!('in-none', s.cwd, 'old')).toBeUndefined();
+  });
+
+  it('sessionHoldingInput is async and cheap: heads only, the newest transcripts only (M8)', async () => {
+    const s = setup();
+    const factory = createClaudeFactory({ env: () => s.env });
+    const line = (o: Record<string, unknown>) => JSON.stringify(o) + '\n';
+    s.writeTranscript('old', line({ type: 'user', uuid: 'in-1', sessionId: 'old', message: { content: 'hi' } }));
+    // The /clear transcript: the command is in its first lines.
+    s.writeTranscript(
+      'new',
+      line({ type: 'user', uuid: 'in-clear', sessionId: 'new', message: { content: '/clear' } }),
+    );
+    // It never blocks the event loop: a timer queued before the call runs before it answers.
+    let ticked = false;
+    setImmediate(() => (ticked = true));
+    expect(await factory.sessionHoldingInput!('in-clear', s.cwd, 'old')).toBe('new');
+    expect(ticked).toBe(true);
+    // Another transcript is read at its head only: an entry past it is not found.
+    const filler = line({ type: 'assistant', uuid: 'x', message: { content: 'y'.repeat(1000) } });
+    s.writeTranscript(
+      'deep',
+      filler.repeat(Math.ceil(INPUT_HEAD_BYTES / filler.length) + 5) +
+        line({ type: 'user', uuid: 'in-deep', sessionId: 'deep', message: { content: 'x' } }),
+    );
+    expect(await factory.sessionHoldingInput!('in-deep', s.cwd, 'old')).toBeUndefined();
+    // The preferred transcript is read whole.
+    expect(await factory.sessionHoldingInput!('in-deep', s.cwd, 'deep')).toBe('deep');
+    // Only the newest INPUT_SCAN_FILES other transcripts are read.
+    const old = Date.now() / 1000 - 3600;
+    utimesSync(join(s.cwd, '..', 'config', 'projects', projectSlug(s.cwd), 'new.jsonl'), old, old);
+    for (let i = 0; i < INPUT_SCAN_FILES; i++) s.writeTranscript(`newer-${i}`, line({ type: 'mode', mode: 'normal' }));
+    expect(await factory.sessionHoldingInput!('in-clear', s.cwd, 'old')).toBeUndefined();
   });
 
   it('a fork passes resumeDropsTurn only for a validated cut', async () => {
@@ -488,6 +602,55 @@ describe('D28, D29, D70: the start the factory really makes', () => {
         .filesChanged,
     ).toEqual([]);
     await session.dispose();
+  });
+
+  it("a send waiting on a refused process's restore moves to the plain restart (M8)", async () => {
+    for (const refused of ['hangs', 'rejects'] as const) {
+      const s = setup();
+      s.writeTranscript('src', transcript(prompt('p3', 'a2', 'three')));
+      const f = fakeQueries((_id, o, q) => {
+        if (q === f.made[0])
+          return refused === 'hangs'
+            ? new Promise(() => {})
+            : new Promise((_r, reject) => q.onClose.push(() => reject(new Error('Query closed'))));
+        return (o as { dryRun?: boolean } | undefined)?.dryRun
+          ? { canRewind: true, filesChanged: ['a.txt'], insertions: 0, deletions: 1 }
+          : { canRewind: true, skippedLinks: 0 };
+      });
+      const { session, events } = await open(s, f, {
+        kind: 'fork',
+        fromSessionId: 'src',
+        newSessionId: 'dst',
+        atChainId: 'a2',
+        dropsTurnHint: 'p3',
+        restoreFilesAt: 'p3',
+      });
+      await session.controls.setModel!('claude-sonnet-5-5');
+      const sending = session.send({ id: 'in-1', parts: [{ type: 'text', text: 'again' }] }, 'next');
+      await tick();
+      f.made[0]!.out.push({
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        errors: [`${DROPS_TURN_REFUSAL_PREFIX} the range holds a queued message`],
+      });
+      const done = await Promise.race([sending.then(() => 'sent'), tick(300).then(() => 'stuck')]);
+      expect(done, refused).toBe('sent');
+      await tick();
+      expect(f.made[0]!.sent, refused).toHaveLength(0);
+      // The new process: the choice again, then the restore, then the input.
+      expect(f.made[1]!.seq, refused).toEqual([
+        'setModel claude-sonnet-5-5',
+        'rewindFiles',
+        'rewindFiles',
+        'sent in-1',
+      ]);
+      // Only the new process's restore is reported; the refused one's failure is dropped.
+      const rewound = events.filter((e) => e.type === 'files-rewound');
+      expect(rewound, refused).toHaveLength(1);
+      expect(rewound[0], refused).toMatchObject({ result: { ok: true, filesChanged: ['a.txt'] } });
+      await session.dispose();
+    }
   });
 
   it('no rewind control and a clear failure when checkpoints are off', async () => {

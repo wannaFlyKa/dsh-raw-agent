@@ -24,7 +24,8 @@ export interface RestoreResult {
   droppedAttachments: number;
 }
 
-function insert(target: DraftTarget, text: string): boolean {
+/** Insert text at the composer caret; false when the composer refused it. Never replaces the draft. */
+export function insertAtCaret(target: DraftTarget, text: string): boolean {
   try {
     if (target.captureInsertion && target.insertText)
       return target.insertText(text, target.captureInsertion() as never) === true;
@@ -51,5 +52,29 @@ export async function restoreReturnedDrafts(
   const droppedAttachments = returnedDrafts.reduce((n, d) => n + (d.attachments ?? 0), 0);
   const text = parts.join('\n\n');
   if (text === '') return { droppedAttachments };
-  return insert(target, text) ? { inserted: text, droppedAttachments } : { held: text, droppedAttachments };
+  return insertAtCaret(target, text) ? { inserted: text, droppedAttachments } : { held: text, droppedAttachments };
+}
+
+/** What the controls do with one `rawAgentClient.prefill` request (R9.2). */
+export type PrefillOutcome =
+  | { kind: 'side'; seq: number; text: string }
+  | { kind: 'inserted'; seq: number }
+  | { kind: 'held'; seq: number; text: string };
+
+/**
+ * Take a prefill request newer than `seenSeq`. Side-question text goes to the side panel's box;
+ * composer text is inserted at the caret, or held (shown with "Copy it") when the composer
+ * refuses it. Undefined: nothing new, or the composer's actions have not arrived yet (wait).
+ */
+export function takePrefill(
+  req: { text: string; target: 'composer' | 'side-question'; seq: number } | undefined,
+  seenSeq: number,
+  target: DraftTarget | undefined,
+): PrefillOutcome | undefined {
+  if (!req || req.seq <= seenSeq) return undefined;
+  if (req.target === 'side-question') return { kind: 'side', seq: req.seq, text: req.text };
+  if (!target) return undefined;
+  return insertAtCaret(target, req.text)
+    ? { kind: 'inserted', seq: req.seq }
+    : { kind: 'held', seq: req.seq, text: req.text };
 }

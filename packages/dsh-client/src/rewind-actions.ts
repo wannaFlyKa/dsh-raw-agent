@@ -40,3 +40,21 @@ export async function requestRestoreAtStart(
   }
   return { ok: false, error: last ?? 'no answer' };
 }
+
+/** What `handBackDraft` needs of a session store (structural; `SessionControlStore` has both). */
+export interface DraftReceiver {
+  requestPrefill(text: string, target: 'composer'): void;
+  showNote(text: string): void;
+}
+
+/**
+ * M8 polish: after "Restore conversation" the rewound message goes back to the new branch's
+ * composer, as the TUI's rewind puts it back in its draft. Asked on the branch's store before DSH
+ * opens it, so its controls take it when they mount (at the caret; nothing is sent). What cannot go
+ * back (attachments, a very long text) is said in a note on the branch.
+ */
+export function handBackDraft(branch: DraftReceiver | undefined, draft: { text?: string; note?: string }): void {
+  if (!branch) return;
+  if (draft.text !== undefined) branch.requestPrefill(draft.text, 'composer');
+  if (draft.note !== undefined) branch.showNote(draft.note);
+}

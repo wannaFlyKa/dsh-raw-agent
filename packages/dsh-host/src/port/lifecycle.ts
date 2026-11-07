@@ -91,6 +91,11 @@ export function tasksEndedByStop(events: readonly DshEvent[], kindPrefix = 'raw-
 
 /** The longest message text a rewind point carries. */
 export const REWIND_TEXT_MAX = 300;
+/**
+ * M8 polish: the longest full text a point carries for the composer of the branch (the TUI puts the
+ * rewound prompt back in the draft). Longer messages carry none; the dialog then says so.
+ */
+export const REWIND_DRAFT_MAX = 20_000;
 /** The most recent points the dialog lists. */
 export const REWIND_POINTS_MAX = 200;
 
@@ -143,6 +148,10 @@ export function rewindPoints(events: readonly DshEvent[]): RewindPoint[] {
       text: text.length > REWIND_TEXT_MAX ? `${text.slice(0, REWIND_TEXT_MAX)}…` : text,
       at: e.time,
     };
+    if (text.length > REWIND_TEXT_MAX) {
+      p.cut = true;
+      if (text.length <= REWIND_DRAFT_MAX) p.draft = text;
+    }
     const other = blocks.filter((b) => b?.type !== 'text').length;
     if (other > 0) p.attachments = other;
     if (lastEnd !== undefined) p.forkSeq = lastEnd;

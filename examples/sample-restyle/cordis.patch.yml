@@ -1,0 +1,5 @@
+# The sample plugin's Host row. The browser half (client.js) loads through `dsh.client` in
+# package.json.
+- insert:
+    - id: sample-restyle
+      name: 'dsh-raw-agent-sample-restyle'

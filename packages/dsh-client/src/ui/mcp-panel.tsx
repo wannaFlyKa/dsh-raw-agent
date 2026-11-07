@@ -222,6 +222,11 @@ export interface McpPanelProps {
   displayName: string;
   onStart(): void;
   onClose(): void;
+  /**
+   * M8 polish: the panel read a newer server list than the controls hold (the "MCP n/m" button
+   * reads the session view, polled): the controls read the view again, so the count does not lag.
+   */
+  onServers?(): void;
   /** Test seam: the data, skipping the first reads. */
   initial?: { mcp?: McpAnswerWire; commands?: CommandsAnswerWire };
 }
@@ -235,8 +240,17 @@ export function McpPanel(props: McpPanelProps): React.ReactElement {
   const [note, setNote] = React.useState<string | undefined>();
   const [error, setError] = React.useState<string | undefined>();
   const [auth, setAuth] = React.useState<Record<string, NonNullable<McpActionWire['auth']>>>({});
+  const onServers = React.useRef(props.onServers);
+  onServers.current = props.onServers;
   const load = React.useCallback(() => {
-    if (api.mcp) api.mcp(sessionId).then(setMcp, (e: unknown) => setError(String((e as Error)?.message ?? e)));
+    if (api.mcp)
+      api.mcp(sessionId).then(
+        (m) => {
+          setMcp(m);
+          if (m.from === 'live') onServers.current?.();
+        },
+        (e: unknown) => setError(String((e as Error)?.message ?? e)),
+      );
     if (api.commands)
       api.commands(sessionId).then(setCommands, (e: unknown) => setError(String((e as Error)?.message ?? e)));
   }, [api, sessionId]);
@@ -252,7 +266,10 @@ export function McpPanel(props: McpPanelProps): React.ReactElement {
     p.then(
       (r) => {
         setBusy(undefined);
-        if (r.mcp) setMcp(r.mcp);
+        if (r.mcp) {
+          setMcp(r.mcp);
+          props.onServers?.();
+        }
         if (!r.ok) setError(r.error ?? 'the action failed');
         if (r.note) setNote(r.note);
         if (r.auth) setAuth((all) => ({ ...all, [server]: r.auth! }));

@@ -367,7 +367,13 @@ describe('port', () => {
     const ctx = {
       slots: {
         inject: (key: string, cb: () => unknown) => {
-          expect([CONTROLS_SLOT, 'conversation.session.header.actions', 'conversation.composer.dock']).toContain(key);
+          expect([
+            CONTROLS_SLOT,
+            'conversation.session.header.actions',
+            'conversation.composer.dock',
+            'conversation.input.dock',
+            'settings.section',
+          ]).toContain(key);
           cb();
           return () => {};
         },
@@ -380,14 +386,26 @@ describe('port', () => {
       effect: (fn: () => () => void) => void effects.push(fn),
     };
     const stores = mountClient(ctx as never, { fetch: fakeFetch(() => ({ status: 404, body: {} })).fetchFn });
-    expect(registered).toHaveLength(4);
+    expect(registered).toHaveLength(6);
+    // R9.2: the plugin access page in DSH's settings panel.
+    expect(registered[4]!.options).toMatchObject({ name: 'settings.section', id: 'raw-agent-plugin-access' });
+    // R9.1: our own list slot for other plugins, declared by its own small entry.
+    expect(registered[5]!.options).toMatchObject({
+      name: 'conversation.input.left',
+      id: 'raw-agent-plugin-extras',
+      children: { 'raw-agent.controls.extra': { kind: 'list', scope: 'session' } },
+    });
     expect(registered[0]!.options).toMatchObject({
       name: 'conversation.session.header.actions',
       id: 'raw-agent-agents',
     });
     expect(registered[1]!.options).toMatchObject({ name: 'conversation.composer.dock', id: 'raw-agent-context' });
     // M7: the lifecycle banner (crash and exit with Restart, fork and recovery notes).
-    expect(registered[2]!.options).toMatchObject({ name: 'conversation.composer.dock', id: 'raw-agent-lifecycle' });
+    expect(registered[2]!.options).toMatchObject({
+      name: 'conversation.input.dock',
+      id: 'raw-agent-lifecycle',
+      order: 30,
+    });
     expect(registered[3]!.options).toMatchObject({ name: 'conversation.input.left', id: 'raw-agent-session-controls' });
     expect(registered[3]!.component).toBe(SessionControls);
     const injected = (registered[3]!.options.inject as (id: string) => { store: SessionControlStore })('s9');

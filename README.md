@@ -2,7 +2,7 @@
 
 Run your **own, unmodified Claude Code** inside [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), and use DSH plugins to change how everything looks and behaves.
 
-> **Status: pre-alpha, under construction.** Nothing is usable yet.
+> **Status: pre-alpha.** Usable for testing; install and use are described in [packages/plugin/README.md](packages/plugin/README.md).
 
 ## Why
 

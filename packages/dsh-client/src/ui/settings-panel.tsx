@@ -9,6 +9,8 @@ import type { SettingsKeySource } from '@dsh-raw-agent/core';
 import { cdCommand, keyLayerRows, maskedSegments } from '../view-model.js';
 import type { HostActions } from './actions.js';
 import { css } from './style.js';
+import type { PluginApi } from '../plugin-routes.js';
+import { GrantsPanel } from './grants-panel.js';
 
 export interface SettingsPanelProps {
   sessionId: string;
@@ -17,6 +19,8 @@ export interface SettingsPanelProps {
   displayName: string;
   /** D63: which layer sets each key (from the Host's read-only settings preview). */
   keys?: SettingsKeySource[];
+  /** R9.2, D66: the plugin access section (grants for other plugins). */
+  plugin?: PluginApi;
   onClose(): void;
 }
 
@@ -99,6 +103,11 @@ export function SettingsPanel(props: SettingsPanelProps): React.ReactElement {
                 ))}
               </tbody>
             </table>
+          </section>
+        )}
+        {props.plugin && (
+          <section style={css.file}>
+            <GrantsPanel plugin={props.plugin} copy={props.actions.copy} displayName={props.displayName} />
           </section>
         )}
       </div>

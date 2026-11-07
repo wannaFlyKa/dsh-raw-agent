@@ -128,7 +128,14 @@ for (const pkg of readdirSync(pkgDir)) {
   // package.json dependencies follow the same graph.
   const manifest = JSON.parse(readFileSync(join(pkgDir, pkg, 'package.json'), 'utf8'));
   const deps = { ...manifest.dependencies, ...manifest.peerDependencies };
+  // §8: the plugin declares the DSH range as an optional peer (a version statement; no import).
+  const optionalPeer = (d) =>
+    pkg === 'plugin' &&
+    d === '@deepseek-ai/dsh' &&
+    manifest.peerDependenciesMeta?.[d]?.optional === true &&
+    manifest.dependencies?.[d] === undefined;
   for (const d of Object.keys(deps)) {
+    if (optionalPeer(d)) continue;
     if (d === SDK && !['backend-claude', 'plugin'].includes(pkg))
       errors.push(`packages/${pkg}/package.json: depends on the SDK`);
     if (isDshRuntime(d))

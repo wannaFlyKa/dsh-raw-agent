@@ -83,6 +83,8 @@ export interface ClaudeSessionInit {
   restoreFilesAt?: string;
   /** R3.6: how the CLI process ended (exit code, signal, the end of its stderr). */
   exitInfo?: () => Promise<ProcessExit | undefined>;
+  /** M8: a new process replaces the old one (D29 plain restart); its exit is the one to report. */
+  newProcess?: () => void;
 }
 
 /**
@@ -199,6 +201,12 @@ export class ClaudeBackendSession implements AgentBackendSession {
   /** D30: sends wait for the file restore, so the first turn sees the restored files. */
   #ready: Promise<void> = Promise.resolve();
   /**
+   * M8: settles when a refusal restart replaces `#ready`. A send that waits on the refused
+   * process's restore moves on at once, even when that control never answers.
+   */
+  #readyReplaced: Promise<void>;
+  #replaceReady: () => void = () => {};
+  /**
    * D29, D35 (M7 live): the session choices sent to this process (model, effort, ultracode,
    * mode), in order. A plain restart after a refused cut is a new process on the user's
    * settings, so it gets them again before any input.
@@ -218,6 +226,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
 
   constructor(init: ClaudeSessionInit) {
     this.#init = init;
+    this.#readyReplaced = this.#nextReadyEpoch();
     this.kind = init.kind;
     this.#sessionId = init.sessionId;
     this.startedAs = init.startedAs;
@@ -273,6 +282,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
    * sent. The outcome is an event; a failure never blocks the conversation.
    */
   async #restoreFiles(inputId: string): Promise<void> {
+    const query = this.#query;
     let result: FileRewindResult;
     if (!this.capabilities.fileRewind)
       result = { ok: false, filesChanged: [], error: 'file checkpoints are off for this session' };
@@ -282,7 +292,12 @@ export class ClaudeBackendSession implements AgentBackendSession {
       } catch (e) {
         result = { ok: false, filesChanged: [], error: String((e as Error)?.message ?? e) };
       }
-    if (!this.#exited) this.#events.push({ type: 'files-rewound', inputId, result });
+    // A refused process's outcome is dropped (M8): the plain restart restores again and reports.
+    if (!this.#exited && this.#query === query) this.#events.push({ type: 'files-rewound', inputId, result });
+  }
+
+  #nextReadyEpoch(): Promise<void> {
+    return new Promise<void>((resolve) => (this.#replaceReady = resolve));
   }
 
   async #rewindFiles(inputId: string, dryRun: boolean): Promise<FileRewindResult> {
@@ -401,6 +416,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
         e.reason = exit.reason;
         if (exit.code !== undefined) e.code = exit.code;
         if (exit.signal !== undefined) e.signal = exit.signal;
+        if (exit.stderr !== undefined) e.stderr = exit.stderr;
       }
       this.#events.push(e);
     }
@@ -425,6 +441,8 @@ export class ClaudeBackendSession implements AgentBackendSession {
       // already closed
     }
     this.#input = new AsyncQueue<SDKUserMessage>();
+    // The refused CLI's exit (it may close late) must never be reported as the new one's.
+    this.#init.newProcess?.();
     const options = this.#init.fallbackOptions as Options;
     this.#query = withSdkVersionEnvRestored(() => this.#init.queryFn({ prompt: this.#input, options }));
     this.#events.push({ type: 'notice', level: 'warning', text: refusalNote(refusal) });
@@ -443,6 +461,10 @@ export class ClaudeBackendSession implements AgentBackendSession {
       }
       if (restoreAt !== undefined) await this.#restoreFiles(restoreAt);
     })();
+    // A send waiting on the old `#ready` moves to the new one (set above) now.
+    const replaced = this.#replaceReady;
+    this.#readyReplaced = this.#nextReadyEpoch();
+    replaced();
     const input = this.#input;
     void this.#ready.then(() => {
       for (const m of sent) input.push(m);
@@ -480,12 +502,13 @@ export class ClaudeBackendSession implements AgentBackendSession {
     // pending in the tracker, or every later turn end would wait for it (M1 verify 3-2).
     const message = toSdkUserMessage(input, mode);
     // D30: a rewind fork restores the files before the first turn sees them.
-    // A refusal restart replaces `#ready` while we wait; wait again until it stays (M7 verify).
-    let ready: Promise<void>;
-    do {
-      ready = this.#ready;
-      await ready;
-    } while (ready !== this.#ready);
+    // A refusal restart replaces `#ready` while we wait (the old one may never settle: a refused
+    // process need not answer its controls); wait on the new one until it stays (M8).
+    for (;;) {
+      const ready = this.#ready;
+      await Promise.race([ready.catch(() => undefined), this.#readyReplaced]);
+      if (ready === this.#ready) break;
+    }
     if (this.#exited) throw new Error('Claude Code is not running');
     this.#forkGuard?.push(message);
     // D52: a slash command is the plain text the user typed; only its name is noted, so a

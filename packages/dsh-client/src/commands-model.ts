@@ -252,6 +252,8 @@ export function sourceCandidates(answer: CommandsAnswerWire | undefined, query: 
     if (r.menu === 'rewind-panel') notes.push('opens the rewind dialog');
     if (r.aliases && r.aliases.length > 0) notes.push(`also ${r.aliases.map((a) => `/${a}`).join(', ')}`);
     const c: CommandCandidate = { name: r.name };
+    const short = shortCommandLabel(r.name);
+    if (short !== undefined) c.label = short;
     const d = [r.description, kind, ...notes].filter(Boolean).join(' · ');
     if (d) c.description = d;
     if (r.argumentHint) c.hint = r.argumentHint;
@@ -259,6 +261,27 @@ export function sourceCandidates(answer: CommandsAnswerWire | undefined, query: 
     out.push(c);
   }
   return out;
+}
+
+/** The longest command name the `/` menu shows whole (DSH cuts the name column at 40% of the row). */
+export const COMMAND_LABEL_MAX = 36;
+
+/**
+ * M8 polish (M6 leftover): a shorter menu label for a long command name, keeping its end. DSH's
+ * menu cuts a long name at its end, so a dozen plugin MCP prompts all read
+ * "plugin:SomePlugin:server-…" and the prompt name that tells them apart is hidden. The label keeps
+ * the first segment and the last one (the prompt name, with the ` (MCP)` suffix); DSH shows the
+ * full name beside it, and matching and the sent text still use the name. Undefined: short enough.
+ */
+export function shortCommandLabel(name: string, max = COMMAND_LABEL_MAX): string | undefined {
+  if (name.length <= max) return undefined;
+  const parts = name.split(':');
+  let label = parts.length >= 3 ? `${parts[0]}:…:${parts[parts.length - 1]}` : name;
+  if (label.length > max) {
+    const tail = max - 1 - Math.min(8, Math.floor(max / 4));
+    label = `${label.slice(0, max - 1 - tail)}…${label.slice(label.length - tail)}`;
+  }
+  return label;
 }
 
 /** D52: a pick only puts the exact line in the composer; Enter then sends it as typed text. */

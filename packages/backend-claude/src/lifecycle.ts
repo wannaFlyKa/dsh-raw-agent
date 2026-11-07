@@ -183,16 +183,23 @@ export function stderrTail(text: string, maxLines = 12, maxChars = 1500): string
 
 export interface ExitDescription {
   reason: ExitReason;
+  /** A short reason, with no error output of the CLI: it goes into the host log (M8). */
   error?: string;
   code?: number;
   signal?: string;
+  /** The end of the CLI's error output, for the plugin UI only (never written to the log). */
+  stderr?: string;
 }
+
+/** The SDK's own exit error ends with `. stderr: <tail>` when it saw any (SDK 0.3.318). */
+const SDK_STDERR_SUFFIX = /\.\s*stderr:\s*([\s\S]*)$/;
 
 /**
  * R3.6: a clear reason for the end of the process. `asked`: we disposed or force-stopped it.
  * `sdkError`: what the SDK iterator threw, if anything. `proc`: the exit code, signal and the end
  * of stderr, when the spawn hook saw them. `error` is the detail only (the DSH layer words the
- * sentence around it: "<name> stopped unexpectedly: <error>. …").
+ * sentence around it: "<name> stopped unexpectedly: <error>. …"). It never holds the CLI's error
+ * output (M8): that is `stderr`, which only the plugin UI shows.
  */
 export function describeExit(input: {
   asked?: 'disposed' | 'force-stopped';
@@ -204,7 +211,15 @@ export function describeExit(input: {
   if (proc?.code !== null && proc?.code !== undefined) out.code = proc.code;
   if (proc?.signal !== null && proc?.signal !== undefined) out.signal = proc.signal;
   if (input.asked !== undefined) return out;
-  const tail = proc ? stderrTail(proc.stderr) : '';
+  // The SDK's error carries its own stderr tail; it goes to `stderr`, never into `error`.
+  let sdk = input.sdkError?.trim();
+  let sdkTail = '';
+  const m = sdk === undefined ? null : SDK_STDERR_SUFFIX.exec(sdk);
+  if (sdk !== undefined && m) {
+    sdkTail = m[1] ?? '';
+    sdk = sdk.slice(0, m.index).trim();
+  }
+  const tail = stderrTail(proc && proc.stderr.trim() !== '' ? proc.stderr : sdkTail);
   const parts: string[] = [];
   if (out.signal !== undefined)
     parts.push(
@@ -213,16 +228,22 @@ export function describeExit(input: {
         : `it was ended by the signal ${out.signal}`,
     );
   else if (out.code !== undefined && out.code !== 0) parts.push(`it exited with code ${out.code}`);
-  else if (input.sdkError === undefined) {
+  else if (!sdk) {
     out.reason = 'ended';
     parts.push(`it ended by itself${out.code === 0 ? ' (exit code 0)' : ''}`);
   }
   // The SDK's own text adds nothing when it only repeats the exit code or signal.
-  const sdk = input.sdkError?.trim();
   if (sdk && !/^Claude Code process (exited with code|terminated by signal)/i.test(sdk) && !tail.includes(sdk))
-    parts.push(sdk);
-  else if (sdk && parts.length === 0) parts.push(sdk);
-  if (tail !== '') parts.push(`its last error output was:\n${tail}`);
+    parts.push(firstLine(sdk));
+  else if (sdk && parts.length === 0) parts.push(firstLine(sdk));
+  if (parts.length === 0) parts.push('no reason was given');
   out.error = parts.join('; ');
+  if (tail !== '') out.stderr = tail;
   return out;
+}
+
+/** One line, at most 300 characters: a reason short enough for the host log. */
+function firstLine(text: string): string {
+  const line = text.split(/\r?\n/)[0]!.trim();
+  return line.length > 300 ? `${line.slice(0, 299)}…` : line;
 }

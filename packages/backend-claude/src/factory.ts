@@ -54,6 +54,7 @@ import {
 import { checkDropsTurn, FORK_SCAN_LIMIT_BYTES } from './lifecycle.js';
 import type { SpawnerOptions } from './spawn.js';
 import { sessionTail } from './session-tail.js';
+import { findSessionHoldingInput, nodeInputScanDeps, type InputScanDeps } from './input-scan.js';
 
 export const CLAUDE_KIND = 'claude-code';
 
@@ -219,9 +220,6 @@ const nodeFs = {
   },
 };
 
-/** D70 (M7): how many of a folder's newest transcripts `sessionHoldingInput` reads at most. */
-const INPUT_SCAN_FILES = 64;
-
 export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): AgentBackendFactory {
   const readEnv = () => buildClaudeEnv(factoryOptions.env ? factoryOptions.env() : process.env).env;
   const fs: NonNullable<ClaudeFactoryOptions['fs']> = factoryOptions.fs ?? nodeFs;
@@ -231,6 +229,17 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     const files = claudeConfigFiles(cwd, { env, platform: process.platform, homedir: home() });
     return readSettingsDefaults(files, (p) => fs.readText(p), env);
   };
+  // M8: async, bounded reads for `sessionHoldingInput`; the test seam's sync reads when given.
+  const seam = factoryOptions.fs;
+  const inputScanDeps: InputScanDeps = seam
+    ? {
+        ...nodeInputScanDeps,
+        readText: async (p) => seam.readText(p),
+        readHead: async (p, n) => (seam.readHead ? seam.readHead(p, n) : seam.readText(p)?.slice(0, n)),
+        ...(seam.listDir ? { listDir: async (p: string) => seam.listDir!(p) } : {}),
+        ...(seam.size ? { size: async (p: string) => seam.size!(p) } : {}),
+      }
+    : nodeInputScanDeps;
   const transcriptDeps = (env: TranscriptReadDeps['env'] = readEnv()): TranscriptReadDeps => ({
     env,
     platform: process.platform,
@@ -297,51 +306,10 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     // the typed command (its `uuid` is our input id); the host has no step to bind that id to.
     // A file read: the preferred transcript first, then the newest ones in the same folder.
     async sessionHoldingInput(inputId: string, cwd: string, prefer?: string): Promise<string | undefined> {
-      const needle = `"uuid":"${inputId}"`;
-      const holds = (file: string): string | undefined => {
-        const size = (fs.size ?? nodeFs.size)(file);
-        if (size !== undefined && size > FORK_SCAN_LIMIT_BYTES) return undefined;
-        const text = fs.readText(file);
-        if (text === undefined || !text.includes(needle)) return undefined;
-        for (const line of text.split('\n')) {
-          if (!line.includes(needle)) continue;
-          try {
-            const d = JSON.parse(line) as { type?: unknown; uuid?: unknown; sessionId?: unknown };
-            if (d.type === 'user' && d.uuid === inputId)
-              return typeof d.sessionId === 'string' ? d.sessionId : path.basename(file, '.jsonl');
-          } catch {
-            // a half-written line
-          }
-        }
-        return undefined;
-      };
-      const preferred = prefer === undefined ? undefined : transcriptFile(prefer, cwd);
-      if (preferred !== undefined) {
-        const hit = holds(preferred);
-        if (hit !== undefined) return hit;
-      }
       const deps = transcriptDeps();
+      const preferred = prefer === undefined ? undefined : transcriptFile(prefer, cwd);
       const dirs = [...new Set(transcriptPaths(prefer ?? inputId, cwd, deps).map((p) => path.dirname(p)))];
-      for (const dir of dirs) {
-        const files = deps
-          .listDir(dir)
-          .filter((n) => n.endsWith('.jsonl'))
-          .map((n) => path.join(dir, n))
-          .filter((p) => p !== preferred);
-        const mtime = (p: string) => {
-          try {
-            return statSync(p).mtimeMs;
-          } catch {
-            return 0;
-          }
-        };
-        files.sort((a, b) => mtime(b) - mtime(a));
-        for (const file of files.slice(0, INPUT_SCAN_FILES)) {
-          const hit = holds(file);
-          if (hit !== undefined) return hit;
-        }
-      }
-      return undefined;
+      return findSessionHoldingInput(inputId, preferred, dirs, inputScanDeps);
     },
     // M7 (R3.6): the main-thread entries past the host log's chain point, from the CLI's own
     // transcript (a file read, no process). The host shows what it never got.
@@ -487,6 +455,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         killGroup: () => spawner.killGroup('SIGKILL'),
         // R3.6: the exit code, signal and the end of stderr for a clear exit reason.
         exitInfo: () => spawner.exitInfo(),
+        newProcess: () => spawner.expectNew(),
       };
       if (fallbackOptions) init.fallbackOptions = fallbackOptions;
       // D30: "restore code" with a rewind fork; only when this process keeps checkpoints.

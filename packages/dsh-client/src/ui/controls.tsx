@@ -7,7 +7,7 @@ import * as React from 'react';
 import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
 import { agentSelect } from '../agents-model.js';
 import { SETTINGS, type RawAgentApi } from '../api.js';
-import { restoreReturnedDrafts, type DraftTarget } from '../drafts.js';
+import { restoreReturnedDrafts, takePrefill, type DraftTarget } from '../drafts.js';
 import type { SessionControlStore, SessionStores } from '../session-store.js';
 import { START_OPTION, effortSelect, modeSelect, modelSelect, statusLine, type SelectModel } from '../view-model.js';
 import type { HostActions } from './actions.js';
@@ -19,6 +19,7 @@ import { SidePanel } from './side-panel.js';
 import { exitBanner } from '../lifecycle-model.js';
 import { RewindPanel } from './rewind-panel.js';
 import { css } from './style.js';
+import type { PluginApi } from '../plugin-routes.js';
 
 export interface ControlsProps {
   store: SessionControlStore;
@@ -35,6 +36,8 @@ export interface ControlsProps {
   asksInComposer?: boolean | (() => boolean);
   /** All session stores: a new rewind branch's store takes a note (M7). */
   stores?: SessionStores;
+  /** R9.2: the plugin routes (the settings dialog shows the plugin access section). */
+  plugin?: PluginApi;
 }
 
 function Picker(props: {
@@ -43,10 +46,12 @@ function Picker(props: {
   disabled: boolean;
   onPick(value: string): void;
   testId: string;
+  selectRef?: React.Ref<HTMLSelectElement>;
 }): React.ReactElement {
   const { model } = props;
   return (
     <select
+      ref={props.selectRef}
       aria-label={props.label}
       title={model.title}
       style={css.select}
@@ -64,6 +69,21 @@ function Picker(props: {
   );
 }
 
+/**
+ * Focus a picker and open its list where the browser allows it (`showPicker`, which needs the
+ * user's key press still active: the Enter that ran `/model`). Else the focus alone shows where it is.
+ */
+export function openPicker(el: { focus?(): void; showPicker?(): void; disabled?: boolean } | null): boolean {
+  if (!el || el.disabled) return false;
+  el.focus?.();
+  try {
+    el.showPicker?.();
+    return true;
+  } catch {
+    return false; // no user activation, or the browser has no picker API: the focus stays
+  }
+}
+
 export function SessionControls(props: ControlsProps): React.ReactElement | null {
   const { store, api, actions } = props;
   const snap = React.useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot);
@@ -72,6 +92,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   const [mcpPanel, setMcpPanel] = React.useState(false);
   const closeMcp = React.useCallback(() => setMcpPanel(false), []);
   const [rewindPanel, setRewindPanel] = React.useState(false);
+  const modelRef = React.useRef<HTMLSelectElement | null>(null);
   const closeRewind = React.useCallback(() => setRewindPanel(false), []);
   // D55, D30: a bare `/mcp` or `/rewind` in the composer (our `/` source) opens our panel, like
   // the terminal app opens its own.
@@ -82,6 +103,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
     if (panelSeq > panelSeen.current) {
       if (panelName === 'mcp') setMcpPanel(true);
       else if (panelName === 'rewind') setRewindPanel(true);
+      else if (panelName === 'model') openPicker(modelRef.current);
     }
     panelSeen.current = panelSeq;
   }, [panelSeq, panelName]);
@@ -119,6 +141,21 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
     const timer = setInterval(take, draftPollMs ?? 1500);
     return () => clearInterval(timer);
   }, [turn, api, store, inputActions, draftPollMs]);
+  // R9.2: `rawAgentClient.prefill` text. Composer: at the caret (never replacing the draft);
+  // side question: into the side panel's box. Nothing is sent until the user presses Enter.
+  const prefillSeq = snap.prefillRequest?.seq ?? 0;
+  const prefillSeen = React.useRef(0);
+  const [sidePrefill, setSidePrefill] = React.useState<{ text: string; seq: number } | undefined>();
+  const [heldPrefill, setHeldPrefill] = React.useState<string | undefined>();
+  React.useEffect(() => {
+    const done = takePrefill(store.getSnapshot().prefillRequest, prefillSeen.current, inputActions);
+    if (!done) return;
+    prefillSeen.current = done.seq;
+    if (done.kind === 'side') {
+      setSidePrefill({ text: done.text, seq: done.seq });
+      setSideWanted(true);
+    } else setHeldPrefill(done.kind === 'held' ? done.text : undefined);
+  }, [prefillSeq, inputActions, store]);
   // DSH's own permission control does not apply to this agent: hide it while our controls show
   // (only in our sessions; a Standard session renders no controls, so its seat stays).
   const barRef = React.useRef<HTMLSpanElement | null>(null);
@@ -153,6 +190,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
       )}
       <Picker
         testId="model"
+        selectRef={modelRef}
         label={`${name} model for this session`}
         model={model}
         disabled={snap.busy}
@@ -219,6 +257,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           displayName={name}
           open={sideWanted}
           onOpenChange={onSideOpen}
+          {...(sidePrefill ? { prefill: sidePrefill } : {})}
         />
       )}
       {api.rewind && (
@@ -259,6 +298,25 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           </button>
         </span>
       )}
+      {heldPrefill !== undefined && (
+        <span style={css.status} data-raw-agent="held-prefill">
+          Text from another plugin could not go into the composer: “{heldPrefill}”{' '}
+          <button
+            type="button"
+            style={css.button}
+            onClick={() =>
+              void actions.copy(heldPrefill).then((ok) => {
+                if (ok) setHeldPrefill(undefined);
+              })
+            }
+          >
+            Copy it
+          </button>{' '}
+          <button type="button" style={css.button} onClick={() => setHeldPrefill(undefined)}>
+            Dismiss
+          </button>
+        </span>
+      )}
       {status && (
         <span style={css.status} data-raw-agent="status" role="status">
           {status}
@@ -272,6 +330,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
             actions={actions}
             displayName={name}
             onStart={() => void store.start()}
+            onServers={() => void store.refresh()}
             onClose={closeMcp}
           />,
         )}
@@ -294,6 +353,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
             actions={actions}
             displayName={name}
             {...(info.settings?.keys ? { keys: info.settings.keys } : {})}
+            {...(props.plugin ? { plugin: props.plugin } : {})}
             onClose={close}
           />,
         )}

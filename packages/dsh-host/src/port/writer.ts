@@ -16,6 +16,7 @@
 // Steps are numbered by the writer; the loop opened the turn and writes turn/end itself.
 
 import { randomUUID } from 'node:crypto';
+import { PLUGIN_SOURCE_KIND } from '@dsh-raw-agent/core';
 import { StreamRecorder, deepEqual, replayStream } from './stream.js';
 import type { DshBlock, DshChunk, DshInbox, DshSession, DshStreamRecord, DshUsage, DshUserMessage } from './types.js';
 
@@ -213,10 +214,15 @@ export class TurnLog {
     return this.#session.append(type, data, options).seq;
   }
 
-  /** The human message, unchanged (D22). Only between steps. */
+  /**
+   * The human message, unchanged (D22). Only between steps. A granted plugin message (D66,
+   * `source.kind: 'raw-agent-plugin'`, admitted by the caller) is written unchanged too, so the log
+   * shows who sent it.
+   */
   writeUser(message: DshUserMessage): void {
     if (this.#stepOpen) throw new WriterAssertError('refused user/message inside an open step');
-    if (message.source.kind !== 'user') throw new WriterAssertError('refused a non-human user/message');
+    if (message.source.kind !== 'user' && message.source.kind !== PLUGIN_SOURCE_KIND)
+      throw new WriterAssertError('refused a non-human user/message');
     this.#append('user/message', message, { surfaceOp: 'append' });
   }
 

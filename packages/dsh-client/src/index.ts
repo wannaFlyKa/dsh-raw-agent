@@ -11,9 +11,13 @@ export * from './workflow-model.js';
 export * from './usage-model.js';
 export * from './commands-model.js';
 export * from './lifecycle-model.js';
-export { requestRestoreAtStart, type RestoreRetry } from './rewind-actions.js';
+export { handBackDraft, requestRestoreAtStart, type DraftReceiver, type RestoreRetry } from './rewind-actions.js';
 export { RewindPanel, type RewindPanelProps } from './ui/rewind-panel.js';
-export { LifecycleBanner, type LifecycleBannerProps } from './ui/lifecycle-banner.js';
+export {
+  LifecycleBanner,
+  stackStyle as lifecycleStackStyle,
+  type LifecycleBannerProps,
+} from './ui/lifecycle-banner.js';
 export { CommandMarkerView, type CommandMarkerProps } from './ui/command-marker.js';
 export { UsageReader, UsageReaders, type UsageReadSnapshot } from './usage-reader.js';
 export {
@@ -83,7 +87,7 @@ export {
 export { AskCard, AskPanel, PreviewView, PREVIEW_LINES, type AskCardProps } from './ui/ask-cards.js';
 export { Markdown } from './ui/markdown.js';
 export type { HostActions } from './ui/actions.js';
-export { SessionControls, type ControlsProps } from './ui/controls.js';
+export { SessionControls, openPicker, type ControlsProps } from './ui/controls.js';
 export { SettingsPanel, type SettingsPanelProps } from './ui/settings-panel.js';
 export {
   mountClient,
@@ -91,6 +95,11 @@ export {
   fileResourceAddress,
   CONTROLS_SLOT,
   CONTROLS_ENTRY_ID,
+  SETTINGS_SECTION_SLOT,
+  GRANTS_SECTION_ID,
+  PLUGIN_EXTRAS_ENTRY_ID,
+  PLUGIN_EXTRAS_SLOT,
+  PLUGIN_EXTRAS_ORDER,
   CONTEXT_PILL_SLOT,
   CONTEXT_PILL_ENTRY_ID,
   CONTEXT_PILL_ORDER,
@@ -105,6 +114,8 @@ export {
   selectAsk,
   modeKeyHandler,
   guardPresetDecoration,
+  guardModelContribution,
+  MODEL_CONTRIBUTION,
   isOurSession,
   PRESET_DECORATION,
   AskComposer,
@@ -141,6 +152,7 @@ export {
   markerOfEvent,
   CommandMarkerNode,
   LIFECYCLE_ENTRY_ID,
+  LIFECYCLE_SLOT,
   LIFECYCLE_ORDER,
   type WorkflowNodeData,
   type AskInteraction,
@@ -176,3 +188,9 @@ export {
   COMMAND_SOURCE_NAME,
   type AgentCommandSource,
 } from './port/command-source.js';
+export { createRawAgentClientService, PREFILL_MAX } from './client-service.js';
+export { createPluginApi, type PluginApi, type GrantWire } from './plugin-routes.js';
+export { GrantsPanel, grantNote, type GrantsPanelProps } from './ui/grants-panel.js';
+export { PluginExtras, type PluginExtrasOwner, type PluginExtrasProps } from './ui/plugin-extras.js';
+export { insertAtCaret, takePrefill, type PrefillOutcome } from './drafts.js';
+export type { PrefillTarget } from './session-store.js';

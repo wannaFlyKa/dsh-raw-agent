@@ -1,0 +1,5 @@
+# LF everywhere, so `prettier --check` and the fixtures behave the same on Windows checkouts.
+* text=auto eol=lf
+*.png binary
+*.zst binary
+*.zstd binary

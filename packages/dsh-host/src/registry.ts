@@ -79,9 +79,20 @@ export type RegisteredRuntime = Pick<
   // M7: optional for the same reason.
   Partial<Pick<SessionRuntime, 'rewindOptions' | 'requestCodeRestore' | 'rewindFiles'>>;
 
+/** The grant a plugin message was admitted under (D66). */
+export interface PluginSender {
+  grantId: string;
+  label: string;
+}
+
+/** How many admitted plugin message ids the registry remembers (oldest go first). */
+export const PLUGIN_MESSAGES_KEPT = 500;
+
 export class SessionRegistry {
   readonly apiVersion = 1;
   readonly #runtimes = new Map<string, { kind: string; runtime: RegisteredRuntime }>();
+  readonly #pluginMessages = new Map<string, PluginSender>();
+  readonly #added = new Set<(hostSessionId: string) => void>();
   readonly #drafts = new Map<string, ReturnedDraft[]>();
   readonly #opts: SessionRegistryOptions;
   #timer: ReturnType<typeof setInterval> | undefined;
@@ -108,6 +119,41 @@ export class SessionRegistry {
 
   set(hostSessionId: string, kind: string, runtime: RegisteredRuntime): void {
     this.#runtimes.set(hostSessionId, { kind, runtime });
+    for (const l of [...this.#added]) {
+      try {
+        l(hostSessionId);
+      } catch {
+        // a listener never breaks a registration
+      }
+    }
+  }
+
+  /** Called with the host session id each time a runtime is registered (the services' `onEvent`). */
+  onRuntime(listener: (hostSessionId: string) => void): () => void {
+    this.#added.add(listener);
+    return () => this.#added.delete(listener);
+  }
+
+  /**
+   * D66: the Host service admitted this host message after its grant check. The agent mount (in
+   * another bundle) forwards a `raw-agent-plugin` message only when it was admitted here, so a
+   * message another plugin put into the inbox by itself is dropped like any DSH notice (D22).
+   * In memory only: after a host restart an unsent plugin message is dropped (known gap).
+   */
+  admitPluginMessage(messageId: string, sender: PluginSender): void {
+    this.#pluginMessages.delete(messageId);
+    this.#pluginMessages.set(messageId, { ...sender });
+    while (this.#pluginMessages.size > PLUGIN_MESSAGES_KEPT) {
+      const oldest = this.#pluginMessages.keys().next().value;
+      if (oldest === undefined) break;
+      this.#pluginMessages.delete(oldest);
+    }
+  }
+
+  /** The grant a plugin message was admitted under, if it was. */
+  pluginSender(messageId: string): PluginSender | undefined {
+    const s = this.#pluginMessages.get(messageId);
+    return s ? { ...s } : undefined;
   }
 
   /** Remove and end one runtime. */

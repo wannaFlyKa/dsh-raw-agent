@@ -187,7 +187,9 @@ export function statusLine(info: SessionInfo, opts: { exitShown?: boolean } = {}
   if (v.state.lastExit && v.state.process === 'none' && !opts.exitShown)
     return `${info.backend.displayName} stopped${v.state.lastExit.error ? `: ${v.state.lastExit.error}` : ''}. Send a message to start it again.`;
   // The agent's own line (for example a model it refused and the model it used instead).
-  if (v.live.notice) return `${info.backend.displayName}: ${v.live.notice.text}`;
+  // M8 polish: a lifecycle fact (tasks a DSH stop ended, a branch note, a file restore) shows once,
+  // in the lifecycle banner, not here too.
+  if (v.live.notice && v.live.notice.topic !== 'lifecycle') return `${info.backend.displayName}: ${v.live.notice.text}`;
   if (info.trust && (v.asks ?? []).every((a) => a.kind !== 'trust'))
     return info.trust.state === 'untrusted'
       ? `${info.backend.displayName} does not trust this folder yet${info.trust.effect ? ` (${info.trust.effect})` : ''}. It asks before it starts.`

@@ -43,7 +43,8 @@ export interface SessionViewWire {
     model?: string;
     mode?: string;
     version?: string;
-    notice?: { level: string; text: string; at: number };
+    /** `topic: 'lifecycle'`: the lifecycle banner shows this fact; the status line does not repeat it. */
+    notice?: { level: string; text: string; at: number; topic?: 'lifecycle' };
     /** D15: the main-thread agent the process runs with. */
     agent?: string;
     /** D37: the agent's own ultracode state, once the live process reported it. */
@@ -87,6 +88,8 @@ export interface SessionViewWire {
   mcp?: Array<{ name: string; status: string }>;
   /** M7: fork, rewind, recovery and restart facts (mirrors dsh-host `LifecycleView`). */
   lifecycle?: LifecycleWire;
+  /** M8 (R9.2): the agent's own session id while a process runs. */
+  backendSessionId?: string;
 }
 
 // ---- M7: exits, fork, rewind and recovery (R3.5, R3.6, D29, D30, D75) ----
@@ -100,6 +103,8 @@ export interface ExitWire {
   reason?: 'disposed' | 'force-stopped' | 'ended' | 'crashed';
   code?: number;
   signal?: string;
+  /** The end of the agent's error output (shown here only; never in the session log). */
+  stderr?: string;
 }
 
 /** What a file restore did, or would do (mirrors core `FileRewindResult`). */
@@ -127,6 +132,10 @@ export interface LifecycleWire {
 export interface RewindPointWire {
   messageId: string;
   text: string;
+  /** The whole text when `text` is cut (absent: `text` is whole, or the message is too long). */
+  draft?: string;
+  /** `text` is cut to the label length. */
+  cut?: boolean;
   attachments?: number;
   at: number;
   /** The inclusive fork cut for "restore conversation"; absent for the first turn. */
@@ -949,6 +958,8 @@ export function parseRewindOptions(body: Partial<RewindOptionsWire> | undefined)
         text: typeof p.text === 'string' ? p.text : '',
         at: finite(p.at) ? p.at : 0,
       };
+      if (typeof p.draft === 'string' && p.draft !== '') o.draft = p.draft;
+      if (p.cut === true) o.cut = true;
       if (finite(p.attachments) && p.attachments > 0) o.attachments = p.attachments;
       if (finite(p.forkSeq)) o.forkSeq = p.forkSeq;
       if (p.inherited === true) o.inherited = true;

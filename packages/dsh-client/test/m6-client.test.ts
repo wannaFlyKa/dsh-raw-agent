@@ -598,7 +598,7 @@ describe('view-only leftovers', () => {
       kind: 'text',
       label: 'Script',
       text: "phase('One')\nawait agent('x')",
-      note: 'Workflow: probe',
+      note: 'Workflow: probe · Phases: One',
     });
   });
 });

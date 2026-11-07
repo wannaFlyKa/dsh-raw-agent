@@ -36,6 +36,14 @@ const host = createRawAgentHost({
   factories: [createClaudeFactory()],
   seedModels,
   userConfig: () => readUserConfig(entryConfig),
+  // R9.2, D66: plugin grants live in this entry's `grants` field; a grant-only change applies in
+  // place (no restart), see dsh-host port/services.ts.
+  hostConfig: {
+    get: () => entryConfig as Record<string, unknown> | undefined,
+    set: (next) => {
+      entryConfig = next as RawUserConfig;
+    },
+  },
 });
 
 export function apply(ctx: HostContext, config?: RawUserConfig): void {

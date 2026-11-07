@@ -50,6 +50,8 @@ export interface SidePanelProps {
   command?: string;
   /** Test seam: start open. */
   initiallyOpen?: boolean;
+  /** R9.2: text another plugin put into the box; the panel opens with it. */
+  prefill?: { text: string; seq: number };
 }
 
 function useTick(on: boolean): number {
@@ -119,8 +121,16 @@ export function SidePanelBody(props: {
   onCancel(id: string): void;
   onStart(): void;
   onClose(): void;
+  /** R9.2: text another plugin put into the box (`rawAgentClient.prefill`); taken when `seq` changes. */
+  prefill?: { text: string; seq: number };
 }): React.ReactElement {
   const [draft, setDraft] = React.useState('');
+  const prefillSeq = props.prefill?.seq;
+  const prefillText = props.prefill?.text;
+  React.useEffect(() => {
+    if (prefillSeq === undefined || prefillText === undefined) return;
+    setDraft((d) => (d.trim() === '' ? prefillText : `${d}\n${prefillText}`));
+  }, [prefillSeq, prefillText]);
   const entries = props.side?.entries ?? [];
   const asking = entries.some(sideOpen);
   const listRef = React.useRef<HTMLDivElement | null>(null);
@@ -228,6 +238,10 @@ export function SidePanel(
   React.useEffect(() => {
     if (props.open) setForced(true);
   }, [props.open]);
+  const prefillSeq = props.prefill?.seq;
+  React.useEffect(() => {
+    if (prefillSeq !== undefined) setForced(true);
+  }, [prefillSeq]);
   const now = useTick(open && (side?.entries ?? []).some((e) => e.status === 'asking'));
   if (!open) return null;
   const close = () => {
@@ -270,6 +284,7 @@ export function SidePanel(
       onCancel={cancel}
       onStart={() => void store.start()}
       onClose={close}
+      {...(props.prefill ? { prefill: props.prefill } : {})}
     />,
   ) as React.ReactElement;
 }

@@ -88,6 +88,26 @@ export {
   JOB_REWAIT_MS,
   TEARDOWN_REASONS,
 } from './jobs.js';
+export {
+  mountServices,
+  pluginRoutes,
+  agentOps,
+  statusOf,
+  onlyRuntimeFieldsChanged,
+  RUNTIME_CONFIG_FIELDS,
+  configGrantPersistence,
+  PLUGIN_SESSION_INFO_ROUTE,
+  PLUGIN_INTERRUPT_ROUTE,
+  PLUGIN_SEND_ROUTE,
+  PLUGIN_SIDE_QUESTION_ROUTE,
+  GRANTS_ROUTE,
+  GRANT_CREATE_ROUTE,
+  GRANT_REVOKE_ROUTE,
+  type HostConfigShape,
+  type HostConfigAccess,
+  type MountServicesOptions,
+  type MountedServices,
+} from './services.js';
 export { createChildSession, childPreStep, liveChildCount, type ChildPortOptions } from './children.js';
 export { WORKFLOW_EVENT_TYPES, workflowEventData, appendWorkflowRecord, openWorkflowRuns } from './workflows.js';
 
