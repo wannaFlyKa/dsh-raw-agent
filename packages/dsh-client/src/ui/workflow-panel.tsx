@@ -24,8 +24,8 @@ import {
 import type { HostActions } from './actions.js';
 import { css } from './style.js';
 
-const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
-const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
+const muted = 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))';
+const border = 'var(--raw-agent-border, var(--dsw-alias-border-l2, rgba(128,128,128,0.35)))';
 
 const styles = {
   card: { display: 'flex', flexDirection: 'column', gap: 4, padding: '6px 0' },
@@ -54,11 +54,11 @@ const dot = (status: string): React.CSSProperties => ({
   flex: 'none',
   background:
     status === 'running' || status === 'starting'
-      ? 'var(--raw-agent-running, var(--dsw-alias-text-accent, #3b82f6))'
+      ? 'var(--raw-agent-running, var(--dsw-alias-state-business-primary, #3b82f6))'
       : status === 'completed'
-        ? 'var(--raw-agent-done, var(--dsw-alias-text-success, #22a06b))'
+        ? 'var(--raw-agent-done, var(--dsw-alias-state-success-primary, #22a06b))'
         : status === 'failed' || status === 'error'
-          ? 'var(--raw-agent-danger, var(--dsw-alias-text-danger, #c0392b))'
+          ? 'var(--raw-agent-danger, var(--dsw-alias-state-error-primary, #c0392b))'
           : muted,
 });
 

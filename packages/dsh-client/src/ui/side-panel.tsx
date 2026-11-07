@@ -11,8 +11,8 @@ import type { HostActions } from './actions.js';
 import { Markdown } from './markdown.js';
 import { css } from './style.js';
 
-const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
-const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
+const muted = 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))';
+const border = 'var(--raw-agent-border, var(--dsw-alias-border-l2, rgba(128,128,128,0.35)))';
 
 const styles = {
   panel: {
@@ -28,8 +28,8 @@ const styles = {
     gap: 8,
     padding: 12,
     boxSizing: 'border-box',
-    background: 'var(--raw-agent-surface, var(--dsw-alias-surface-elevated, Canvas))',
-    color: 'var(--raw-agent-text, var(--dsw-alias-text-primary, CanvasText))',
+    background: 'var(--raw-agent-surface, var(--dsw-alias-bg-layer-1, Canvas))',
+    color: 'var(--raw-agent-text, var(--dsw-alias-label-primary, CanvasText))',
     border: `1px solid ${border}`,
     borderRadius: 12,
     boxShadow: '0 6px 24px rgba(0,0,0,0.18)',

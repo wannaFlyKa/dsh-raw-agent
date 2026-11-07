@@ -21,15 +21,15 @@ import { css } from './style.js';
 
 const v = (name: string, alias: string, fallback: string) =>
   `var(--raw-agent-${name}, var(--dsw-alias-${alias}, ${fallback}))`;
-const muted = v('muted', 'text-secondary', 'GrayText');
-const border = v('border', 'border-default', 'rgba(128,128,128,0.35)');
+const muted = v('muted', 'label-secondary', 'GrayText');
+const border = v('border', 'border-l2', 'rgba(128,128,128,0.35)');
 
 const LEVEL_COLOR: Record<PillLevel, string> = {
   unknown: border,
   ok: border,
-  warn: v('context-warn', 'border-warning', '#e0a526'),
-  high: v('context-high', 'border-danger', '#d9534f'),
-  busy: v('context-busy', 'border-accent', '#4a8fe7'),
+  warn: v('context-warn', 'state-warn-primary', '#e0a526'),
+  high: v('context-high', 'state-error-primary', '#d9534f'),
+  busy: v('context-busy', 'state-business-primary', '#4a8fe7'),
 };
 
 const styles = {

@@ -6,8 +6,8 @@ import * as React from 'react';
 import { wakeHeading, type WakeTrigger } from '../agents-model.js';
 import { css } from './style.js';
 
-const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
-const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
+const muted = 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))';
+const border = 'var(--raw-agent-border, var(--dsw-alias-border-l2, rgba(128,128,128,0.35)))';
 
 export function WakeTriggerCard(props: { trigger: WakeTrigger }): React.ReactElement {
   const t = props.trigger;

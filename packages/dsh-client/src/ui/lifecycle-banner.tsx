@@ -8,9 +8,9 @@ import { exitBanner, lifecycleNotes } from '../lifecycle-model.js';
 import type { SessionControlStore } from '../session-store.js';
 import { css } from './style.js';
 
-const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
-const danger = 'var(--raw-agent-danger, var(--dsw-alias-text-danger, #c0392b))';
-const warn = 'var(--raw-agent-warning, var(--dsw-alias-border-warning, orange))';
+const border = 'var(--raw-agent-border, var(--dsw-alias-border-l2, rgba(128,128,128,0.35)))';
+const danger = 'var(--raw-agent-danger, var(--dsw-alias-state-error-primary, #c0392b))';
+const warn = 'var(--raw-agent-warning, var(--dsw-alias-state-warn-primary, orange))';
 
 const box = (color: string): React.CSSProperties => ({
   display: 'flex',

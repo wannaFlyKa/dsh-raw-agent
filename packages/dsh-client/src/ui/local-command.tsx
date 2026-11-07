@@ -14,8 +14,8 @@ import { Markdown } from './markdown.js';
 import { css } from './style.js';
 import { ContextSection } from './usage-panel.js';
 
-const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
-const border = 'var(--raw-agent-border, var(--dsw-alias-border-default, rgba(128,128,128,0.35)))';
+const muted = 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))';
+const border = 'var(--raw-agent-border, var(--dsw-alias-border-l2, rgba(128,128,128,0.35)))';
 
 const styles = {
   divider: {

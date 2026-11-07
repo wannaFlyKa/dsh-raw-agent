@@ -30,8 +30,8 @@ import {
 
 const v = (name: string, alias: string, fallback: string) =>
   `var(--raw-agent-${name}, var(--dsw-alias-${alias}, ${fallback}))`;
-const muted = v('muted', 'text-secondary', 'GrayText');
-const border = v('border', 'border-default', 'rgba(128,128,128,0.35)');
+const muted = v('muted', 'label-secondary', 'GrayText');
+const border = v('border', 'border-l2', 'rgba(128,128,128,0.35)');
 const mono = 'var(--raw-agent-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)';
 
 export const toolCss = {
@@ -60,7 +60,7 @@ export const toolCss = {
     flex: '0 1 auto',
   },
   state: { fontSize: 11, color: muted, flex: 'none' },
-  error: { fontSize: 11, color: v('danger', 'text-danger', '#c0392b'), flex: 'none' },
+  error: { fontSize: 11, color: v('danger', 'state-error-primary', '#c0392b'), flex: 'none' },
   body: { display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 12, minWidth: 0 },
   pre: {
     fontFamily: mono,
@@ -74,16 +74,16 @@ export const toolCss = {
     maxHeight: 320,
     overflow: 'auto',
   },
-  errorText: { color: v('danger', 'text-danger', '#c0392b') },
+  errorText: { color: v('danger', 'state-error-primary', '#c0392b') },
   label: { fontSize: 11, color: muted },
-  add: { background: v('diff-add', 'surface-success', 'rgba(46,160,67,0.18)') },
-  del: { background: v('diff-del', 'surface-danger', 'rgba(248,81,73,0.18)') },
+  add: { background: v('diff-add', 'code-diff-added', 'rgba(46,160,67,0.18)') },
+  del: { background: v('diff-del', 'code-diff-deleted', 'rgba(248,81,73,0.18)') },
   num: { color: muted, userSelect: 'none', whiteSpace: 'pre' },
   gap: { color: muted },
   counts: { fontSize: 11, flex: 'none' },
-  addCount: { color: v('done', 'text-success', '#22a06b') },
-  delCount: { color: v('danger', 'text-danger', '#c0392b') },
-  link: { color: v('link', 'text-link', 'LinkText'), wordBreak: 'break-all', cursor: 'pointer' },
+  addCount: { color: v('done', 'state-success-primary', '#22a06b') },
+  delCount: { color: v('danger', 'state-error-primary', '#c0392b') },
+  link: { color: v('link', 'link', 'LinkText'), wordBreak: 'break-all', cursor: 'pointer' },
   todo: { display: 'flex', gap: 6, alignItems: 'baseline', listStyle: 'none', fontSize: 13 },
   todoList: { margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 2 },
   button: {

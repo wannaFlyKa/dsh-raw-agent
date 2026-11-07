@@ -20,11 +20,11 @@ import type { HostActions } from './actions.js';
 import { css } from './style.js';
 
 const LEVEL_COLOR: Record<McpLevel, string> = {
-  ok: 'var(--raw-agent-done, var(--dsw-alias-text-success, #22a06b))',
-  pending: 'var(--raw-agent-running, var(--dsw-alias-text-accent, #3b82f6))',
-  warn: 'var(--raw-agent-warn, var(--dsw-alias-text-warning, #d9822b))',
-  error: 'var(--raw-agent-danger, var(--dsw-alias-text-danger, #c0392b))',
-  off: 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))',
+  ok: 'var(--raw-agent-done, var(--dsw-alias-state-success-primary, #22a06b))',
+  pending: 'var(--raw-agent-running, var(--dsw-alias-state-business-primary, #3b82f6))',
+  warn: 'var(--raw-agent-warn, var(--dsw-alias-state-warn-label, #d9822b))',
+  error: 'var(--raw-agent-danger, var(--dsw-alias-state-error-primary, #c0392b))',
+  off: 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))',
 };
 
 const styles = {

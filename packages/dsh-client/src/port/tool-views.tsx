@@ -177,7 +177,7 @@ export function useSessionKind(
 
 // ---- the plain row (other sessions, and a view that failed) --------------------------------------
 
-const muted = 'var(--raw-agent-muted, var(--dsw-alias-text-secondary, GrayText))';
+const muted = 'var(--raw-agent-muted, var(--dsw-alias-label-secondary, GrayText))';
 const plain = {
   head: {
     display: 'flex',
