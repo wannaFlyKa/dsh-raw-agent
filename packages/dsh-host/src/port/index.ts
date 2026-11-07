@@ -28,6 +28,7 @@ export {
   UNTIMED_SKEW_MS,
   MAX_PLAUSIBLE_TOKENS_PER_SECOND,
   MIN_TIMED_DECODE_MS,
+  mostlyToolInput,
   WRITER_EVENT_TYPES,
   type LiveChannel,
   type LiveFrame,

@@ -1,5 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 // M5 host-usage: honest DSH timings (R8.4), the usage board, and the usage/context routes (D57-D60).
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   AsyncQueue,
@@ -15,6 +17,7 @@ import {
   MAX_PLAUSIBLE_TOKENS_PER_SECOND,
   MIN_TIMED_DECODE_MS,
   SessionRuntime,
+  mostlyToolInput,
   TurnLog,
   USAGE_ROUTE,
   UsageBoard,
@@ -168,21 +171,25 @@ describe('R8.4: DSH timings are real or absent', () => {
     expect(firstTokenTime(w.message().stream)).toBeUndefined();
   });
 
-  it('marks a tool-only step with a name-only tool-call delta; the block-end decides the call', () => {
+  it('marks a tool call with a name-only tool-call delta; the block-end decides the call', () => {
     const w = writer();
     w.log.openStep(9_990);
-    w.log.delta('tool-input', 0, '{"comm', 10_000, { id: 'toolu_1', name: 'Bash' });
-    w.log.delta('tool-input', 0, 'and":"ls"}', 10_400, { id: 'toolu_1', name: 'Bash' });
+    const text = 'I will list the files in this folder first, then read the one you asked about.';
+    w.log.delta('text', 0, text, 10_000);
+    w.log.delta('tool-input', 1, '{"comm', 10_600, { id: 'toolu_1', name: 'Bash' });
+    w.log.delta('tool-input', 1, 'and":"ls"}', 10_700, { id: 'toolu_1', name: 'Bash' });
     w.clock.t = 11_000;
     const call = { type: 'tool-call' as const, id: 'toolu_1', name: 'Bash', arguments: '{"command":"ls"}' };
-    const { calls } = w.log.commit({ blocks: [call], usage: usage(60), binding });
+    const blocks = [{ type: 'text' as const, text }, call];
+    expect(mostlyToolInput(blocks)).toBe(false); // mostly text: the step stays timed
+    const { calls } = w.log.commit({ blocks, usage: usage(60), binding });
     expect(calls).toEqual(['toolu_1']);
     const m = w.message();
     expect(firstTokenTime(m.stream)).toBe(10_000);
-    expect(replayStream(m.stream).blocks).toEqual([call]);
+    expect(replayStream(m.stream).blocks).toEqual(blocks);
     // Only the marker: the streamed input text is never stored (D21).
     const run = m.stream.find((r: any) => r.type === 'tool-call-chunks');
-    expect(run).toMatchObject({ id: 'toolu_1', name: 'Bash', args: [''], time0: 10_000 });
+    expect(run).toMatchObject({ id: 'toolu_1', name: 'Bash', args: [''], time0: 10_600 });
     expect(w.events.find((e) => e.type === 'tool/call')!.data.arguments).toBe('{"command":"ls"}');
   });
 
@@ -197,6 +204,155 @@ describe('R8.4: DSH timings are real or absent', () => {
     expect(m.interrupted).toBe(true);
     expect(m.message.content).toEqual([{ type: 'text', text: 'Let me look' }]);
     expect(replayStream(m.stream).interruptedBlocks).toEqual(m.message.content);
+  });
+});
+
+/** Recorded fixture lines (`packages/backend-claude/test/fixtures`, `_t` = receive time in ms). */
+function fixture(name: string): any[] {
+  const p = fileURLToPath(new URL(`../../backend-claude/test/fixtures/${name}`, import.meta.url));
+  return readFileSync(p, 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+}
+
+/**
+ * Replay one recorded main-thread API call (message_start to message_stop) through the writer at
+ * its recorded times; the step commits at message_stop with the recorded output tokens.
+ */
+function replayCall(lines: any[], from: number) {
+  const w = writer();
+  const ev = (l: any) => (l.type === 'stream_event' && l.parent_tool_use_id == null ? l.event : undefined);
+  let i = lines.findIndex((l, k) => k >= from && ev(l)?.type === 'message_start');
+  w.clock.t = lines[i]._t;
+  w.log.openStep(lines[i]._t);
+  const blocks: any[] = [];
+  const tools = new Map<number, { id: string; name: string }>();
+  let output = 0;
+  for (i += 1; i < lines.length; i++) {
+    const e = ev(lines[i]);
+    if (e === undefined) continue;
+    const t = lines[i]._t as number;
+    w.clock.t = t;
+    if (e.type === 'content_block_start') {
+      const b = e.content_block;
+      if (b.type === 'tool_use') {
+        tools.set(e.index, { id: b.id, name: b.name });
+        blocks[e.index] = { type: 'tool-call', id: b.id, name: b.name, arguments: '' };
+      } else blocks[e.index] = { type: 'text', text: '' };
+    } else if (e.type === 'content_block_delta') {
+      const d = e.delta;
+      if (d.type === 'input_json_delta') {
+        blocks[e.index].arguments += d.partial_json;
+        w.log.delta('tool-input', e.index, d.partial_json, t, tools.get(e.index));
+      } else if (d.type === 'text_delta') {
+        blocks[e.index].text += d.text;
+        w.log.delta('text', e.index, d.text, t);
+      }
+    } else if (e.type === 'message_delta') output = e.usage.output_tokens;
+    else if (e.type === 'message_stop') break;
+  }
+  const timed = w.log.stepTimed;
+  const outcome = w.log.commit({ blocks, usage: usage(output), binding });
+  return { timed, ...w, blocks, output, outcome };
+}
+
+describe('R8.4: a step that is mostly tool-call input gets no timing (tool-input fix)', () => {
+  // Recorded shapes (DSH logs): output tokens, the decode window DSH derived, text and tool-call
+  // argument characters. Each was timed before this fix and fed DSH 196-354 tok/s.
+  const bursts = [
+    {
+      name: 'three Bash calls (live v22, DSH showed 196 tok/s)',
+      out: 341,
+      decodeMs: 1741,
+      text: 0,
+      args: [278, 278, 278],
+    },
+    { name: 'one Agent call (g4, 354 tok/s)', out: 217, decodeMs: 613, text: 0, args: [372] },
+    { name: 'one Workflow call (g4, 294 tok/s)', out: 395, decodeMs: 1342, text: 0, args: [869] },
+    {
+      name: 'two Bash calls and an Agent call (g4, 297 tok/s)',
+      out: 411,
+      decodeMs: 1383,
+      text: 0,
+      args: [150, 150, 148],
+    },
+    { name: 'one AskUserQuestion call (g3, 335 tok/s)', out: 333, decodeMs: 993, text: 0, args: [715] },
+    {
+      name: 'a short text then an Agent call (g5 meters seq 76, 151 tok/s)',
+      out: 170,
+      decodeMs: 1128,
+      text: 76,
+      args: [138],
+    },
+  ];
+  for (const b of bursts) {
+    it(`stores ${b.name} untimed, with exact usage`, () => {
+      const w = writer();
+      w.log.openStep(9_990);
+      const blocks: any[] = [];
+      if (b.text > 0) {
+        blocks.push({ type: 'text', text: 'x'.repeat(b.text) });
+        w.log.delta('text', 0, 'x'.repeat(b.text), 10_000);
+      }
+      b.args.forEach((n, k) => {
+        const id = `toolu_${k}`;
+        const index = blocks.length;
+        blocks.push({ type: 'tool-call', id, name: 'Bash', arguments: `{"c":"${'y'.repeat(n - 8)}"}` });
+        w.log.delta('tool-input', index, '{"c', 10_000 + k * 250, { id, name: 'Bash' });
+      });
+      expect(w.log.stepTimed).toBe(true); // opened at its request: only the shape decides
+      w.clock.t = 10_000 + b.decodeMs;
+      // The old rules alone would have kept it: window over 500 ms, speed under the ceiling.
+      expect(b.decodeMs).toBeGreaterThanOrEqual(MIN_TIMED_DECODE_MS);
+      expect((b.out * 1000) / b.decodeMs).toBeLessThanOrEqual(MAX_PLAUSIBLE_TOKENS_PER_SECOND);
+      expect(mostlyToolInput(blocks)).toBe(true);
+      const { calls } = w.log.commit({ blocks, usage: usage(b.out), binding });
+      const m = w.message();
+      expect(firstTokenTime(m.stream)).toBeUndefined();
+      expect(m.usage).toEqual(usage(b.out)); // the token meter still counts every token
+      expect(replayStream(m.stream).usage).toEqual(m.usage);
+      expect(replayStream(m.stream).blocks).toEqual(blocks);
+      expect(calls).toHaveLength(b.args.length);
+    });
+  }
+
+  it('keeps text steps timed (fix-1 live: 408 tokens over 3528 ms = 115.6 tok/s)', () => {
+    const w = writer();
+    w.log.openStep(9_990);
+    const text = 'z'.repeat(1288);
+    w.log.delta('text', 0, text.slice(0, 600), 10_000);
+    w.log.delta('text', 0, text.slice(600), 12_000);
+    w.clock.t = 13_528;
+    w.log.commit({ blocks: [{ type: 'text', text }], usage: usage(408), binding });
+    expect(firstTokenTime(w.message().stream)).toBe(10_000);
+  });
+
+  it('replays a recorded tool-only call (M4 fixture workflow-two-phase, input in bursts) untimed', () => {
+    const r = replayCall(fixture('workflow-two-phase.jsonl'), 0);
+    expect(r.blocks.map((b: any) => b.type)).toEqual(['tool-call']);
+    expect(r.timed).toBe(true); // opened at message_start: only the shape decides
+    expect(r.outcome.calls).toHaveLength(1);
+    expect(firstTokenTime(r.message().stream)).toBeUndefined();
+    expect(r.message().usage.outputTokens).toBe(r.output);
+    expect(r.output).toBe(285);
+  });
+
+  it('replays the recorded M5 text turn (usage-clear): too short to time, usage exact', () => {
+    const lines = fixture('usage-clear.jsonl');
+    const r = replayCall(lines, 0);
+    expect(r.blocks).toEqual([{ type: 'text', text: 'ok' }]);
+    expect(r.timed).toBe(true);
+    expect(firstTokenTime(r.message().stream)).toBeUndefined();
+    expect(r.message().usage.outputTokens).toBe(4);
+  });
+
+  it('counts only tool-call arguments against text and thinking', () => {
+    const call = (n: number) => ({ type: 'tool-call' as const, id: 'c', name: 'Write', arguments: 'a'.repeat(n) });
+    expect(mostlyToolInput([{ type: 'text', text: 'abc' }])).toBe(false);
+    expect(mostlyToolInput([call(4), { type: 'text', text: 'abc' }])).toBe(true);
+    expect(mostlyToolInput([call(3), { type: 'text', text: 'abc' }])).toBe(false);
+    expect(mostlyToolInput([call(5), { type: 'reasoning', text: 'abc' }, { type: 'text', text: 'ab' }])).toBe(false);
   });
 });
 

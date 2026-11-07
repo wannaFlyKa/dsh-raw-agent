@@ -128,6 +128,22 @@ export const MAX_PLAUSIBLE_TOKENS_PER_SECOND = 500;
  * real steps seen live (75 tokens over 754 ms = 99 tok/s) and drops the 56 ms burst.
  */
 export const MIN_TIMED_DECODE_MS = 500;
+/**
+ * R8.4 (tool-input fix): Bedrock sends tool-call input in bursts, and the writer's first token for
+ * a call is its block start (one name-only marker, D21), so a message whose output is mostly
+ * tool-call input reads too fast (live and recorded: 196-354 tok/s, against 80-117 tok/s for text
+ * from the same model). A message whose tool-call argument text is longer than its text and
+ * thinking together gets no timing; its usage stays exact. Model-independent: no per-model ceiling.
+ */
+export function mostlyToolInput(blocks: readonly DshBlock[]): boolean {
+  let prose = 0;
+  let tool = 0;
+  for (const b of blocks) {
+    if (b.type === 'tool-call') tool += b.arguments.length;
+    else if (b.type === 'text' || b.type === 'reasoning') prose += b.text.length;
+  }
+  return tool > prose;
+}
 
 export interface CommitInput {
   blocks: DshBlock[];
@@ -332,13 +348,14 @@ export class TurnLog {
   /**
    * R8.4: may this step's live timing reach DSH's TTFT and speed figures? Not when the step was
    * opened late, when its thinking was counted but never streamed (the speed would include the
-   * hidden thinking), when its decode window is too short to measure, or when its output came as
-   * a burst faster than any model writes.
+   * hidden thinking), when its output is mostly tool-call input (sent in bursts), when its decode
+   * window is too short to measure, or when its output came as a burst faster than any model writes.
    */
-  #timingHonest(usage: DshUsage | undefined, at: number): boolean {
+  #timingHonest(blocks: readonly DshBlock[], usage: DshUsage | undefined, at: number): boolean {
     if (this.#untimed) return false;
     if (usage === undefined || this.#firstTokenAt === undefined) return true;
     if ((usage.reasoningTokens ?? 0) > 0 && !this.#reasoningStreamed) return false;
+    if (mostlyToolInput(blocks)) return false;
     const decodeMs = at - this.#firstTokenAt;
     if (usage.outputTokens <= 0) return true;
     if (decodeMs < MIN_TIMED_DECODE_MS) return false;
@@ -384,7 +401,7 @@ export class TurnLog {
     const at = Math.max(this.#now(), this.#firstTokenAt ?? 0);
     // R8.4: a step whose timing is not real keeps its content and usage but no deltas, so DSH
     // counts no first token and no speed for it (its live view already streamed).
-    if (!this.#recorder.empty && !this.#timingHonest(interrupted ? undefined : input.usage, at)) {
+    if (!this.#recorder.empty && !this.#timingHonest(input.blocks, interrupted ? undefined : input.usage, at)) {
       this.#recorder = new StreamRecorder();
       this.#started = new Set();
     }
