@@ -667,3 +667,21 @@ describe.skipIf(process.platform === 'win32')('permission modes through the sess
     await session.dispose();
   });
 });
+
+describe('mode chip data (0.1.1)', () => {
+  it('each mode has a risk for the chip colour, and short names where the label is long', () => {
+    const by = Object.fromEntries(CLAUDE_STATIC_CAPABILITIES.permissionModes.map((m) => [m.id, m]));
+    expect(Object.fromEntries(Object.entries(by).map(([id, m]) => [id, m.risk]))).toEqual({
+      default: 'neutral',
+      acceptEdits: 'caution',
+      plan: 'plan',
+      auto: 'caution',
+      dontAsk: 'caution',
+      bypassPermissions: 'danger',
+    });
+    expect(by.default!.shortLabel).toBe('Default');
+    expect(by.plan!.shortLabel).toBe('Plan');
+    expect(by.bypassPermissions!.shortLabel).toBe('Bypass');
+    expect(by.bypassPermissions!.requiresNote).toBe('as the CLI needs --dangerously-skip-permissions');
+  });
+});

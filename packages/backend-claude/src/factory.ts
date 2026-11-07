@@ -80,17 +80,28 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
   mcpCommand: 'mcp',
   rewindCommand: 'rewind',
   // Labels are ours (short picker names); descriptions are the CLI's own (MODE_DESCRIPTIONS).
+  // Risk (chip colour): dontAsk is `caution` like auto: it never stops to ask, so a pre-approved
+  // tool runs at once (the rest is denied, not asked).
   permissionModes: [
-    { id: 'default', label: 'Ask before edits', description: MODE_DESCRIPTIONS.default },
-    { id: 'acceptEdits', label: 'Accept edits', description: MODE_DESCRIPTIONS.acceptEdits },
-    { id: 'plan', label: 'Plan mode', description: MODE_DESCRIPTIONS.plan },
-    { id: 'auto', label: 'Auto', description: MODE_DESCRIPTIONS.auto },
-    { id: 'dontAsk', label: "Don't ask", description: MODE_DESCRIPTIONS.dontAsk },
+    {
+      id: 'default',
+      label: 'Ask before edits',
+      shortLabel: 'Default',
+      risk: 'neutral',
+      description: MODE_DESCRIPTIONS.default,
+    },
+    { id: 'acceptEdits', label: 'Accept edits', risk: 'caution', description: MODE_DESCRIPTIONS.acceptEdits },
+    { id: 'plan', label: 'Plan mode', shortLabel: 'Plan', risk: 'plan', description: MODE_DESCRIPTIONS.plan },
+    { id: 'auto', label: 'Auto', risk: 'caution', description: MODE_DESCRIPTIONS.auto },
+    { id: 'dontAsk', label: "Don't ask", risk: 'caution', description: MODE_DESCRIPTIONS.dontAsk },
     {
       id: 'bypassPermissions',
       label: 'Bypass permissions',
+      shortLabel: 'Bypass',
+      risk: 'danger',
       description: MODE_DESCRIPTIONS.bypassPermissions,
       requiresOption: ALLOW_BYPASS_OPTION,
+      requiresNote: 'as the CLI needs --dangerously-skip-permissions',
     },
   ],
   // The TUI's Shift+Tab ring (CLI 2.1.318 binary fn `uhn`): default → acceptEdits → plan →

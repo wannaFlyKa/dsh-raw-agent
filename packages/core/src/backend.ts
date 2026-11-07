@@ -445,7 +445,19 @@ export interface PermissionModeInfo {
    * A mode the session already runs in (for example from the user's settings) is still shown.
    */
   requiresOption?: string;
+  /** Why `requiresOption` is needed, in a few words (Claude: "as the CLI needs --dangerously-skip-permissions"). */
+  requiresNote?: string;
+  /** A short name for the compact mode chip (for example "Plan"); else `label`. */
+  shortLabel?: string;
+  /**
+   * How much the mode lets the agent do without asking, for the chip colour: `neutral` (asks),
+   * `plan` (read-only planning), `caution` (acts without asking for some or all tools), `danger`
+   * (no checks at all). Unknown or missing: neutral.
+   */
+  risk?: PermissionModeRisk;
 }
+
+export type PermissionModeRisk = 'neutral' | 'plan' | 'caution' | 'danger';
 
 export interface EffortState {
   effort?: string;
