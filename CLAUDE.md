@@ -154,7 +154,7 @@ pnpm build          # types + bundles into packages/plugin/lib
 pnpm test           # unit + fake-CLI contract + DSH round-trip tests
 pnpm lint           # eslint, prettier --check, import check
 pnpm typecheck
-pnpm --filter dsh-raw-agent pack --pack-destination dist/
+pnpm --filter dsh-raw-agent pack --pack-destination dist/   # pnpm 11: writes dist/ at the repo root
 pnpm check-pack     # after pnpm build: pack and compare the exact tarball file list
 pnpm test:cli-constants  # check our env lists and reject texts against the installed claude binary
 ```
