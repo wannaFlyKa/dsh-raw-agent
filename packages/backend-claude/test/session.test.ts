@@ -199,7 +199,7 @@ describe.skipIf(process.platform === 'win32')('Claude factory and session (fake 
     await session.dispose();
     await reader;
     expect(events[0]).toEqual({ type: 'session-info', model: 'claude-sonnet-5-5', version: '2.1.318' });
-    expect(events.at(-1)).toEqual({ type: 'exit' });
+    expect(events.at(-1)).toEqual({ type: 'exit', reason: 'disposed' });
     expect(session.capabilities.backendVersion).toBe('2.1.318');
   });
 

@@ -18,6 +18,12 @@ export interface AgentBackendFactory {
   /** No-process reads (D83). Optional; none may start a process. */
   sessionExists?(sessionId: string, cwd: string): Promise<boolean>;
   sessionTitle?(sessionId: string, cwd: string): Promise<string | undefined>;
+  /**
+   * D28, D70 (M7 live): the agent conversation whose own record holds this input (the backend
+   * input id, D5), checking `prefer` first. A `/clear` gives the conversation a new id with no
+   * step for the host to bind it to; this read finds it after a restart. No process.
+   */
+  sessionHoldingInput?(inputId: string, cwd: string, prefer?: string): Promise<string | undefined>;
   /** Read-only: does the agent already trust this folder (D73)? Never writes the record. */
   trustState?(cwd: string): Promise<TrustState>;
   /** The agent's own settings files for this folder (D63). Paths only; nothing is read or written. */
@@ -36,10 +42,21 @@ export interface AgentBackendFactory {
    */
   readAgentTranscript?(sessionId: string, ref: AgentRef, cwd: string): Promise<BackendEvent[]>;
   /**
+   * M7 (R3.6): what the agent wrote on its main thread after one chain entry, read from its own
+   * files (no process). The DSH layer uses it to find replies the agent recorded but the host
+   * log never got (the host died, or the process died before its last frames arrived).
+   */
+  readSessionTail?(sessionId: string, cwd: string, afterChainId: string): Promise<SessionTail>;
+  /**
    * D15 (r4): the main-thread agent a session was started with, read from the agent's own
    * files, so a resume after a restart passes the same agent again. Undefined: none found.
    */
   sessionMainAgent?(sessionId: string, cwd: string): Promise<string | undefined>;
+  /**
+   * D16, D30 (M7): whether a session started in this folder now would keep file checkpoints, so
+   * a rewind dialog can offer "restore code" before any process runs. Read-only, no process.
+   */
+  fileRewindAvailable?(cwd: string): Promise<boolean>;
 
   /** Only when ids === 'host-chosen' (D5): deterministic, no storage. */
   sessionIdFor?(hostSessionId: string): string;
@@ -64,6 +81,12 @@ export interface FactoryCapabilities {
    * the line still goes to the agent.
    */
   mcpCommand?: string;
+  /**
+   * D30 (M7): the agent command that opens its rewind menu in its terminal app ('rewind' for
+   * Claude, a terminal-only command). The plugin's `/` source claims the bare command (and its
+   * aliases) and opens the plugin's rewind dialog instead.
+   */
+  rewindCommand?: string;
   /** Static default list for the mode picker (D38). */
   permissionModes: PermissionModeInfo[];
   /**
@@ -84,9 +107,20 @@ export type SessionStart =
       kind: 'fork';
       fromSessionId: string;
       atChainId?: string;
+      /**
+       * D29 (r3): the input id (as `UserInput.id`, D5) of the first host turn the cut drops. The
+       * backend uses it as a validated cut only when it can prove that exactly this one turn lies
+       * past the cut; otherwise it truncates plainly.
+       */
       dropsTurnHint?: string;
       newSessionId?: string;
       mainAgent?: string;
+      /**
+       * D30 (M7): also restore the files to their state before this input ran (the rewind
+       * dialog's "restore code"). Done on the new process before its first turn; the outcome
+       * comes as a `files-rewound` event. Needs `capabilities.fileRewind`.
+       */
+      restoreFilesAt?: string;
     };
 
 export interface OpenSessionOptions {
@@ -196,8 +230,50 @@ export interface BackendControls {
   usageSnapshot?(): Promise<UsageSnapshot>;
   /** The end of a background shell or monitor task's output (Claude: `getTaskOutput`). */
   taskOutput?(taskId: string): Promise<TaskOutput>;
+  /**
+   * D30 (M7): put the files back as they were before an input ran (the terminal app's "Restore
+   * code" in its rewind menu). `dryRun` only reports what would change. Never touches the
+   * conversation. Only when `capabilities.fileRewind`.
+   */
+  rewindFiles?(inputId: string, opts?: { dryRun?: boolean }): Promise<FileRewindResult>;
   /** Send a message to a running teammate (D50). Absent when the agent has no such control. */
   messageTeammate?(ref: AgentRef, text: string): Promise<void>;
+}
+
+/** D30: what a file restore did (or, with `dryRun`, would do). */
+export interface FileRewindResult {
+  /** false: nothing was restored; `error` says why in the agent's words. */
+  ok: boolean;
+  error?: string;
+  filesChanged: string[];
+  insertions?: number;
+  deletions?: number;
+  /** Files left alone because a link or another non-regular file sat at the path. */
+  skippedLinks?: number;
+  dryRun?: boolean;
+}
+
+/**
+ * M7 (R3.6): the main-thread record past one chain entry. `events` are `step-start`,
+ * `step-message` and `tool-result` events of the main agent (`agent: {kind: 'main'}`), in order,
+ * with the same guarantees as the live stream (a result follows the message that advertises its
+ * call; a result whose call lies before the chain entry is left out and counted).
+ */
+export interface SessionTail {
+  /**
+   * 'found': the chain entry is in the record (`events` may be empty). 'no-record': the agent
+   * has no record of this session. 'no-cut': the entry is not in it. 'too-large': not read.
+   */
+  status: 'found' | 'no-record' | 'no-cut' | 'too-large';
+  events: BackendEvent[];
+  /** Human prompts past the entry (the host log normally holds them already, as typed). */
+  prompts: string[];
+  /** Other inputs past the entry, in words (for example "a background task finished"). */
+  notes: string[];
+  /** Results whose call was before the entry (the host log closed those calls itself). */
+  orphanResults: number;
+  /** The last chain entry read. */
+  lastChainId?: string;
 }
 
 export interface TaskOutput {

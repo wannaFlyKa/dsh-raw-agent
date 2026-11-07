@@ -166,12 +166,13 @@ export class AgentCommandMenus {
     } catch (error) {
       this.#o.warn('could not read the / menu', errorText(error));
     }
-    const { sideQuestionCommand, mcpCommand } = factory.staticCapabilities;
+    const { sideQuestionCommand, mcpCommand, rewindCommand } = factory.staticCapabilities;
     const plan = planCommandMenu(known, {
       taken,
       displayName: factory.displayName,
       ...(sideQuestionCommand !== undefined ? { sideQuestionCommand } : {}),
       ...(mcpCommand !== undefined ? { mcpCommand } : {}),
+      ...(rewindCommand !== undefined ? { rewindCommand } : {}),
     });
     runtime?.noteMenu(plan.rows);
   }

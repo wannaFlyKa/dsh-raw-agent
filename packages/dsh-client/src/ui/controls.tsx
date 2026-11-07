@@ -8,7 +8,7 @@ import type { SessionChoiceRequest } from '@dsh-raw-agent/core';
 import { agentSelect } from '../agents-model.js';
 import { SETTINGS, type RawAgentApi } from '../api.js';
 import { restoreReturnedDrafts, type DraftTarget } from '../drafts.js';
-import type { SessionControlStore } from '../session-store.js';
+import type { SessionControlStore, SessionStores } from '../session-store.js';
 import { START_OPTION, effortSelect, modeSelect, modelSelect, statusLine, type SelectModel } from '../view-model.js';
 import type { HostActions } from './actions.js';
 import { AskPanel } from './ask-cards.js';
@@ -16,6 +16,8 @@ import { SettingsPanel } from './settings-panel.js';
 import { mcpButtonLabel } from '../commands-model.js';
 import { McpPanel } from './mcp-panel.js';
 import { SidePanel } from './side-panel.js';
+import { exitBanner } from '../lifecycle-model.js';
+import { RewindPanel } from './rewind-panel.js';
 import { css } from './style.js';
 
 export interface ControlsProps {
@@ -31,6 +33,8 @@ export interface ControlsProps {
    * cards show here, in the controls row.
    */
   asksInComposer?: boolean | (() => boolean);
+  /** All session stores: a new rewind branch's store takes a note (M7). */
+  stores?: SessionStores;
 }
 
 function Picker(props: {
@@ -67,13 +71,20 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   const close = React.useCallback(() => setPanel(false), []);
   const [mcpPanel, setMcpPanel] = React.useState(false);
   const closeMcp = React.useCallback(() => setMcpPanel(false), []);
-  // D55: a bare `/mcp` in the composer (our `/` source) opens this panel, like the terminal app.
-  const panelSeq = snap.panelRequest?.panel === 'mcp' ? snap.panelRequest.seq : 0;
+  const [rewindPanel, setRewindPanel] = React.useState(false);
+  const closeRewind = React.useCallback(() => setRewindPanel(false), []);
+  // D55, D30: a bare `/mcp` or `/rewind` in the composer (our `/` source) opens our panel, like
+  // the terminal app opens its own.
+  const panelSeq = snap.panelRequest?.seq ?? 0;
+  const panelName = snap.panelRequest?.panel;
   const panelSeen = React.useRef(panelSeq); // a request from before this mount does not reopen it
   React.useEffect(() => {
-    if (panelSeq > panelSeen.current) setMcpPanel(true);
+    if (panelSeq > panelSeen.current) {
+      if (panelName === 'mcp') setMcpPanel(true);
+      else if (panelName === 'rewind') setRewindPanel(true);
+    }
     panelSeen.current = panelSeq;
-  }, [panelSeq]);
+  }, [panelSeq, panelName]);
   // R7.3: the side panel opens by itself for a new question; the button brings it back.
   const [sideShown, setSideShown] = React.useState(false);
   const [sideWanted, setSideWanted] = React.useState(false);
@@ -127,7 +138,8 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
     dropped > 0
       ? `The stopped message had ${dropped === 1 ? 'an attachment' : `${dropped} attachments`} that cannot go back into the composer; attach ${dropped === 1 ? 'it' : 'them'} again.`
       : undefined;
-  const status = snap.error ?? statusLine(info) ?? draftNote ?? snap.note;
+  const status =
+    snap.error ?? statusLine(info, { exitShown: exitBanner(info) !== undefined }) ?? draftNote ?? snap.note;
   const name = info.backend.displayName;
   const asks = info.view.asks ?? [];
   const inComposer =
@@ -209,6 +221,17 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           onOpenChange={onSideOpen}
         />
       )}
+      {api.rewind && (
+        <button
+          type="button"
+          style={css.button}
+          data-raw-agent="rewind-button"
+          title={`Go back to an earlier message: restore the conversation (a new branch), the code, or both`}
+          onClick={() => setRewindPanel(true)}
+        >
+          Rewind
+        </button>
+      )}
       <button
         type="button"
         style={css.button}
@@ -250,6 +273,17 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
             displayName={name}
             onStart={() => void store.start()}
             onClose={closeMcp}
+          />,
+        )}
+      {rewindPanel &&
+        actions.portal(
+          <RewindPanel
+            sessionId={store.sessionId}
+            api={api}
+            actions={actions}
+            store={store}
+            {...(props.stores ? { stores: props.stores } : {})}
+            onClose={closeRewind}
           />,
         )}
       {panel &&

@@ -3,11 +3,11 @@
 // and draws it (D69 r5): plain columns monospaced, Markdown through our own renderer (no `$` math).
 // It adds what the text cannot show well: the /context table first (from the Host's display-only
 // copy) with the long text folded under it, the usage numbers next to /usage and /cost, the
-// "Conversation compacted" marker and the /clear divider (D70).
+// "Conversation compacted" marker and the /clear divider (D70) live on the typed command (M7).
 
 import * as React from 'react';
 import { parseContextView, type LocalOutputWire, type RawAgentApi } from '../api.js';
-import { clearedText, compactedText, localRender, localTextFormat, type LocalCommandData } from '../commands-model.js';
+import { localRender, localTextFormat, type LocalCommandData } from '../commands-model.js';
 import { contextBreakdown, costText, formatCount } from '../usage-model.js';
 import type { SessionControlStore } from '../session-store.js';
 import { Markdown } from './markdown.js';
@@ -208,19 +208,10 @@ export function LocalCommandView(props: LocalCommandNodeProps): React.ReactEleme
   const text = <LocalCommandText text={props.data.text ?? ''} />;
   switch (localRender(props.data)) {
     case 'cleared':
-      return (
-        <>
-          {text}
-          <Divider text={clearedText(displayName)} testId="local-cleared" />
-        </>
-      );
     case 'compacted':
-      return (
-        <>
-          {text}
-          <Divider text={compactedText()} testId="local-compacted" />
-        </>
-      );
+      // M7: the divider and the marker sit on the typed command (port `commandMarkerDefinition`),
+      // which every run has; drawing them here too would show them twice.
+      return text;
     case 'context':
       // The categories first; the agent's long text (its full tables) folded below.
       return (

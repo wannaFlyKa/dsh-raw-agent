@@ -380,15 +380,17 @@ describe('port', () => {
       effect: (fn: () => () => void) => void effects.push(fn),
     };
     const stores = mountClient(ctx as never, { fetch: fakeFetch(() => ({ status: 404, body: {} })).fetchFn });
-    expect(registered).toHaveLength(3);
+    expect(registered).toHaveLength(4);
     expect(registered[0]!.options).toMatchObject({
       name: 'conversation.session.header.actions',
       id: 'raw-agent-agents',
     });
     expect(registered[1]!.options).toMatchObject({ name: 'conversation.composer.dock', id: 'raw-agent-context' });
-    expect(registered[2]!.options).toMatchObject({ name: 'conversation.input.left', id: 'raw-agent-session-controls' });
-    expect(registered[2]!.component).toBe(SessionControls);
-    const injected = (registered[2]!.options.inject as (id: string) => { store: SessionControlStore })('s9');
+    // M7: the lifecycle banner (crash and exit with Restart, fork and recovery notes).
+    expect(registered[2]!.options).toMatchObject({ name: 'conversation.composer.dock', id: 'raw-agent-lifecycle' });
+    expect(registered[3]!.options).toMatchObject({ name: 'conversation.input.left', id: 'raw-agent-session-controls' });
+    expect(registered[3]!.component).toBe(SessionControls);
+    const injected = (registered[3]!.options.inject as (id: string) => { store: SessionControlStore })('s9');
     expect(injected.store).toBe(stores.get('s9'));
     expect(effects).toHaveLength(1);
   });

@@ -825,13 +825,14 @@ describe('port: pending interaction, takeover and Shift+Tab', () => {
       'conversation.composer',
       'conversation.session.header.actions',
       'conversation.composer.dock',
+      'conversation.composer.dock', // M7: the lifecycle banner
       'conversation.input.left',
     ]);
     // DSH tries composer chain entries in ascending priority; ui-subagent's one-shot read-only
     // composer is at -10, so ours must come first or a child's ask never takes over (M3 live).
     expect(registered[0]!.options.priority).toBeLessThan(-10);
     expect(fixed).toEqual([MODE_SHORTCUT_ID]);
-    const inject = registered[3]!.options.inject as (id: string) => { asksInComposer: () => boolean };
+    const inject = registered[4]!.options.inject as (id: string) => { asksInComposer: () => boolean };
     expect(inject('s1').asksInComposer()).toBe(true);
   });
 });

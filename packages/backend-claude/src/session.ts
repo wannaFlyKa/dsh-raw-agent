@@ -11,6 +11,7 @@ import {
   type BackendEvent,
   type AgentInfo,
   type EffortState,
+  type FileRewindResult,
   type ModelInfo,
   type TaskOutput,
   type UserInput,
@@ -21,6 +22,15 @@ import type { Options, Query, SDKUserMessage } from './sdk.js';
 import { planChoices } from './interactions.js';
 import { AskContext } from './ask-context.js';
 import { withSdkVersionEnvRestored } from './env.js';
+import {
+  describeExit,
+  dropsTurnRefusal,
+  refusalInText,
+  refusalNote,
+  withPreview,
+  toFileRewindResult,
+  type ProcessExit,
+} from './lifecycle.js';
 import type { WorkflowRunsOptions } from './workflows.js';
 import {
   MCP_TOGGLE_NOTE,
@@ -64,6 +74,15 @@ export interface ClaudeSessionInit {
   /** Test seams for the workflow transcript poll. */
   workflowFs?: WorkflowRunsOptions['fs'];
   workflowTimers?: WorkflowRunsOptions['timers'];
+  /**
+   * D29 (r3): the same start without `resumeDropsTurn`. Set only when `options` carries a
+   * validated cut; used once, when the CLI refuses that cut (the plain cut at the same point).
+   */
+  fallbackOptions?: Options;
+  /** D30: restore the files to before this input ran, on this process, before its first turn. */
+  restoreFilesAt?: string;
+  /** R3.6: how the CLI process ended (exit code, signal, the end of its stderr). */
+  exitInfo?: () => Promise<ProcessExit | undefined>;
 }
 
 /**
@@ -164,11 +183,33 @@ export class ClaudeBackendSession implements AgentBackendSession {
   readonly controls: BackendControls;
 
   #sessionId: string;
-  readonly #input = new AsyncQueue<SDKUserMessage>();
+  #input = new AsyncQueue<SDKUserMessage>();
   readonly #events = new AsyncQueue<BackendEvent>();
   readonly #tracker = new SentInputTracker();
   readonly #mapper: ClaudeMessageMapper;
-  readonly #query: Query;
+  /** The live query. Replaced once at most, after a refused fork cut (D29). */
+  #query: Query;
+  /** Every control goes through this, so it follows a replaced query. */
+  readonly #q: Query;
+  /**
+   * D29: while a validated fork cut may still be refused, the messages sent so far, so the plain
+   * restart gets them again (the refused process never ran them). Undefined once disarmed.
+   */
+  #forkGuard: SDKUserMessage[] | undefined;
+  /** D30: sends wait for the file restore, so the first turn sees the restored files. */
+  #ready: Promise<void> = Promise.resolve();
+  /**
+   * D29, D35 (M7 live): the session choices sent to this process (model, effort, ultracode,
+   * mode), in order. A plain restart after a refused cut is a new process on the user's
+   * settings, so it gets them again before any input.
+   */
+  #choices = new Map<string, () => Promise<void>>();
+  #remember(key: string, again: () => Promise<void>): void {
+    this.#choices.delete(key);
+    this.#choices.set(key, again);
+  }
+  /** Why we ended the process, when we did (R3.6). */
+  #asked: 'disposed' | 'force-stopped' | undefined;
   readonly #init: ClaudeSessionInit;
   readonly #asks = new AskContext();
   #cliVersion: string | undefined;
@@ -210,12 +251,59 @@ export class ClaudeBackendSession implements AgentBackendSession {
       planChoices: planChoices({ canBypass: init.bypassOption }),
       toolViewPack: init.kind,
     };
+    if (init.fallbackOptions) this.#forkGuard = [];
     this.#query = withSdkVersionEnvRestored(() => init.queryFn({ prompt: this.#input, options: init.options }));
+    this.#q = new Proxy({} as Query, {
+      get: (_t, key) => {
+        const cur = this.#query as unknown as Record<string | symbol, unknown>;
+        const v = cur[key];
+        return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(cur) : v;
+      },
+    });
     // D54, D9: `/btw` needs the undeclared `askSideQuestion`; an older CLI's refusal turns it off.
     this.capabilities.sideQuestions = hasControl(this.#query, 'askSideQuestion');
     this.controls = this.#makeControls();
     this.#pump = this.#run();
     void this.#prime();
+    if (init.restoreFilesAt !== undefined) this.#ready = this.#restoreFiles(init.restoreFilesAt);
+  }
+
+  /**
+   * D30: a rewind fork's "restore code". `rewindFiles` on this (new) process, before any input is
+   * sent. The outcome is an event; a failure never blocks the conversation.
+   */
+  async #restoreFiles(inputId: string): Promise<void> {
+    let result: FileRewindResult;
+    if (!this.capabilities.fileRewind)
+      result = { ok: false, filesChanged: [], error: 'file checkpoints are off for this session' };
+    else
+      try {
+        result = await this.#rewindFiles(inputId, false);
+      } catch (e) {
+        result = { ok: false, filesChanged: [], error: String((e as Error)?.message ?? e) };
+      }
+    if (!this.#exited) this.#events.push({ type: 'files-rewound', inputId, result });
+  }
+
+  async #rewindFiles(inputId: string, dryRun: boolean): Promise<FileRewindResult> {
+    const fn = (this.#q as unknown as Loose).rewindFiles;
+    if (typeof fn !== 'function') throw new Error('this Claude Code version cannot restore files');
+    const call = fn as (id: string, o?: { dryRun?: boolean }) => Promise<unknown>;
+    try {
+      if (dryRun) return toFileRewindResult(await call(inputId, { dryRun: true }), true);
+      // The real restore names no files (CLI 2.1.318): a dry run first gives the list.
+      let preview: FileRewindResult | undefined;
+      try {
+        preview = toFileRewindResult(await call(inputId, { dryRun: true }), true);
+      } catch {
+        preview = undefined;
+      }
+      const raw = await call(inputId, undefined);
+      return withPreview(toFileRewindResult(raw, false), raw, preview);
+    } catch (e) {
+      if (isUnsupported(e)) throw new Error('this Claude Code version cannot restore files', { cause: e });
+      throw e;
+    }
   }
 
   /**
@@ -224,7 +312,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
    * process. Each read is optional (D9); a failure only leaves that part unknown.
    */
   async #prime(): Promise<void> {
-    const q = this.#query;
+    const q = this.#q;
     const usage = this.#mapper.usage;
     const step = async (name: string, run: () => Promise<BackendEvent[] | void>) => {
       try {
@@ -285,29 +373,105 @@ export class ClaudeBackendSession implements AgentBackendSession {
 
   async #run(): Promise<void> {
     let error: string | undefined;
-    try {
-      for await (const msg of this.#query) {
-        const m = msg as unknown as Loose;
-        if (m.type === 'system' && m.subtype === 'init' && typeof m.claude_code_version === 'string') {
-          this.#cliVersion = m.claude_code_version;
-          this.capabilities.backendVersion = m.claude_code_version;
+    for (;;) {
+      let refused: string | undefined;
+      try {
+        refused = await this.#drain(this.#query);
+      } catch (e) {
+        error = String((e as Error)?.message ?? e);
+        // D29: a CLI that exits with the refusal instead of a result frame.
+        if (this.#forkGuard !== undefined && this.#asked === undefined) {
+          const proc = await this.#init.exitInfo?.();
+          refused = refusalInText(error) ?? refusalInText(proc?.stderr);
         }
-        const closed = this.#asks.observe(msg);
-        for (const e of this.#mapper.map(msg)) {
-          // D70: the id the CLI now runs under (the mapper reads it from the frames, not the reset's).
-          if (e.type === 'conversation-reset') this.#sessionId = e.newSessionId;
-          this.#events.push(e);
-        }
-        for (const e of closed) this.#events.push(e);
       }
-    } catch (e) {
-      error = String((e as Error)?.message ?? e);
+      if (refused === undefined || this.#asked !== undefined) break;
+      error = undefined;
+      this.#restartPlain(refused);
     }
     this.#exited = true;
-    for (const e of this.#mapper.exit(error)) this.#events.push(e);
+    const proc = this.#asked === undefined ? await this.#init.exitInfo?.() : undefined;
+    const exit = describeExit({
+      ...(this.#asked !== undefined ? { asked: this.#asked } : {}),
+      ...(error !== undefined ? { sdkError: error } : {}),
+      ...(proc !== undefined ? { proc } : {}),
+    });
+    for (const e of this.#mapper.exit(exit.error)) {
+      if (e.type === 'exit') {
+        e.reason = exit.reason;
+        if (exit.code !== undefined) e.code = exit.code;
+        if (exit.signal !== undefined) e.signal = exit.signal;
+      }
+      this.#events.push(e);
+    }
     this.#events.end();
     this.#input.end();
-    this.#init.onExit?.(error);
+    this.#init.onExit?.(exit.error);
+  }
+
+  /**
+   * D29 (r3): the CLI refused the validated cut. Never retried as is (the refusal is
+   * deterministic): the same fork starts again with a plain cut at the same point, gets the
+   * inputs the refused process never ran, and the user sees a note. The source is left alone.
+   */
+  #restartPlain(refusal: string): void {
+    const sent = this.#forkGuard ?? [];
+    this.#forkGuard = undefined;
+    this.#init.debug?.('fork cut refused; restarting with a plain cut', refusal);
+    this.#input.end();
+    try {
+      this.#query.close();
+    } catch {
+      // already closed
+    }
+    this.#input = new AsyncQueue<SDKUserMessage>();
+    const options = this.#init.fallbackOptions as Options;
+    this.#query = withSdkVersionEnvRestored(() => this.#init.queryFn({ prompt: this.#input, options }));
+    this.#events.push({ type: 'notice', level: 'warning', text: refusalNote(refusal) });
+    void this.#prime();
+    // The session choices go to the new process first, then the file restore, then the inputs
+    // the refused process never ran (a later send waits on `#ready` and so comes after them).
+    const again = [...this.#choices.values()];
+    const restoreAt = this.#init.restoreFilesAt;
+    this.#ready = (async () => {
+      for (const f of again) {
+        try {
+          await f();
+        } catch (e) {
+          this.#init.debug?.('choice not applied again after the plain restart', String((e as Error)?.message ?? e));
+        }
+      }
+      if (restoreAt !== undefined) await this.#restoreFiles(restoreAt);
+    })();
+    const input = this.#input;
+    void this.#ready.then(() => {
+      for (const m of sent) input.push(m);
+    });
+  }
+
+  /** Map one query's frames. Returns the refusal text when the CLI refused a validated cut. */
+  async #drain(query: Query): Promise<string | undefined> {
+    for await (const msg of query) {
+      const m = msg as unknown as Loose;
+      if (this.#forkGuard !== undefined) {
+        const refusal = dropsTurnRefusal(msg);
+        if (refusal !== undefined) return refusal;
+        // The cut stood: a model reply or a turn result means the fork got past its boot check.
+        if (m.type === 'result' || m.type === 'assistant') this.#forkGuard = undefined;
+      }
+      if (m.type === 'system' && m.subtype === 'init' && typeof m.claude_code_version === 'string') {
+        this.#cliVersion = m.claude_code_version;
+        this.capabilities.backendVersion = m.claude_code_version;
+      }
+      const closed = this.#asks.observe(msg);
+      for (const e of this.#mapper.map(msg)) {
+        // D70: the id the CLI now runs under (the mapper reads it from the frames, not the reset's).
+        if (e.type === 'conversation-reset') this.#sessionId = e.newSessionId;
+        this.#events.push(e);
+      }
+      for (const e of closed) this.#events.push(e);
+    }
+    return undefined;
   }
 
   async send(input: UserInput, mode: 'next' | 'queue'): Promise<void> {
@@ -315,6 +479,15 @@ export class ClaudeBackendSession implements AgentBackendSession {
     // Build first: a message that cannot be built (an unreferenceable file path) must not stay
     // pending in the tracker, or every later turn end would wait for it (M1 verify 3-2).
     const message = toSdkUserMessage(input, mode);
+    // D30: a rewind fork restores the files before the first turn sees them.
+    // A refusal restart replaces `#ready` while we wait; wait again until it stays (M7 verify).
+    let ready: Promise<void>;
+    do {
+      ready = this.#ready;
+      await ready;
+    } while (ready !== this.#ready);
+    if (this.#exited) throw new Error('Claude Code is not running');
+    this.#forkGuard?.push(message);
     // D52: a slash command is the plain text the user typed; only its name is noted, so a
     // local command output that carries no name of its own can be named (R7.2).
     this.#mapper.noteSlashCommand(slashCommandOf(input));
@@ -330,14 +503,15 @@ export class ClaudeBackendSession implements AgentBackendSession {
   async interrupt(opts?: { cancelQueued?: boolean }): Promise<{ cancelledInputIds: string[] }> {
     if (this.#exited) return { cancelledInputIds: [] };
     this.#mapper.noteInterruptRequested();
-    const call = this.#query.interrupt as unknown as (o?: { cancelQueued?: boolean }) => Promise<unknown>;
-    const receipt = (await call.call(this.#query, opts?.cancelQueued ? { cancelQueued: true } : undefined)) as
+    const call = this.#q.interrupt as unknown as (o?: { cancelQueued?: boolean }) => Promise<unknown>;
+    const receipt = (await call(opts?.cancelQueued ? { cancelQueued: true } : undefined)) as
       { still_queued?: string[]; cancelled?: string[] } | undefined;
     const cancelled = Array.isArray(receipt?.cancelled) ? receipt.cancelled : [];
     return { cancelledInputIds: this.#tracker.cancel(cancelled) };
   }
 
   async forceStop(): Promise<void> {
+    this.#asked ??= 'force-stopped';
     this.#input.end();
     this.#query.close();
     this.#init.killGroup?.();
@@ -345,6 +519,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
   }
 
   async dispose(): Promise<void> {
+    this.#asked ??= 'disposed';
     this.#mapper.workflows.dispose();
     this.#input.end();
     this.#query.close();
@@ -352,7 +527,7 @@ export class ClaudeBackendSession implements AgentBackendSession {
   }
 
   #makeControls(): BackendControls {
-    const q = this.#query;
+    const q = this.#q;
     const controls: BackendControls = this.#baseControls();
     // D54, R7.3: `/btw`. Full context, no tools, nothing written to either transcript; answers
     // while a turn streams or a tool runs (sdk-surface §7.5). History is the caller's (D24).
@@ -408,10 +583,10 @@ export class ClaudeBackendSession implements AgentBackendSession {
 
   /** Call a control this CLI must support; an older CLI's refusal becomes a plain error (D9). */
   async #required(name: string, what: string, ...args: unknown[]): Promise<unknown> {
-    const fn = (this.#query as unknown as Loose)[name];
+    const fn = (this.#q as unknown as Loose)[name];
     if (typeof fn !== 'function') throw new Error(`this Claude Code version cannot ${what}`);
     try {
-      return await (fn as (...a: unknown[]) => Promise<unknown>).apply(this.#query, args);
+      return await (fn as (...a: unknown[]) => Promise<unknown>)(...args);
     } catch (e) {
       if (isUnsupported(e)) throw new Error(`this Claude Code version cannot ${what}`, { cause: e });
       throw e;
@@ -419,8 +594,16 @@ export class ClaudeBackendSession implements AgentBackendSession {
   }
 
   #baseControls(): BackendControls {
-    const q = this.#query;
+    const q = this.#q;
     return {
+      // D30: the terminal app's "Restore code" (and its preview), on this process. Offered only
+      // when the process keeps checkpoints (D16); the conversation is not touched.
+      ...(this.capabilities.fileRewind
+        ? {
+            rewindFiles: async (inputId: string, opts?: { dryRun?: boolean }) =>
+              this.#rewindFiles(inputId, opts?.dryRun === true),
+          }
+        : {}),
       stopTask: async (taskId) => {
         // D48: the CLI has no control to stop one workflow agent; `stopTask(<agent id>)` is
         // accepted and does nothing (live M4 probe X). Say so instead of a silent no-op.
@@ -442,18 +625,26 @@ export class ClaudeBackendSession implements AgentBackendSession {
           );
         if (this.#asks.mode === undefined && this.#init.startMode)
           this.#asks.seedStartMode(await this.#init.startMode());
+        // Remembered before the call: a process that refuses its fork cut never answers it.
+        this.#remember('mode', () => q.setPermissionMode(mode as Parameters<Query['setPermissionMode']>[0]));
         await q.setPermissionMode(mode as Parameters<Query['setPermissionMode']>[0]);
       },
       setModel: async (model) => {
+        this.#remember('model', () => q.setModel(model));
         await q.setModel(model); // never undefined (D35)
       },
       setEffort: async (effortId) => {
-        await (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, effortFlags(effortId));
+        const apply = () =>
+          (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, effortFlags(effortId));
+        this.#remember('effort', apply);
+        await apply();
       },
       // D37: the terminal app's `/effort ultracode on|off` (and Tab in its effort slider): on or
       // off for this session, effort unchanged. The CLI refuses it when unavailable.
       setUltracode: async (on) => {
-        await (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, { ultracode: on });
+        const apply = () => (q.applyFlagSettings as unknown as (s: Loose) => Promise<void>).call(q, { ultracode: on });
+        this.#remember('ultracode', apply);
+        await apply();
       },
       // The CLI's own report (`getSettings().applied`, undeclared fields, D9). Read-only.
       effortState: async () => {

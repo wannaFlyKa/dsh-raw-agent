@@ -28,6 +28,7 @@ import { SessionRegistry, SESSIONS_SERVICE, isSessionRegistry, type ReturnedDraf
 import { AgentCommandMenus } from './commands.js';
 import { SETTINGS_MODEL } from './catalog.js';
 import { startJob } from './jobs.js';
+import { droppedHumanMessage, forkCut, rewindPoints, tasksEndedByStop } from './lifecycle.js';
 import { childPreStep, createChildSession } from './children.js';
 import { appendWorkflowRecord, openWorkflowRuns } from './workflows.js';
 import {
@@ -35,7 +36,9 @@ import {
   type CordisContext,
   type DshAgent,
   type DshAttachments,
+  type DshEvent,
   type DshJobs,
+  type DshSession,
   type DshUserMessage,
   type PreStepDecision,
   type PreStepPayload,
@@ -298,6 +301,23 @@ function latestBinding(agent: DshAgent, kind: string): HostBinding | undefined {
   return undefined;
 }
 
+/**
+ * M7 (D29): a source session's events: the live session when it is open, else DSH's cold read
+ * (`P/dsh-session-query/lib/index.js` `readSession`). Undefined when neither can read it.
+ */
+async function sourceEvents(ctx: CordisContext, sessionId: string): Promise<readonly DshEvent[] | undefined> {
+  try {
+    const live = (ctx.get('sessions') as { get?(id: string): DshSession | undefined } | undefined)?.get?.(sessionId);
+    if (live && typeof live.snapshotEvents === 'function') return live.snapshotEvents();
+  } catch {
+    // fall through to the cold read
+  }
+  const query = ctx.get('sessionQuery') as
+    { readSession?(id: string): Promise<{ events: readonly DshEvent[] }> } | undefined;
+  if (typeof query?.readSession !== 'function') return undefined;
+  return (await query.readSession(sessionId)).events;
+}
+
 /** D35: the latest own or inherited `model/selection` naming our provider; `settings` = no choice. */
 function modelChoice(agent: DshAgent, kind: string): string | undefined {
   const events = agent.session.snapshotEvents();
@@ -366,6 +386,21 @@ export function mountAgent(ctx: CordisContext, o: AgentMountOptions): AgentMount
       });
     },
     latestBinding: () => latestBinding(agent, factory.kind),
+    // M7 (D29): the first dropped source turn's human message, read from the source log.
+    forkDroppedMessage: async () => {
+      const cut = forkCut(agent.session.snapshotEvents());
+      const source = latestBinding(agent, factory.kind)?.hostSessionId;
+      if (!cut || cut.midTurn || source === undefined || source === agent.session.id) return undefined;
+      const events = await sourceEvents(ctx, source);
+      return events ? droppedHumanMessage(events, cut) : undefined;
+    },
+    forkedFromChild: () => {
+      if (!agent.session.header.isSeeded) return false;
+      const events = agent.session.snapshotEvents();
+      return forkCut(events)?.childPrefix === true && latestBinding(agent, factory.kind) === undefined;
+    },
+    tasksEndedByStop: () => tasksEndedByStop(agent.session.snapshotEvents()),
+    rewindPoints: () => rewindPoints(agent.session.snapshotEvents()),
     modelChoice: () => modelChoice(agent, factory.kind),
     // D36: session-only. `agent.model.select` records `model/selection` and never saves the host
     // default (DSH's `session.selectModel` would, K1).

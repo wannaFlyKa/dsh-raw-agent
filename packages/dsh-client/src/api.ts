@@ -37,7 +37,7 @@ export interface SessionViewWire {
     turn: boolean;
     backgroundTasks: number;
     waiting?: number;
-    lastExit?: { error?: string; at: number; duringTurn: boolean };
+    lastExit?: ExitWire;
   };
   live: {
     model?: string;
@@ -85,6 +85,71 @@ export interface SessionViewWire {
   menu?: { version: number; count: number; full: boolean };
   /** R7.4: a short MCP summary (name and state). */
   mcp?: Array<{ name: string; status: string }>;
+  /** M7: fork, rewind, recovery and restart facts (mirrors dsh-host `LifecycleView`). */
+  lifecycle?: LifecycleWire;
+}
+
+// ---- M7: exits, fork, rewind and recovery (R3.5, R3.6, D29, D30, D75) ----
+
+/** The last unexpected end of the agent process (mirrors dsh-host `RuntimeState.lastExit`). */
+export interface ExitWire {
+  error?: string;
+  at: number;
+  duringTurn: boolean;
+  /** 'crashed' (failed or killed), 'ended' (stopped by itself), or an intended end. */
+  reason?: 'disposed' | 'force-stopped' | 'ended' | 'crashed';
+  code?: number;
+  signal?: string;
+}
+
+/** What a file restore did, or would do (mirrors core `FileRewindResult`). */
+export interface FileRewindWire {
+  ok: boolean;
+  error?: string;
+  filesChanged: string[];
+  insertions?: number;
+  deletions?: number;
+  skippedLinks?: number;
+  dryRun?: boolean;
+}
+
+export interface LifecycleWire {
+  endedByStop?: string[];
+  forkedFromChild?: boolean;
+  recovered?: { at: number; why: 'restart' | 'crash'; steps: number; note?: string };
+  recoveryProblem?: string;
+  rewind?: { inputId: string; result: FileRewindWire; at: number };
+  restoreCodePending?: boolean;
+  unstartedFork?: boolean;
+}
+
+/** One earlier human message the rewind dialog lists (mirrors dsh-host `RewindPoint`). */
+export interface RewindPointWire {
+  messageId: string;
+  text: string;
+  attachments?: number;
+  at: number;
+  /** The inclusive fork cut for "restore conversation"; absent for the first turn. */
+  forkSeq?: number;
+  inherited?: boolean;
+}
+
+/** The rewind route's answer (mirrors dsh-host `RewindOptions`). Never starts a process. */
+export interface RewindOptionsWire {
+  running: boolean;
+  fileRewind: boolean;
+  unstartedFork: boolean;
+  restoreCodePending: boolean;
+  displayName: string;
+  points: RewindPointWire[];
+}
+
+/** The in-place file restore's answer (mirrors dsh-host `RewindFilesAnswer`). */
+export interface RewindFilesWire {
+  ok: boolean;
+  code?: 'not-running' | 'busy' | 'unsupported' | 'failed';
+  error?: string;
+  result?: FileRewindWire;
 }
 
 // ---- M6: commands, side questions, MCP, local outputs (R7.1-R7.4) ----
@@ -124,7 +189,7 @@ export interface CommandRowWire {
   aliases?: string[];
   kind?: 'builtin' | 'skill' | 'mcp-prompt' | 'custom';
   terminalOnly?: boolean;
-  menu: 'listed' | 'taken' | 'terminal-only' | 'side-question' | 'mcp-panel';
+  menu: 'listed' | 'taken' | 'terminal-only' | 'side-question' | 'mcp-panel' | 'rewind-panel';
   note?: string;
 }
 
@@ -138,6 +203,8 @@ export interface CommandsAnswerWire {
   sideQuestionCommand?: string;
   /** The agent's MCP view command: bare, our source opens the MCP panel (D55). */
   mcpCommand?: string;
+  /** D30 (M7): the agent's rewind menu command; bare (or an alias) it opens our rewind dialog. */
+  rewindCommand?: string;
   reason?: string;
 }
 
@@ -637,6 +704,12 @@ export interface RawAgentApi {
   mcpAuthCallback?(sessionId: string, server: string, url: string): Promise<McpActionWire>;
   /** R7.2: one structured local-command output; undefined when the Host no longer keeps it. */
   localOutput?(sessionId: string, outputId: string): Promise<LocalOutputWire | undefined>;
+  /** D30 (M7): the rewind dialog's facts and points. Never spawns. */
+  rewind?(sessionId: string): Promise<RewindOptionsWire>;
+  /** D30: "restore code" at a fork's first start (on) or not (off). 404: not (yet) our session. */
+  rewindRestore?(sessionId: string, on: boolean): Promise<{ ok: boolean; status: number; error?: string }>;
+  /** D30 "Restore code" in place; `dryRun` only says what would change. */
+  rewindFiles?(sessionId: string, messageId: string, dryRun: boolean): Promise<RewindFilesWire>;
 }
 
 export function createApi(fetchFn: FetchFn): RawAgentApi {
@@ -816,6 +889,71 @@ export function createApi(fetchFn: FetchFn): RawAgentApi {
       if (!r.ok) throw new RouteError(r.status, body?.error ?? `request failed (${r.status})`);
       return body?.kind === 'context' && isObj(body.context) ? { kind: 'context', context: body.context } : undefined;
     },
+    async rewind(id) {
+      const body = await read<Partial<RewindOptionsWire>>(fetchFn, `${BASE}/rewind?${q(id)}`);
+      return parseRewindOptions(body);
+    },
+    async rewindRestore(id, on) {
+      const r = await fetchFn(`${BASE}/rewind-restore?${q(id)}&on=${on ? '1' : '0'}`, post());
+      const body = (await r.json().catch(() => undefined)) as { ok?: boolean; error?: string } | undefined;
+      return {
+        ok: r.ok && body?.ok !== false,
+        status: r.status,
+        ...(typeof body?.error === 'string' ? { error: body.error } : {}),
+      };
+    },
+    async rewindFiles(id, message, dryRun) {
+      const r = await fetchFn(
+        `${BASE}/rewind-files?${q(id)}&message=${encodeURIComponent(message)}${dryRun ? '&dryRun=1' : ''}`,
+        post(),
+      );
+      const body = (await r.json().catch(() => undefined)) as Partial<RewindFilesWire> | undefined;
+      const out: RewindFilesWire = { ok: r.ok && body?.ok === true };
+      if (typeof body?.code === 'string') out.code = body.code;
+      if (typeof body?.error === 'string') out.error = body.error;
+      else if (!r.ok) out.error = `request failed (${r.status})`;
+      const result = parseFileRewind(body?.result);
+      if (result) out.result = result;
+      return out;
+    },
+  };
+}
+
+/** Read a file restore result (unknown fields dropped). */
+export function parseFileRewind(v: unknown): FileRewindWire | undefined {
+  if (!isObj(v) || typeof v.ok !== 'boolean') return undefined;
+  const files = Array.isArray(v.filesChanged) ? v.filesChanged.filter((f): f is string => typeof f === 'string') : [];
+  const out: FileRewindWire = { ok: v.ok, filesChanged: files };
+  if (typeof v.error === 'string') out.error = v.error;
+  if (finite(v.insertions)) out.insertions = v.insertions;
+  if (finite(v.deletions)) out.deletions = v.deletions;
+  if (finite(v.skippedLinks)) out.skippedLinks = v.skippedLinks;
+  if (v.dryRun === true) out.dryRun = true;
+  return out;
+}
+
+/** Read the rewind route's answer; a point without a message id is dropped. */
+export function parseRewindOptions(body: Partial<RewindOptionsWire> | undefined): RewindOptionsWire {
+  const points = (Array.isArray(body?.points) ? body.points : []).filter(
+    (p): p is RewindPointWire => isObj(p) && typeof p.messageId === 'string' && p.messageId !== '',
+  );
+  return {
+    running: body?.running === true,
+    fileRewind: body?.fileRewind === true,
+    unstartedFork: body?.unstartedFork === true,
+    restoreCodePending: body?.restoreCodePending === true,
+    displayName: typeof body?.displayName === 'string' ? body.displayName : 'The agent',
+    points: points.map((p) => {
+      const o: RewindPointWire = {
+        messageId: p.messageId,
+        text: typeof p.text === 'string' ? p.text : '',
+        at: finite(p.at) ? p.at : 0,
+      };
+      if (finite(p.attachments) && p.attachments > 0) o.attachments = p.attachments;
+      if (finite(p.forkSeq)) o.forkSeq = p.forkSeq;
+      if (p.inherited === true) o.inherited = true;
+      return o;
+    }),
   };
 }
 

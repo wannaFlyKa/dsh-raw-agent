@@ -12,6 +12,9 @@ import type {
   BackendUserConfig,
   CommandInfo,
   ContextUsage,
+  ExitReason,
+  FileRewindResult,
+  SessionTail,
   McpServerInfo,
   ModelInfo,
   SessionChoiceRequest,
@@ -203,6 +206,22 @@ export interface HostSessionPort {
   notify?(state: RuntimeState): void;
   /** R7.1: the agent's command list changed; the port updates the host `/` menu (D52). */
   commandsChanged?(): void;
+  /**
+   * M7 (D29, D30): for a fork, the host message id of the human message that opened the first
+   * source turn the cut drops (read from the source session's log). Undefined when the cut is
+   * inside a turn, when that turn has no human message (a wake turn), or when the source cannot
+   * be read. The backend checks it again before it trusts it.
+   */
+  forkDroppedMessage?(): Promise<string | undefined>;
+  /** M7: this session is a branch of a child agent's session (its kept steps are a child's). */
+  forkedFromChild?(): boolean;
+  /**
+   * M7 (D75): background tasks this session's log shows as running, or torn down by the host,
+   * when the host last stopped. The agent ended with the host, and so did they.
+   */
+  tasksEndedByStop?(): string[];
+  /** M7 (D30): the human messages of this session's log the rewind dialog can go back to. */
+  rewindPoints?(): RewindPoint[];
 }
 
 /** What the plugin UI can show about one session's agent process. */
@@ -213,7 +232,77 @@ export interface RuntimeState {
   /** How many asks wait for the user's answer. */
   waiting?: number;
   /** The last unexpected end of the process (D75), until the next spawn. */
-  lastExit?: { error?: string; at: number; duringTurn: boolean };
+  lastExit?: {
+    error?: string;
+    at: number;
+    duringTurn: boolean;
+    /** R3.6 (M7): 'crashed' (failed or killed) or 'ended' (stopped by itself with success). */
+    reason?: ExitReason;
+    code?: number;
+    signal?: string;
+  };
+}
+
+/** M7: fork, rewind, recovery and restart facts for the plugin UI (none is a log event). */
+export interface LifecycleView {
+  /** D75: background tasks that ended when the host last stopped; the agent was not told. */
+  endedByStop?: string[];
+  /** This session is a branch of a child agent's session; the agent starts a new conversation. */
+  forkedFromChild?: boolean;
+  /** R3.6: the last time replies were read back from the agent's own record. */
+  recovered?: { at: number; why: RecoveryCause; steps: number; note?: string };
+  /** The record could not be compared (too large, not found), in words. */
+  recoveryProblem?: string;
+  /** D30: the last file restore (or its preview). */
+  rewind?: { inputId: string; result: FileRewindResult; at: number };
+  /** D30: "restore code" runs at this fork's first start. */
+  restoreCodePending?: boolean;
+  /** D29: this session is a fork whose agent has not started yet (its first start forks). */
+  unstartedFork?: boolean;
+}
+
+/** Why replies were read back from the agent's own record (M7, R3.6). */
+export type RecoveryCause = 'restart' | 'crash';
+
+/** The rewind dialog's facts (D30, M7). Never starts a process. */
+export interface RewindOptions {
+  running: boolean;
+  /** The agent keeps file checkpoints (the live process, else what a start now would do). */
+  fileRewind: boolean;
+  /** This session is a fork whose first start is still to come ("restore code" can apply then). */
+  unstartedFork: boolean;
+  restoreCodePending: boolean;
+  displayName: string;
+  /** The human messages the dialog lists, oldest first (empty when the log cannot be read). */
+  points: RewindPoint[];
+}
+
+/** D30 (M7): one earlier human message the rewind dialog can go back to. */
+export interface RewindPoint {
+  /** The host id of the human message that opened the turn. */
+  messageId: string;
+  /** Its text, cut to `REWIND_TEXT_MAX` characters (the dialog's label). */
+  text: string;
+  /** Non-text parts (images, files) of the message. */
+  attachments?: number;
+  /** When it was written (host time). */
+  at: number;
+  /**
+   * Fork here for "restore conversation": the inclusive cut is the end of the turn before this
+   * one, as DSH's own Branch action cuts. Undefined for the first turn (nothing to keep).
+   */
+  forkSeq?: number;
+  /** The message is in this fork's inherited prefix (it ran in the source session). */
+  inherited?: boolean;
+}
+
+/** The outcome of an in-place file restore (D30 "Restore code"). */
+export interface RewindFilesAnswer {
+  ok: boolean;
+  /** 'not-running' | 'busy' | 'unsupported' | 'failed' when not ok. */
+  code?: 'not-running' | 'busy' | 'unsupported' | 'failed';
+  error?: string;
+  result?: FileRewindResult;
 }
 
 /** What the live process reports about itself (system/init and status frames). */
@@ -291,6 +380,8 @@ export interface SessionView {
   menu?: { version: number; count: number; full: boolean };
   /** R7.4: a short MCP summary (name and state); the panel reads the MCP route. */
   mcp?: Array<{ name: string; status: string }>;
+  /** M7: fork, rewind, recovery and restart facts. */
+  lifecycle?: LifecycleView;
 }
 
 /** The commands route's answer (R7.1). Never starts a process. */
@@ -308,6 +399,8 @@ export interface CommandsAnswer {
   sideQuestionCommand?: string;
   /** The agent's MCP view command; bare, it opens the plugin's MCP panel (D55). */
   mcpCommand?: string;
+  /** The agent's rewind menu command; bare (or an alias), it opens the plugin's rewind dialog (D30). */
+  rewindCommand?: string;
   reason?: string;
 }
 
@@ -362,7 +455,7 @@ export type TurnOutcome =
  * `ended`: a process we ended on purpose (force stop, dispose, reset) exited during a turn. That
  * turn ends as stopped, not with the crash text (R3.6 is for unexpected ends only).
  */
-type Item = BackendEvent | { type: 'stop-timeout' } | { type: 'ended' };
+type Item = BackendEvent | { type: 'stop-timeout' } | { type: 'ended' } | { type: 'recovered-end' };
 
 /** An unbounded event box with a drain, so nothing is lost when a turn ends mid-burst. */
 class EventBox {
@@ -417,6 +510,46 @@ interface SentEntry {
 export function crashMessage(displayName: string, error: string | undefined): string {
   const why = error ? `: ${error}` : '';
   return `${displayName} stopped unexpectedly${why}. Its open steps were closed. Send a message to start it again; the conversation resumes where it was.`;
+}
+
+/**
+ * M7 (R3.6): the visible trigger of a turn that shows replies read back from the agent's own
+ * record. Log-only for the agent (D26): nothing of it is ever sent.
+ */
+export function recoveryTrigger(displayName: string, why: RecoveryCause): string {
+  const when = why === 'restart' ? 'while DSH was not running or before it stopped' : 'before its process ended';
+  return `Read back from ${displayName}'s own record of this conversation: ${displayName} wrote this ${when}, and this session had not shown it yet.`;
+}
+
+/** M7 (R3.6): the trigger card's list for a recovery, and what was not shown as steps. */
+export function recoveryItems(tail: Pick<SessionTail, 'prompts' | 'notes' | 'orphanResults'>): string[] {
+  const out: string[] = [];
+  for (const p of tail.prompts) {
+    const t = p.replace(/\s+/g, ' ').trim();
+    out.push(`it took your message "${t.length > 80 ? `${t.slice(0, 80)}…` : t}"`);
+  }
+  for (const n of tail.notes) out.push(`it took in ${n}`);
+  if (tail.orphanResults > 0)
+    out.push(
+      `${tail.orphanResults} tool ${tail.orphanResults === 1 ? 'result' : 'results'} came back for calls shown above as interrupted; ${tail.orphanResults === 1 ? 'it is' : 'they are'} in the agent's memory`,
+    );
+  return out.slice(0, 20);
+}
+
+/** M7 (D75): the notice for background tasks that ended with the host. */
+export function endedByStopNotice(displayName: string, labels: readonly string[]): string {
+  const shown = labels
+    .slice(0, 3)
+    .map((l) => `"${l}"`)
+    .join(', ');
+  const more = labels.length > 3 ? ` and ${labels.length - 3} more` : '';
+  const what = labels.length === 1 ? 'background task' : 'background tasks';
+  return `When DSH last stopped, ${displayName} stopped with it, and its ${what} ${shown}${more} ended too. ${displayName} was not told; ask it to run ${labels.length === 1 ? 'it' : 'them'} again if you need ${labels.length === 1 ? 'it' : 'them'}.`;
+}
+
+/** M7: the notice for a branch made from a child agent's session. */
+export function childForkNotice(displayName: string): string {
+  return `This branch was made from a child agent's session. ${displayName} cannot continue a child agent's conversation as its own, so it starts a new conversation here with no memory of the kept turns.`;
 }
 
 /**
@@ -539,6 +672,22 @@ export class SessionRuntime {
   #mcpFrom: 'live' | 'reported' | 'none' = 'none';
   /** R7.2: structured local-command outputs (display-only path). */
   readonly #local = new LocalOutputs();
+  /** M7: the facts the lifecycle view shows. */
+  #lifecycle: LifecycleView = {};
+  /** M7 (D30): "restore code" at this fork's first start. */
+  #restoreCode = false;
+  /** M7 (R3.6): the read of the agent's own record that runs now, if any. */
+  #recovery: Promise<void> | undefined;
+  /** The chain point the last recovery read started from (never read twice from one point). */
+  #recoveredFrom: string | undefined;
+  /** A recovery found while a turn ran; it opens its own turn after that one. */
+  #pendingRecovery: { items: Item[]; text: string; list: string[]; sessionId: string } | undefined;
+  /** The wake buffer holds recovered steps (its turn needs no process). */
+  #wakeRecovery = false;
+  /** The running turn shows only recovered steps. */
+  #recoveryTurn = false;
+  /** The backend session id recovered steps are bound to while no process runs. */
+  #recoverySession: string | undefined;
 
   constructor(factory: AgentBackendFactory, port: HostSessionPort, opts: SessionRuntimeOptions) {
     this.#factory = factory;
@@ -580,6 +729,114 @@ export class SessionRuntime {
       write: (r) => this.#writeWorkflow(r),
       childSession: (id) => this.#hub.session(id),
     });
+    // M7: what the log says about the last host stop, read once the runtime exists.
+    queueMicrotask(() => this.#checkOnOpen());
+  }
+
+  /**
+   * M7: once per runtime, before any process of it runs: background tasks that ended with the last
+   * host stop (D75), a branch of a child's session, and replies the agent wrote that the log does
+   * not hold (R3.6). No process starts (rule 9); the record read is a file read.
+   */
+  #checkOnOpen(): void {
+    const port = this.#port;
+    if (!port || this.#disposed) return;
+    const name = this.#factory.displayName;
+    try {
+      const ended = port.tasksEndedByStop?.() ?? [];
+      if (ended.length > 0) {
+        this.#lifecycle.endedByStop = ended;
+        this.showNotice('warning', endedByStopNotice(name, ended));
+      }
+    } catch (error) {
+      this.#warn('could not read the jobs of the last run', String((error as Error)?.message ?? error));
+    }
+    try {
+      if (port.forkedFromChild?.() === true) {
+        this.#lifecycle.forkedFromChild = true;
+        this.showNotice('info', childForkNotice(name));
+      }
+    } catch (error) {
+      this.#warn('could not read the fork prefix', String((error as Error)?.message ?? error));
+    }
+    if (!this.#backend && !this.#starting) this.#recovery = this.#recoverTail('restart');
+  }
+
+  /**
+   * M7 (R3.6): read what the agent wrote past the log's chain point from its own record. Only the
+   * session's own binding counts: past a fork's inherited point lie the source's turns the fork
+   * dropped. Found steps open a log-only turn of their own (no process), or join the next turn.
+   */
+  async #recoverTail(why: RecoveryCause): Promise<void> {
+    const f = this.#factory;
+    const port = this.#port;
+    if (!f.readSessionTail || !port || this.#disposed) return;
+    let binding: HostBinding | undefined;
+    try {
+      binding = port.latestBinding();
+    } catch {
+      return;
+    }
+    if (!binding || binding.chainId === undefined) return;
+    if (binding.hostSessionId !== undefined && binding.hostSessionId !== port.hostSessionId) return;
+    const from = `${binding.sessionId}:${binding.chainId}`;
+    if (this.#recoveredFrom === from) return;
+    this.#recoveredFrom = from;
+    let tail: SessionTail;
+    try {
+      tail = await f.readSessionTail(binding.sessionId, port.cwd, binding.chainId);
+    } catch (error) {
+      this.#warn('could not read the agent record', String((error as Error)?.message ?? error));
+      return;
+    }
+    if (this.#disposed) return;
+    const name = f.displayName;
+    if (tail.status === 'too-large') {
+      this.#lifecycle.recoveryProblem = `${name}'s record of this conversation is too large to compare, so replies it wrote while this session was not looking may be missing here.`;
+      this.#notify();
+      return;
+    }
+    if (tail.status !== 'found') {
+      this.#warn(`no recovery read (${tail.status})`, binding.chainId);
+      return;
+    }
+    const steps = tail.events.filter((e) => e.type === 'step-message').length;
+    const list = recoveryItems(tail);
+    if (steps === 0) {
+      // Nothing to show as steps; say what the agent has that this session does not.
+      const unseen = tail.notes.length > 0 || tail.orphanResults > 0;
+      if (unseen) {
+        const note = `${name} has more than this session shows: ${list.join('; ')}.`;
+        this.#lifecycle.recovered = { at: this.#now(), why, steps: 0, note };
+        this.showNotice('warning', note);
+      }
+      return;
+    }
+    this.#lifecycle.recovered = { at: this.#now(), why, steps };
+    if (list.length > 0) this.#lifecycle.recovered.note = list.join('; ');
+    this.#pendingRecovery = {
+      items: [...tail.events, { type: 'recovered-end' }],
+      text: recoveryTrigger(name, why),
+      list,
+      sessionId: binding.sessionId,
+    };
+    this.#flushRecovery();
+  }
+
+  /** Open the recovery turn once no turn runs or waits (its steps must not split another turn). */
+  #flushRecovery(): void {
+    const r = this.#pendingRecovery;
+    if (!r || this.#turnActive || this.#wakeBuffer !== undefined || this.#disposed) return;
+    this.#pendingRecovery = undefined;
+    this.#wakeBuffer = [...r.items];
+    this.#wakeRecovery = true;
+    this.#recoverySession = r.sessionId;
+    this.#wakeText = r.text;
+    this.#wakeItems = r.list;
+    const port = this.#port;
+    if (port) port.wake(r.text);
+    else this.#wakePending = true;
+    this.#notify();
   }
 
   /** D48: one native workflow record into the parent session; held while no host agent is attached. */
@@ -802,6 +1059,102 @@ export class SessionRuntime {
     this.#port = undefined;
   }
 
+  /** D30: record a file restore (a fork's first start, or "Restore code" in place) for the UI. */
+  #noteRewind(inputId: string, result: FileRewindResult): void {
+    this.#lifecycle.rewind = { inputId, result, at: this.#now() };
+    const name = this.#factory.displayName;
+    if (result.dryRun) {
+      this.#notify();
+      return;
+    }
+    if (result.ok) {
+      const n = result.filesChanged.length;
+      this.showNotice('info', n === 0 ? 'No file needed restoring.' : `Restored ${n} ${n === 1 ? 'file' : 'files'}.`);
+    } else this.showNotice('warning', `${name} did not restore the files: ${result.error ?? 'no reason given'}`);
+  }
+
+  /** The session is a fork that has not started its own process yet (D29). */
+  #unstartedFork(): boolean {
+    const port = this.#port;
+    if (!port || this.#backend || this.#starting) return false;
+    if (this.#factory.staticCapabilities.fork !== 'at-chain-point') return false;
+    try {
+      const b = port.latestBinding();
+      return b?.hostSessionId !== undefined && b.hostSessionId !== port.hostSessionId && b.chainId !== undefined;
+    } catch {
+      return false;
+    }
+  }
+
+  /** D30, M7: what the rewind dialog may offer now. Never starts a process. */
+  async rewindOptions(): Promise<RewindOptions> {
+    const running = this.#backend !== undefined;
+    let fileRewind = this.#backend?.capabilities.fileRewind === true;
+    if (!running && this.#port && this.#factory.fileRewindAvailable) {
+      try {
+        fileRewind = await this.#factory.fileRewindAvailable(this.#port.cwd);
+      } catch (error) {
+        this.#warn('could not read the checkpoint setting', String((error as Error)?.message ?? error));
+      }
+    }
+    let points: RewindPoint[] = [];
+    try {
+      points = this.#port?.rewindPoints?.() ?? [];
+    } catch (error) {
+      this.#warn('could not read the rewind points', String((error as Error)?.message ?? error));
+    }
+    return {
+      running,
+      fileRewind,
+      unstartedFork: this.#unstartedFork(),
+      restoreCodePending: this.#restoreCode,
+      displayName: this.#factory.displayName,
+      points,
+    };
+  }
+
+  /**
+   * D30 "restore code and conversation": the fork's first start also puts the files back as they
+   * were before the first dropped turn. Only for a fork that has not started yet.
+   */
+  requestCodeRestore(on: boolean): { ok: boolean; error?: string } {
+    if (!on) {
+      this.#restoreCode = false;
+      this.#notify();
+      return { ok: true };
+    }
+    if (!this.#unstartedFork())
+      return { ok: false, error: 'only a branch that has not started yet can restore code at its start' };
+    this.#restoreCode = true;
+    this.#notify();
+    return { ok: true };
+  }
+
+  /**
+   * D30 "Restore code" (in place): the files go back to before the turn of this host message ran;
+   * the conversation stays. `dryRun` only reports what would change. Needs the live process; never
+   * while a turn runs.
+   */
+  async rewindFiles(hostMessageId: string, dryRun: boolean): Promise<RewindFilesAnswer> {
+    const b = this.#backend;
+    const control = b?.controls.rewindFiles;
+    if (!b) return { ok: false, code: 'not-running', error: `${this.#factory.displayName} is not running` };
+    if (!control || !b.capabilities.fileRewind)
+      return { ok: false, code: 'unsupported', error: `${this.#factory.displayName} keeps no file checkpoints here` };
+    if (this.#turnActive && !dryRun) return { ok: false, code: 'busy', error: 'wait until the turn ends' };
+    const inputId = this.#factory.inputIdFor?.(hostMessageId) ?? hostMessageId;
+    let result: FileRewindResult;
+    try {
+      result = await control(inputId, { dryRun });
+    } catch (error) {
+      return { ok: false, code: 'failed', error: String((error as Error)?.message ?? error) };
+    }
+    this.#noteRewind(inputId, result);
+    return result.ok
+      ? { ok: true, result }
+      : { ok: false, code: 'failed', result, ...(result.error ? { error: result.error } : {}) };
+  }
+
   /** "Start <displayName>" (D4): spawn without sending anything. */
   async start(): Promise<void> {
     const backend = await this.#ensureBackend();
@@ -836,6 +1189,10 @@ export class SessionRuntime {
       v.workflows = this.#workflows.views();
       v.workflowAgentStop = this.#backend?.capabilities.workflowAgentStop === true;
     }
+    const lifecycle: LifecycleView = { ...this.#lifecycle };
+    if (this.#restoreCode) lifecycle.restoreCodePending = true;
+    if (!this.#backend && this.#unstartedFork()) lifecycle.unstartedFork = true;
+    if (Object.keys(lifecycle).length > 0) v.lifecycle = lifecycle;
     const usage = this.#usage.summary();
     if (usage) v.usage = usage;
     const side = this.#side.view();
@@ -913,13 +1270,14 @@ export class SessionRuntime {
         reason = String((e as Error)?.message ?? e);
       }
     }
-    const { sideQuestionCommand, mcpCommand } = this.#factory.staticCapabilities;
+    const { sideQuestionCommand, mcpCommand, rewindCommand } = this.#factory.staticCapabilities;
     const rows =
       this.#menuRows ??
       planCommandMenu(this.#commandList ?? [], {
         displayName: this.#factory.displayName,
         ...(sideQuestionCommand !== undefined ? { sideQuestionCommand } : {}),
         ...(mcpCommand !== undefined ? { mcpCommand } : {}),
+        ...(rewindCommand !== undefined ? { rewindCommand } : {}),
       }).rows;
     const answer: CommandsAnswer = {
       running: backend !== undefined,
@@ -930,6 +1288,7 @@ export class SessionRuntime {
     };
     if (sideQuestionCommand !== undefined) answer.sideQuestionCommand = sideQuestionCommand;
     if (mcpCommand !== undefined) answer.mcpCommand = mcpCommand;
+    if (rewindCommand !== undefined) answer.rewindCommand = rewindCommand;
     if (reason !== undefined) answer.reason = reason;
     return answer;
   }
@@ -1385,6 +1744,36 @@ export class SessionRuntime {
     return `${this.#factory.displayName} will start again with your settings at the next message`;
   }
 
+  /**
+   * D28, D70 (M7 live): the conversation the agent runs under now. A `/clear` (as the last
+   * message before a restart) gives it a new id with no step to bind; the agent's own record of
+   * the newest human messages says which conversation took them. Their own binding else.
+   */
+  async #conversationNow(bound: string): Promise<string> {
+    const f = this.#factory;
+    const port = this.#port;
+    if (!f.sessionHoldingInput || !port?.rewindPoints) return bound;
+    let points: RewindPoint[];
+    try {
+      points = port.rewindPoints().filter((p) => !p.inherited);
+    } catch {
+      return bound;
+    }
+    // Newest first; the last one may be the message that starts this spawn (not taken yet).
+    for (const p of points.slice(-2).reverse()) {
+      try {
+        const held = await f.sessionHoldingInput(f.inputIdFor?.(p.messageId) ?? p.messageId, port.cwd, bound);
+        if (held === undefined) continue;
+        if (held !== bound) this.#warn('resuming the conversation that took the last message', held);
+        return held;
+      } catch (error) {
+        this.#warn('could not read the agent record', String((error as Error)?.message ?? error));
+        return bound;
+      }
+    }
+    return bound;
+  }
+
   async #ensureBackend(): Promise<AgentBackendSession> {
     if (this.#disposed) throw new Error('the session is closed');
     if (this.#backend) return this.#backend;
@@ -1393,18 +1782,55 @@ export class SessionRuntime {
     this.#restoreMode();
     this.#starting ??= (async () => {
       const f = this.#factory;
+      // M7 (R3.6): the record read decides first, so a spawn never runs ahead of what it shows.
+      await this.#recovery?.catch(() => undefined);
       const binding = port.latestBinding();
       const bound = binding?.sessionId;
       const derived = f.sessionIdFor?.(port.hostSessionId);
       const inherited = binding?.hostSessionId !== undefined && binding.hostSessionId !== port.hostSessionId;
       let start: OpenSessionOptions['start'];
-      if (binding && inherited && f.staticCapabilities.fork !== 'none') {
+      let startNotice: string | undefined;
+      const forkRan =
+        binding !== undefined &&
+        inherited &&
+        derived !== undefined &&
+        f.staticCapabilities.resume &&
+        (await f.sessionExists?.(derived, port.cwd)) === true;
+      if (forkRan) {
+        // M7: this fork already started once (its first turn ended before a reply was logged, for
+        // example a crash): its own record exists, so it resumes; forking again would drop that turn.
+        start = { kind: 'resume', sessionId: derived };
+        this.#restoreCode = false;
+      } else if (binding && inherited && f.staticCapabilities.fork !== 'none') {
         // D29: a host fork forks the backend session at the kept point; the source is left alone.
-        start = { kind: 'fork', fromSessionId: binding.sessionId };
-        if (derived !== undefined) start.newSessionId = derived;
-        if (binding.chainId !== undefined && f.staticCapabilities.fork === 'at-chain-point')
-          start.atChainId = binding.chainId;
-      } else if (bound !== undefined && f.staticCapabilities.resume) start = { kind: 'resume', sessionId: bound };
+        const fork: Extract<OpenSessionOptions['start'], { kind: 'fork' }> = {
+          kind: 'fork',
+          fromSessionId: binding.sessionId,
+        };
+        if (derived !== undefined) fork.newSessionId = derived;
+        if (binding.chainId !== undefined && f.staticCapabilities.fork === 'at-chain-point') {
+          fork.atChainId = binding.chainId;
+          // D29 (r3): the first dropped turn's input id, as a hint the backend checks itself.
+          let dropped: string | undefined;
+          try {
+            dropped = await port.forkDroppedMessage?.();
+          } catch (error) {
+            this.#warn('could not read the fork source', String((error as Error)?.message ?? error));
+          }
+          const hint = dropped === undefined ? undefined : (f.inputIdFor?.(dropped) ?? dropped);
+          if (hint !== undefined) fork.dropsTurnHint = hint;
+          // D30: "restore code and conversation": the files go back to before that turn ran.
+          if (this.#restoreCode) {
+            if (hint !== undefined) fork.restoreFilesAt = hint;
+            else
+              startNotice =
+                'The files were not restored: the turn after the branch point has no message of yours to restore to.';
+          }
+        }
+        this.#restoreCode = false;
+        start = fork;
+      } else if (bound !== undefined && f.staticCapabilities.resume)
+        start = { kind: 'resume', sessionId: await this.#conversationNow(bound) };
       else if (
         derived !== undefined &&
         (await f.sessionExists?.(derived, port.cwd)) === true &&
@@ -1458,7 +1884,9 @@ export class SessionRuntime {
       this.#mcp = undefined;
       this.#mcpFrom = 'none';
       if (trustNotice !== undefined) this.#live.notice = { level: 'warning', text: trustNotice, at: this.#now() };
+      else if (startNotice !== undefined) this.#live.notice = { level: 'warning', text: startNotice, at: this.#now() };
       this.#lastExit = undefined;
+      delete this.#lifecycle.restoreCodePending;
       this.#sent.clear();
       this.#tasks = new Set();
       this.#taskInfo.clear();
@@ -1642,6 +2070,10 @@ export class SessionRuntime {
         if (e.turn !== undefined && (this.#box || this.#wakeBuffer)) break;
         if (this.#usage.apply(e)) this.#notify();
         return;
+      case 'files-rewound':
+        // D30: a rewind fork's "restore code" ran on the new process before its first turn.
+        this.#noteRewind(e.inputId, e.result);
+        return;
       case 'interaction-done':
         // D43: a URL elicitation completed; its waiting card closes.
         this.#desk.done(e.id);
@@ -1700,7 +2132,7 @@ export class SessionRuntime {
   }
 
   #exit(e: Extract<BackendEvent, { type: 'exit' }>, from: AgentBackendSession): void {
-    const intended = this.#ending.has(from);
+    const intended = this.#ending.has(from) || e.reason === 'disposed' || e.reason === 'force-stopped';
     this.#lateStopped = false;
     this.#carryMode();
     this.#desk.dropAll(); // the process that asked is gone
@@ -1724,6 +2156,11 @@ export class SessionRuntime {
     if (!intended) {
       this.#lastExit = { at: this.#now(), duringTurn };
       if (e.error !== undefined) this.#lastExit.error = e.error;
+      if (e.reason !== undefined) this.#lastExit.reason = e.reason;
+      if (e.code !== undefined) this.#lastExit.code = e.code;
+      if (e.signal !== undefined) this.#lastExit.signal = e.signal;
+      // R3.6: what the agent recorded but never sent before it died is read back (no process).
+      this.#recovery = this.#recoverTail('crash');
     }
     const item: Item = intended ? { type: 'ended' } : e;
     if (this.#box) this.#box.push(item);
@@ -1863,7 +2300,7 @@ export class SessionRuntime {
   #binding(): Record<string, unknown> {
     const b: Record<string, unknown> = {
       backend: this.#factory.kind,
-      sessionId: this.#backend?.sessionId ?? '',
+      sessionId: this.#backend?.sessionId ?? this.#recoverySession ?? '',
       hostSessionId: this.#port?.hostSessionId ?? '',
     };
     const chain = this.#lastChainId;
@@ -1934,18 +2371,22 @@ export class SessionRuntime {
     const wake = input.wake && this.#wakeBuffer !== undefined;
     if (fresh.length === 0 && waiting.length === 0 && !wake)
       return input.userInputs.length > 0 ? { kind: 'completed' } : { kind: 'nothing' };
+    // M7 (R3.6): a turn that only shows replies read back from the agent's record needs no process.
+    const recoveryOnly = wake && this.#wakeRecovery && fresh.length === 0 && waiting.length === 0;
     this.#turnActive = true;
     this.#hadTurn = true;
     this.#idleSince = undefined;
-    let backend: AgentBackendSession;
+    let backend: AgentBackendSession | undefined;
     // Stop while the process starts: a trust question waiting for the user is declined (D73).
     const stopStart = () => this.#desk.stop(['trust']);
     signal.addEventListener('abort', stopStart, { once: true });
     try {
-      // D35 exact reset: a pending "back to my settings" restarts the idle process first.
-      if (this.#resetPending) await this.#resetIfIdle(true);
-      backend = await this.#ensureBackend();
-      await this.#applyChoices(backend);
+      if (!recoveryOnly) {
+        // D35 exact reset: a pending "back to my settings" restarts the idle process first.
+        if (this.#resetPending) await this.#resetIfIdle(true);
+        backend = await this.#ensureBackend();
+        await this.#applyChoices(backend);
+      }
     } catch (error) {
       this.#turnActive = false;
       this.#touchIdle();
@@ -1962,12 +2403,18 @@ export class SessionRuntime {
     this.#sink = sink;
     this.#requestStep = false;
     this.#lateStopped = false; // a new turn takes what comes; a late turn end has pendingInputs > 0
+    // A recovery the record read found while this turn started joins it, before its input.
+    if (this.#wakeBuffer === undefined && this.#pendingRecovery) this.#flushRecovery();
+    const recovering = this.#wakeRecovery && this.#wakeBuffer !== undefined;
     for (const e of this.#wakeBuffer ?? []) box.push(e);
     this.#wakeBuffer = undefined;
     this.#wakePending = false;
+    this.#wakeRecovery = false;
+    this.#recoveryTurn = recoveryOnly;
     // D26: a wake turn shows what woke it, once, in its first step (log-only for the agent).
-    this.#triggerPending = wake ? (this.#wakeText ?? this.#wakeSummary()) : undefined;
-    this.#triggerItems = wake ? (this.#wakeItems ?? [...this.#wakeNotes]).slice(-20) : [];
+    const triggered = wake || recovering;
+    this.#triggerPending = triggered ? (this.#wakeText ?? this.#wakeSummary()) : undefined;
+    this.#triggerItems = triggered ? (this.#wakeItems ?? [...this.#wakeNotes]).slice(-20) : [];
     this.#wakeText = undefined;
     this.#wakeItems = undefined;
     this.#wakeNotes = [];
@@ -1975,6 +2422,10 @@ export class SessionRuntime {
 
     let timer: ReturnType<typeof setTimeout> | undefined;
     const onAbort = () => {
+      if (!backend) {
+        box.push({ type: 'ended' }); // a recovery turn has no process to interrupt
+        return;
+      }
       // Stop = interrupt only (rule 6, D25). The process and its background tasks keep running.
       const queued = [...this.#sent.values()].some((s) => s.steer && !s.consumed);
       const cancelQueued = queued && backend.capabilities.cancelQueued;
@@ -1998,6 +2449,7 @@ export class SessionRuntime {
     try {
       let sent = 0;
       for (const u of fresh) {
+        if (!backend) break;
         this.#sent.set(u.id, { steer: false, consumed: false, claimed: true });
         try {
           await backend.send(u, 'next');
@@ -2012,7 +2464,7 @@ export class SessionRuntime {
         }
       }
       if (sendError !== undefined && sent === 0 && waiting.length === 0 && !wake) throw new Error(sendError);
-      for (const u of this.#earlySteers.splice(0)) this.#sendSteer(backend, u);
+      if (backend) for (const u of this.#earlySteers.splice(0)) this.#sendSteer(backend, u);
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
       for (;;) {
@@ -2045,9 +2497,15 @@ export class SessionRuntime {
       this.#usage.turnEnded();
       this.#touchIdle();
       // Events that arrived after the turn end belong to the agent's next, self-started turn.
-      const rest = box.drain().filter((i): i is BackendEvent => i.type !== 'stop-timeout' && i.type !== 'ended');
+      const rest = box
+        .drain()
+        .filter(
+          (i): i is BackendEvent => i.type !== 'stop-timeout' && i.type !== 'ended' && i.type !== 'recovered-end',
+        );
       const current = this.#backend;
       if (current) for (const e of rest) this.#route(e, current);
+      this.#recoveryTurn = false;
+      this.#flushRecovery(); // a recovery found during this turn opens its own turn now
       this.#notify();
     }
     this.#triggerPending = undefined;
@@ -2202,6 +2660,11 @@ export class SessionRuntime {
           return { kind: 'completed' };
         case 'ended':
           return { kind: 'interrupted' };
+        case 'recovered-end':
+          // The read-back steps are written; only a turn of their own ends here.
+          if (!this.#recoveryTurn) return undefined;
+          sink.closeStep();
+          return { kind: 'completed' };
         case 'exit':
           if (this.#forced) return { kind: 'interrupted' };
           return { kind: 'error', message: crashMessage(this.#factory.displayName, e.error) };

@@ -23,6 +23,7 @@ import type {
   FactoryCapabilities,
   MaskedConfig,
   OpenSessionOptions,
+  SessionTail,
   SettingsDefaults,
   TrustState,
 } from '@dsh-raw-agent/core';
@@ -43,7 +44,16 @@ import { createSpawner } from './spawn.js';
 import { ALLOW_BYPASS_OPTION, buildStartOptions } from './start-options.js';
 import { readSettingsDefaults } from './settings-defaults.js';
 import { readTrustState } from './trust.js';
-import { readSessionMainAgent, transcriptEvents, type TranscriptMessage } from './transcripts.js';
+import {
+  readSessionMainAgent,
+  transcriptEvents,
+  transcriptPaths,
+  type TranscriptMessage,
+  type TranscriptReadDeps,
+} from './transcripts.js';
+import { checkDropsTurn, FORK_SCAN_LIMIT_BYTES } from './lifecycle.js';
+import type { SpawnerOptions } from './spawn.js';
+import { sessionTail } from './session-tail.js';
 
 export const CLAUDE_KIND = 'claude-code';
 
@@ -67,6 +77,7 @@ export const CLAUDE_STATIC_CAPABILITIES: FactoryCapabilities = Object.freeze({
   needsProcess: ['agents', 'commands', 'side-question', 'mcp', 'context', 'usage', 'task-actions'],
   sideQuestionCommand: 'btw',
   mcpCommand: 'mcp',
+  rewindCommand: 'rewind',
   // Labels are ours (short picker names); descriptions are the CLI's own (MODE_DESCRIPTIONS).
   permissionModes: [
     { id: 'default', label: 'Ask before edits', description: MODE_DESCRIPTIONS.default },
@@ -148,7 +159,11 @@ export interface ClaudeFactoryOptions {
     exists(p: string): boolean;
     readHead?(p: string, maxBytes: number): string | undefined;
     listDir?(p: string): string[];
+    /** File size in bytes, or undefined when missing. */
+    size?(p: string): number | undefined;
   };
+  /** D75 orphan guard and spawn seams (tests). */
+  spawner?: SpawnerOptions;
   homedir?: string;
   /** Test seam for `readAgentTranscript`; defaults to the SDK's `getSubagentMessages` (a file read). */
   subagentMessages?: (sessionId: string, agentId: string, cwd: string) => Promise<TranscriptMessage[]>;
@@ -195,7 +210,17 @@ const nodeFs = {
   exists(p: string): boolean {
     return existsSync(p);
   },
+  size(p: string): number | undefined {
+    try {
+      return statSync(p).size;
+    } catch {
+      return undefined;
+    }
+  },
 };
+
+/** D70 (M7): how many of a folder's newest transcripts `sessionHoldingInput` reads at most. */
+const INPUT_SCAN_FILES = 64;
 
 export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): AgentBackendFactory {
   const readEnv = () => buildClaudeEnv(factoryOptions.env ? factoryOptions.env() : process.env).env;
@@ -205,6 +230,39 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     const env = readEnv();
     const files = claudeConfigFiles(cwd, { env, platform: process.platform, homedir: home() });
     return readSettingsDefaults(files, (p) => fs.readText(p), env);
+  };
+  const transcriptDeps = (env: TranscriptReadDeps['env'] = readEnv()): TranscriptReadDeps => ({
+    env,
+    platform: process.platform,
+    homedir: home(),
+    realpath: (p) => fs.realpath(p),
+    exists: (p) => fs.exists(p),
+    readHead: fs.readHead ?? readFileHead,
+    listDir: fs.listDir ?? listDir,
+  });
+  /** D28: the CLI's transcript for a session, when one exists (a file check, no process). */
+  const transcriptFile = (sessionId: string, cwd: string, env?: TranscriptReadDeps['env']): string | undefined =>
+    transcriptPaths(sessionId, cwd, transcriptDeps(env)).find((p) => fs.exists(p));
+  /**
+   * D29 (r3): pass the hint as `resumeDropsTurn` only when the source transcript shows exactly
+   * that one turn past the cut. A missing, too large or unreadable transcript gives a plain cut.
+   */
+  const validatedDropsTurn = (
+    start: Extract<OpenSessionOptions['start'], { kind: 'fork' }>,
+    cwd: string,
+    env: TranscriptReadDeps['env'],
+  ): string | undefined => {
+    const hint = start.dropsTurnHint;
+    if (start.atChainId === undefined || hint === undefined) return undefined;
+    const file = transcriptFile(start.fromSessionId, cwd, env);
+    if (file === undefined) return undefined;
+    const size = (fs.size ?? nodeFs.size)(file);
+    if (size !== undefined && size > FORK_SCAN_LIMIT_BYTES) return undefined;
+    const text = fs.readText(file);
+    if (text === undefined) return undefined;
+    const check = checkDropsTurn(text, start.atChainId, hint);
+    factoryOptions.debug?.('fork cut check', check);
+    return check.validated ? hint : undefined;
   };
   return {
     kind: CLAUDE_KIND,
@@ -228,15 +286,86 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
     },
     // D15 (r4): the agent the session was started with, so a resume passes the same `agent`.
     async sessionMainAgent(sessionId: string, cwd: string): Promise<string | undefined> {
-      return readSessionMainAgent(sessionId, cwd, {
-        env: readEnv(),
+      return readSessionMainAgent(sessionId, cwd, transcriptDeps());
+    },
+    // D28 (r3): a resume candidate is real only when the CLI wrote its transcript (D5 derived
+    // ids, a /clear id after a restart, D70). A plain file check, as `getSessionInfo` does.
+    async sessionExists(sessionId: string, cwd: string): Promise<boolean> {
+      return transcriptFile(sessionId, cwd) !== undefined;
+    },
+    // D28, D70 (M7 live): after `/clear` the CLI runs under a new id whose transcript starts with
+    // the typed command (its `uuid` is our input id); the host has no step to bind that id to.
+    // A file read: the preferred transcript first, then the newest ones in the same folder.
+    async sessionHoldingInput(inputId: string, cwd: string, prefer?: string): Promise<string | undefined> {
+      const needle = `"uuid":"${inputId}"`;
+      const holds = (file: string): string | undefined => {
+        const size = (fs.size ?? nodeFs.size)(file);
+        if (size !== undefined && size > FORK_SCAN_LIMIT_BYTES) return undefined;
+        const text = fs.readText(file);
+        if (text === undefined || !text.includes(needle)) return undefined;
+        for (const line of text.split('\n')) {
+          if (!line.includes(needle)) continue;
+          try {
+            const d = JSON.parse(line) as { type?: unknown; uuid?: unknown; sessionId?: unknown };
+            if (d.type === 'user' && d.uuid === inputId)
+              return typeof d.sessionId === 'string' ? d.sessionId : path.basename(file, '.jsonl');
+          } catch {
+            // a half-written line
+          }
+        }
+        return undefined;
+      };
+      const preferred = prefer === undefined ? undefined : transcriptFile(prefer, cwd);
+      if (preferred !== undefined) {
+        const hit = holds(preferred);
+        if (hit !== undefined) return hit;
+      }
+      const deps = transcriptDeps();
+      const dirs = [...new Set(transcriptPaths(prefer ?? inputId, cwd, deps).map((p) => path.dirname(p)))];
+      for (const dir of dirs) {
+        const files = deps
+          .listDir(dir)
+          .filter((n) => n.endsWith('.jsonl'))
+          .map((n) => path.join(dir, n))
+          .filter((p) => p !== preferred);
+        const mtime = (p: string) => {
+          try {
+            return statSync(p).mtimeMs;
+          } catch {
+            return 0;
+          }
+        };
+        files.sort((a, b) => mtime(b) - mtime(a));
+        for (const file of files.slice(0, INPUT_SCAN_FILES)) {
+          const hit = holds(file);
+          if (hit !== undefined) return hit;
+        }
+      }
+      return undefined;
+    },
+    // M7 (R3.6): the main-thread entries past the host log's chain point, from the CLI's own
+    // transcript (a file read, no process). The host shows what it never got.
+    async readSessionTail(sessionId: string, cwd: string, afterChainId: string): Promise<SessionTail> {
+      const empty = { events: [], prompts: [], notes: [], orphanResults: 0 };
+      const file = transcriptFile(sessionId, cwd);
+      if (file === undefined) return { status: 'no-record', ...empty };
+      const size = (fs.size ?? nodeFs.size)(file);
+      if (size !== undefined && size > FORK_SCAN_LIMIT_BYTES) return { status: 'too-large', ...empty };
+      const text = fs.readText(file);
+      if (text === undefined) return { status: 'no-record', ...empty };
+      const { found, ...rest } = sessionTail(text, afterChainId, Date.now());
+      return found ? { status: 'found', ...rest } : { status: 'no-cut', ...empty };
+    },
+    // D16, D30: what `open()` would decide for checkpoints, for the rewind dialog.
+    async fileRewindAvailable(cwd: string): Promise<boolean> {
+      const env = readEnv();
+      return decideFileCheckpointing({
+        env,
         platform: process.platform,
         homedir: home(),
-        realpath: (p) => fs.realpath(p),
-        exists: (p) => fs.exists(p),
-        readHead: fs.readHead ?? readFileHead,
-        listDir: fs.listDir ?? listDir,
-      });
+        cwd,
+        readText: (p) => fs.readText(p),
+      }).enabled;
     },
     // D49, D50: a child's transcript (SDK `getSubagentMessages`, a file read; no process).
     async readAgentTranscript(sessionId: string, ref: AgentRef, cwd: string): Promise<BackendEvent[]> {
@@ -260,7 +389,7 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         cwd: o.cwd,
         readText: deps.readText,
       });
-      const spawner = createSpawner(env);
+      const spawner = createSpawner(env, process.platform, factoryOptions.spawner);
       const abortController = new AbortController();
       o.signal.addEventListener('abort', () => abortController.abort(), { once: true });
 
@@ -298,17 +427,42 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         abortController,
       };
       if (o.trustAccepted) startInput.trustAccepted = o.trustAccepted;
+      let start = o.start;
+      // D28, D70: a resume candidate without a transcript (a /clear id the CLI has not written
+      // yet, a first turn that failed before any reply) starts as a new session under that id,
+      // so the binding stays right. `startedAs` then says 'new' (D82 r4).
+      if (start.kind === 'resume' && transcriptFile(start.sessionId, o.cwd, env) === undefined) {
+        const fresh: OpenSessionOptions['start'] = { kind: 'new', sessionId: start.sessionId };
+        if (start.mainAgent !== undefined) fresh.mainAgent = start.mainAgent;
+        factoryOptions.debug?.('resume candidate has no transcript; starting new under its id', start.sessionId);
+        start = fresh;
+      }
+      startInput.start = start;
+      // D29: the validated cut, and the plain cut to fall back to if the CLI refuses it.
+      let fallbackOptions: ReturnType<typeof buildStartOptions> | undefined;
+      if (start.kind === 'fork') {
+        const drops = validatedDropsTurn(start, o.cwd, env);
+        if (drops !== undefined) {
+          // Its own abort controller: closing the refused query aborts that query's controller,
+          // and a shared one would abort the plain restart before it starts (M7 live).
+          const fallbackAbort = new AbortController();
+          o.signal.addEventListener('abort', () => fallbackAbort.abort(), { once: true });
+          fallbackOptions = buildStartOptions({ ...startInput, abortController: fallbackAbort });
+          startInput.resumeDropsTurn = drops;
+        }
+      }
       const options = buildStartOptions(startInput);
 
-      const start = o.start;
       const sessionId =
         start.kind === 'new'
           ? (start.sessionId ?? newRequestId())
           : start.kind === 'resume'
             ? start.sessionId
             : (start.newSessionId ?? newRequestId());
-      if (start.kind === 'new' && start.sessionId === undefined) options.sessionId = sessionId;
-      if (start.kind === 'fork' && start.newSessionId === undefined) options.sessionId = sessionId;
+      for (const opts of fallbackOptions ? [options, fallbackOptions] : [options]) {
+        if (start.kind === 'new' && start.sessionId === undefined) opts.sessionId = sessionId;
+        if (start.kind === 'fork' && start.newSessionId === undefined) opts.sessionId = sessionId;
+      }
 
       const init: ConstructorParameters<typeof ClaudeBackendSession>[0] = {
         kind: CLAUDE_KIND,
@@ -331,7 +485,12 @@ export function createClaudeFactory(factoryOptions: ClaudeFactoryOptions = {}): 
         // D8: when the CLI dies, end what is left of its process group.
         onExit: () => spawner.killGroup('SIGTERM'),
         killGroup: () => spawner.killGroup('SIGKILL'),
+        // R3.6: the exit code, signal and the end of stderr for a clear exit reason.
+        exitInfo: () => spawner.exitInfo(),
       };
+      if (fallbackOptions) init.fallbackOptions = fallbackOptions;
+      // D30: "restore code" with a rewind fork; only when this process keeps checkpoints.
+      if (start.kind === 'fork' && start.restoreFilesAt !== undefined) init.restoreFilesAt = start.restoreFilesAt;
       if (factoryOptions.debug) init.debug = factoryOptions.debug;
       // D49: workflow transcript folders are read only under the CLI's own projects folder.
       init.projectsDir = path.join(claudeConfigDir(env, deps.homedir, process.platform), 'projects');

@@ -34,4 +34,11 @@ export interface HostActions {
   openChild?(address: ChildAddress): boolean;
   /** R6.1: open a child agent's session beside this one, in the right sidebar. */
   openChildAside?(address: ChildAddress): boolean;
+  /**
+   * D30 (M7): fork the session at an exact inclusive seq, as DSH's own Branch action does
+   * (`ctx.sessions.fork`). Resolves with the new session's id; rejects when DSH refuses.
+   */
+  forkSession?(sessionId: string, atSeq: number): Promise<string>;
+  /** Open a session in the main view (DSH's own navigation). */
+  openSession?(sessionId: string): boolean;
 }

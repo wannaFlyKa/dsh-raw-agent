@@ -180,10 +180,11 @@ export function modeSelect(info: SessionInfo): SelectModel {
 }
 
 /** A one-line status for the controls. */
-export function statusLine(info: SessionInfo): string | undefined {
+export function statusLine(info: SessionInfo, opts: { exitShown?: boolean } = {}): string | undefined {
   const v = info.view;
   if (v.choice.resetPending) return `Back to your settings after ${info.backend.displayName} restarts`;
-  if (v.state.lastExit && v.state.process === 'none')
+  // M7: the lifecycle banner shows the exit with a Restart button; the line does not repeat it.
+  if (v.state.lastExit && v.state.process === 'none' && !opts.exitShown)
     return `${info.backend.displayName} stopped${v.state.lastExit.error ? `: ${v.state.lastExit.error}` : ''}. Send a message to start it again.`;
   // The agent's own line (for example a model it refused and the model it used instead).
   if (v.live.notice) return `${info.backend.displayName}: ${v.live.notice.text}`;

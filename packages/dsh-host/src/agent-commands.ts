@@ -49,7 +49,9 @@ export type MenuPlacement =
   /** The side-question command (D54): claimed by the client source, never sent to the agent. */
   | 'side-question'
   /** The agent's MCP view command (D55): the bare command opens the plugin's MCP panel. */
-  | 'mcp-panel';
+  | 'mcp-panel'
+  /** The agent's rewind menu command (D30, M7): bare, it opens the plugin's rewind dialog. */
+  | 'rewind-panel';
 
 export interface MenuRow extends CommandInfo {
   menu: MenuPlacement;
@@ -67,7 +69,13 @@ export interface MenuPlan {
  */
 export function planCommandMenu(
   list: readonly CommandInfo[],
-  opts: { taken?: Iterable<string>; sideQuestionCommand?: string; mcpCommand?: string; displayName: string },
+  opts: {
+    taken?: Iterable<string>;
+    sideQuestionCommand?: string;
+    mcpCommand?: string;
+    rewindCommand?: string;
+    displayName: string;
+  },
 ): MenuPlan {
   const taken = new Set<string>([...DSH_KEPT_COMMANDS, ...(opts.taken ?? [])]);
   const seen = new Set<string>();
@@ -80,7 +88,8 @@ export function planCommandMenu(
     else if (taken.has(c.name)) {
       row.menu = 'taken';
       row.note = TAKEN_NOTE;
-    } else if (c.terminalOnly) row.menu = 'terminal-only';
+    } else if (c.name === opts.rewindCommand) row.menu = 'rewind-panel';
+    else if (c.terminalOnly) row.menu = 'terminal-only';
     else if (c.name === opts.mcpCommand) row.menu = 'mcp-panel';
     rows.push(row);
   }

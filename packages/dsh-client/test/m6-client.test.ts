@@ -487,7 +487,7 @@ describe('local command outputs (R7.2)', () => {
     expect(clearedText('Agent')).toBe('Conversation cleared — Agent starts fresh here');
   });
 
-  it('draws the /clear divider and the compact marker', async () => {
+  it('leaves the /clear divider and the compact marker to the typed command (M7)', async () => {
     const stores = new SessionStores(api({ s: info() }));
     const store = stores.get('s');
     await store.refresh();
@@ -495,8 +495,8 @@ describe('local command outputs (R7.2)', () => {
       renderToStaticMarkup(
         React.createElement(LocalCommandView, { data: { seq: 1, name }, sessionId: 's', store, api: api({}) }),
       );
-    expect(draw('clear')).toContain('Conversation cleared — Agent starts fresh here');
-    expect(draw('compact')).toContain('Conversation compacted');
+    expect(draw('clear')).toBe('');
+    expect(draw('compact')).toBe('');
     expect(draw('help')).toBe('');
     // The agent's text is drawn by our node: plain columns monospaced, `$` kept as written.
     const usage = renderToStaticMarkup(

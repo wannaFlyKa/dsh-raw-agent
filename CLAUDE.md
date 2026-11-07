@@ -71,7 +71,7 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **DSH composer chain order:** DSH tries `conversation.composer` entries in ascending priority. ui-subagent's read-only child composer is at -10, so our child ask composer must sit below it (-20) and match only our own kind.
 - **Child asks:** a child session has its own (empty) client store. Keep asks published on a child in a separate map, or the child's store removes the parent's publication on every poll.
 - **Child usage numbers:** the last `task_progress` comes early. Use the `task_notification`'s final `usage`, and never show a finished child's run time below its wall time.
-- **SIGKILL of DSH leaves the CLI running** while a background task runs (it re-parents to pid 1 and may run one wake turn by itself). A normal stop or restart is clean. Open: D75 pid check.
+- **SIGKILL of DSH leaves the CLI running** while a background task runs (it re-parents to pid 1 and may run one wake turn by itself). A normal stop or restart is clean. Handled by the D75 orphan guard (one `node -e` watcher per CLI); live, no CLI is left about 3 s after the kill.
 - **DSH's job-list Stop needs two presses** (arm, then confirm). A live driver that presses once only arms it.
 - **Track an input only after its SDK message is built.** A send that throws after `tracker.sent()` leaves a pending id, and every later turn end then waits for it forever.
 - **Workflow transcripts:** the Workflow launch result names `<session>/subagents/workflows/wf_…` before the CLI creates that folder. Keep the folder pending and check it again at each read; never give up after one failed check.
@@ -87,7 +87,12 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **MCP toggle:** the CLI's `mcp_toggle` writes `disabledMcpServers` in `~/.claude.json` itself, as the TUI's `/mcp` does. That is the CLI's write, not ours; tell the user.
 - **`/btw` answers carry no usage** (`side_question` replies have only `response` and `synthetic`), so a warm cache cannot be measured from the reply.
 - **CLI 2.1.318 has no Grep, Glob or TodoWrite tool** in `init.tools`. Their views can be checked only by unit tests.
-- **`/compact` output and `/clear`** come as a CLI user frame, so no compacted or cleared marker draws in the chat yet (known gap).
+- **`/compact` output and `/clear`** come as a CLI user frame with no assistant message, so our markers anchor on the user's typed command message (D70).
+- **`/clear` has no step**, so no binding holds the new conversation id. A resume after a restart must look it up with `sessionHoldingInput` (D28); the CLI writes the new transcript at once.
+- **`resumeDropsTurn` refusal** comes as a boot `result error_during_execution`. The plain-cut restart needs its own `AbortController` (closing the refused query aborts the old one) and must get the session's model, effort and mode choices again, or it runs on the settings model (D29).
+- **The real `rewind_files` answer** (CLI 2.1.318) is only `{canRewind, skippedLinks}`. Run a dry run first to get the file list and line counts (D30). A forked process can restore the source's checkpoints.
+- **DSH offers no Branch button on an aborted (stopped) turn.** A fork right after a Stop goes through our rewind dialog.
+- **DSH 0.2.2-rc.1 stores attached files with `"` replaced by `_`**, so a path with both a space and a `"` does not reach us from the UI (the unit test still covers it).
 
 ## 5. Development workflow
 
@@ -146,4 +151,6 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live workflow approval:** a Workflow launch asks permission only outside `auto`/bypass modes. Test it in `default` mode.
 - **Live usage checks:** a wrapper that `tee`s the CLI's stdout (same `executablePath` trick) captures its `result`, `rate_limit_event` and `compact_boundary` frames for comparison with our panel. This machine has only Bedrock auth; subscription limits are unit-tested only.
 - **Live command checks:** set `executablePath` to a `tee` wrapper and compare the CLI's stdin lines with what was typed; a menu open on Enter replaces the line with the picked row (for example `/cost` becomes `/usage`).
+- **Live rewind refusal test:** a `tee` wrapper (`executablePath`) that replaces the `--resume-drops-turn` value with a bogus id once forces the CLI's refusal. Restore `cordis.patch.yml` afterwards.
+- **Live crash test:** match the test CLI by binary and cwd before `kill -9` (other `claude` processes run on this machine, and a `pgrep -f` can match the driver's own command line).
 - **Workflow agents:** a single agent cannot rewrite a very large file (100 KB+) in one write; it silently fails. Ask for targeted edits and a grep check afterwards.

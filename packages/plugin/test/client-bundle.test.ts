@@ -65,6 +65,8 @@ describe('client bundle (module-loader format)', () => {
       'register conversation.session.header.actions',
       'conversation.composer.dock',
       'register conversation.composer.dock',
+      'conversation.composer.dock', // M7: the lifecycle banner
+      'register conversation.composer.dock',
       'conversation.input.left',
       'register conversation.input.left',
     ]);

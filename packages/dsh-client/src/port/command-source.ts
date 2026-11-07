@@ -7,6 +7,8 @@
 //   panel's route and nothing reaches the agent or either log (D54).
 // - It claims the bare MCP command (`/mcp`) and opens our MCP panel, as the terminal app opens its
 //   own (D55); with words after it the line goes to the agent.
+// - It claims the bare rewind command (`/rewind` and its aliases) and opens our rewind dialog
+//   (D30, M7): the terminal app's rewind menu does not run outside it.
 // DSH touch point: the `inputTriggers` service (`P/dsh-client-ui-input-trigger` InputTriggerSource;
 // claims follow `P/dsh-client-ui-conversation` `CommandClaim`).
 
@@ -128,6 +130,15 @@ export function agentCommandSource(stores: SessionStores, api: RawAgentApi): Age
       return Promise.resolve({ kind: 'success' });
     },
   });
+  const rewindClaim = (sessionId: string, name: string): SourceClaim => ({
+    name,
+    token: `/${name} `,
+    attachments: false,
+    submit() {
+      stores.get(sessionId).requestPanel('rewind');
+      return Promise.resolve({ kind: 'success' });
+    },
+  });
   const displayNameOf = (a: CommandsAnswerWire) => a.displayName ?? 'the agent';
 
   return {
@@ -172,6 +183,8 @@ export function agentCommandSource(stores: SessionStores, api: RawAgentApi): Age
       }
       if (cmd.name === a.mcpCommand && cmd.rest === '' && (envelope?.attachments ?? 0) === 0)
         return { claim: mcpClaim(session.sessionId, cmd.name) };
+      if (isRewindName(a, cmd.name) && cmd.rest === '' && (envelope?.attachments ?? 0) === 0)
+        return { claim: rewindClaim(session.sessionId, cmd.name) };
       return undefined; // every other line is plain text: the agent runs it (D52)
     },
     async matchClaim(session, token) {
@@ -183,4 +196,13 @@ export function agentCommandSource(stores: SessionStores, api: RawAgentApi): Age
       void answerOf(session.sessionId);
     },
   };
+}
+
+/** The rewind command's name or one of its aliases, as the agent lists them (D30, M7). */
+export function isRewindName(answer: CommandsAnswerWire, name: string): boolean {
+  const cmd = answer.rewindCommand;
+  if (cmd === undefined) return false;
+  if (name === cmd) return true;
+  const row = answer.rows.find((r) => r.name === cmd);
+  return (row?.aliases ?? []).includes(name);
 }

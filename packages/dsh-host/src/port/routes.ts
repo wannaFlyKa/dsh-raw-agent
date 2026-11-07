@@ -110,6 +110,13 @@ export const WORKFLOW_AGENT_STOP_ROUTE = '/api/raw-agent/workflow-agent-stop';
 /** R6.2: the output of one of the session's own background shells or monitors (`?session=…&task=…`). */
 export const TASK_OUTPUT_ROUTE = '/api/raw-agent/task-output';
 
+/** M7 (D30): the rewind dialog's facts (`?session=…`). Never spawns. */
+export const REWIND_ROUTE = '/api/raw-agent/rewind';
+/** M7 (D30): "restore code" at a fork's first start (`?session=<fork>&on=1|0`). */
+export const REWIND_RESTORE_ROUTE = '/api/raw-agent/rewind-restore';
+/** M7 (D30): "Restore code" in place (`?session=…&message=<host message id>&dryRun=1`). */
+export const REWIND_FILES_ROUTE = '/api/raw-agent/rewind-files';
+
 /** M5 (D58-D60): the usage panel's data (`?session=…`). Reads the live process only. */
 export const USAGE_ROUTE = '/api/raw-agent/usage';
 /** M5 (D59): the context pill and breakdown (`?session=…&detail=summary|full`). Never spawns. */
@@ -279,9 +286,79 @@ export function lifecycleRoutes(registry: SessionRegistry, controls?: SessionCon
         return { status: 200, body: found };
       }),
     },
+    ...rewindRoutes(registry),
     ...usageRoutes(registry),
     ...commandRoutes(registry),
     ...(controls ? sessionControlRoutes(registry, controls) : []),
+  ];
+}
+
+/**
+ * M7 rewind routes (D30). A session id names only a runtime the registry holds (D62). None starts
+ * a process; "Restore code" in place needs the live process and is refused otherwise. No file
+ * path comes from the request: a message id names a turn, and the agent restores its own
+ * checkpoints.
+ */
+export function rewindRoutes(registry: SessionRegistry): FetchRoute[] {
+  const missing = () => json(404, { error: 'not a session of this plugin' });
+  const lookup = (request: Request) => {
+    const url = new URL(request.url);
+    const id = url.searchParams.get('session');
+    return { url, id, runtime: id ? registry.get(id) : undefined };
+  };
+  const guard = async (fn: () => Promise<Response>) => {
+    try {
+      return await fn();
+    } catch (e) {
+      return json(500, { error: String((e as Error)?.message ?? e) });
+    }
+  };
+  return [
+    {
+      path: REWIND_ROUTE,
+      methods: ['GET'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.rewindOptions !== 'function') return json(409, { error: 'this runtime cannot rewind' });
+          return json(200, await runtime.rewindOptions());
+        }),
+    },
+    {
+      path: REWIND_RESTORE_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { url, id, runtime } = lookup(request);
+          if (!id) return json(400, { error: 'missing session' });
+          if (!runtime) return missing();
+          if (typeof runtime.requestCodeRestore !== 'function')
+            return json(409, { error: 'this runtime cannot rewind' });
+          const on = url.searchParams.get('on') !== '0';
+          const r = runtime.requestCodeRestore(on);
+          return json(r.ok ? 200 : 409, r);
+        }),
+    },
+    {
+      path: REWIND_FILES_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      fetch: (request) =>
+        guard(async () => {
+          const { url, id, runtime } = lookup(request);
+          const message = url.searchParams.get('message');
+          if (!id || !message || message.length > 256) return json(400, { error: 'missing session or message' });
+          if (!runtime) return missing();
+          if (typeof runtime.rewindFiles !== 'function') return json(409, { error: 'this runtime cannot rewind' });
+          const r = await runtime.rewindFiles(message, url.searchParams.get('dryRun') === '1');
+          const status = r.ok ? 200 : r.code === 'failed' ? 502 : 409;
+          return json(status, r);
+        }),
+    },
   ];
 }
 

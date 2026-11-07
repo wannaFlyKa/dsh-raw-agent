@@ -40,8 +40,11 @@ export interface SessionSnapshot {
    * A panel the `/` source asked to open (the bare MCP command, D55): the controls open it when
    * `seq` changes. Browser state only; nothing is sent.
    */
-  panelRequest?: { panel: 'mcp'; seq: number };
+  panelRequest?: { panel: PanelName; seq: number };
 }
+
+/** The panels the `/` source can open: MCP (D55) and rewind (D30, M7). */
+export type PanelName = 'mcp' | 'rewind';
 
 export interface PollTimings {
   ready: number;
@@ -390,9 +393,17 @@ export class SessionControlStore {
   }
 
   /** "Start <displayName>" (D4): spawn without a message, for controls that need a process. */
-  /** Ask the controls of this session to open one of our panels (D55: the bare MCP command). */
-  requestPanel(panel: 'mcp'): void {
+  /** Ask the controls of this session to open one of our panels (D55 `/mcp`, D30 `/rewind`). */
+  requestPanel(panel: PanelName): void {
     this.#set({ panelRequest: { panel, seq: (this.#snapshot.panelRequest?.seq ?? 0) + 1 } });
+  }
+
+  /**
+   * Show a line in this session's controls until its process state changes (the same life as a
+   * choice's note). Browser state only.
+   */
+  showNote(text: string): void {
+    this.#set({ note: text, noteProcess: this.#snapshot.info?.view.state.process });
   }
 
   async start(): Promise<void> {

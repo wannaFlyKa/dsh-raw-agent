@@ -127,6 +127,15 @@ export {
   SETTINGS_CHOICE,
   STOP_GRACE_MS,
   crashMessage,
+  recoveryTrigger,
+  recoveryItems,
+  endedByStopNotice,
+  childForkNotice,
+  type LifecycleView,
+  type RecoveryCause,
+  type RewindOptions,
+  type RewindFilesAnswer,
+  type RewindPoint,
   imageUnavailableText,
   type SinkResultContent,
   type RuntimeState,
@@ -144,6 +153,15 @@ export {
   type CommandsAnswer,
   CONTEXT_REPORT_MIN_MS,
 } from './driver.js';
+export {
+  forkCut,
+  droppedHumanMessage,
+  tasksEndedByStop,
+  rewindPoints,
+  REWIND_TEXT_MAX,
+  REWIND_POINTS_MAX,
+  type ForkCut,
+} from './port/lifecycle.js';
 export {
   UsageBoard,
   USAGE_TURNS_KEPT,

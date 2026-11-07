@@ -3,7 +3,7 @@
 // Phase 3 spike subset. Every member keeps its final §7.2 name and shape; the members that
 // the spike does not emit yet are listed at the end as a comment and are added in place later.
 
-import type { AgentRef, CommandInfo, ContextUsage, McpServerInfo } from './backend.js';
+import type { AgentRef, CommandInfo, ContextUsage, FileRewindResult, McpServerInfo } from './backend.js';
 import type { AuthInfo, CostLabel, PlanLimits, TurnUsage, UsageTotals } from './usage.js';
 
 /** A content block as the DSH writer stores it. `arguments` is the exact JSON string (D21). */
@@ -292,7 +292,27 @@ export type BackendEvent =
    * always 'pending' at start). Read `controls.mcpStatus()` for the live state.
    */
   | { type: 'mcp-status'; servers: McpServerInfo[] }
-  | { type: 'exit'; error?: string };
+  /**
+   * D30 (M7): the outcome of a fork's `restoreFilesAt` (files put back before the first turn).
+   */
+  | { type: 'files-rewound'; inputId: string; result: FileRewindResult }
+  /**
+   * The process ended (R3.6). `reason`: 'disposed' and 'force-stopped' were asked for; 'ended'
+   * means the agent stopped by itself with success; 'crashed' means it failed or was killed.
+   * `error` is a plain sentence for the user (with the agent's last error output when it wrote
+   * any). Absent for an asked-for end.
+   */
+  | {
+      type: 'exit';
+      error?: string;
+      reason?: ExitReason;
+      /** The process exit code, when it exited. */
+      code?: number;
+      /** The signal that ended it, when one did (POSIX names). */
+      signal?: string;
+    };
+
+export type ExitReason = 'disposed' | 'force-stopped' | 'ended' | 'crashed';
 
 /** R7.2: what a local command step is. */
 export interface LocalCommandInfo {

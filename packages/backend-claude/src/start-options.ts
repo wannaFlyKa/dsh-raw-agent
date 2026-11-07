@@ -22,6 +22,11 @@ export interface StartOptionsInput {
   onElicitation: OnElicitation;
   spawn: (options: SpawnOptions) => SpawnedProcess;
   abortController: AbortController;
+  /**
+   * D29 (r3): a fork's validated cut, set only after the source transcript shows that exactly this
+   * one turn lies past the cut (`checkDropsTurn`). Never set from the hint alone.
+   */
+  resumeDropsTurn?: string;
 }
 
 /** Fields we pass that the SDK types do not declare yet (D9). */
@@ -80,7 +85,9 @@ export function buildStartOptions(input: StartOptionsInput): ClaudeStartOptions 
       if (start.newSessionId !== undefined) o.sessionId = start.newSessionId;
       if (start.atChainId !== undefined) o.resumeSessionAt = start.atChainId;
       if (start.mainAgent !== undefined) o.agent = start.mainAgent;
-      // resumeDropsTurn (D29) needs the transcript turn count; not in the spike, so never passed.
+      // D29: only with a cut point, and only when the factory validated the hint.
+      if (start.atChainId !== undefined && input.resumeDropsTurn !== undefined)
+        o.resumeDropsTurn = input.resumeDropsTurn;
       break;
   }
   return o;

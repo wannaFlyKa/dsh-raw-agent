@@ -19,6 +19,9 @@ import { WorkflowNodeView } from '../ui/workflow-panel.js';
 import type { ToolViewPack } from '@dsh-raw-agent/core';
 import { localCommandOf, messageText, type LocalCommandData } from '../commands-model.js';
 import { LocalCommandText, LocalCommandView } from '../ui/local-command.js';
+import { commandMarkerOf, type CommandMarker } from '../lifecycle-model.js';
+import { CommandMarkerView } from '../ui/command-marker.js';
+import { LifecycleBanner } from '../ui/lifecycle-banner.js';
 import { agentCommandSource } from './command-source.js';
 import { registerToolViews } from './tool-views.js';
 
@@ -466,6 +469,10 @@ export const CONTEXT_PILL_ENTRY_ID = 'raw-agent-context';
 /** After DSH's token pill, where the ring sat. */
 export const CONTEXT_PILL_ORDER = 2;
 
+/** M7: the lifecycle banner, in the same dock, before DSH's stat pills and our context pill. */
+export const LIFECYCLE_ENTRY_ID = 'raw-agent-lifecycle';
+export const LIFECYCLE_ORDER = -1;
+
 /** Title-adjacent session actions of the session header (`P/dsh-client-ui-conversation` slots). */
 export const AGENTS_SLOT = 'conversation.session.header.actions';
 export const AGENTS_ENTRY_ID = 'raw-agent-agents';
@@ -704,6 +711,83 @@ export function LocalCommandNode(props: {
   );
 }
 
+// --- D70, M7: the /clear divider and the /compact marker on the typed command -------------------
+
+/** DSH's human message event; our marker reads only its text and never claims it. */
+export const USER_MESSAGE_EVENT = 'user/message';
+export const COMMAND_MARKER_NODE_KIND = 'raw-agent-command-marker';
+export const COMMAND_MARKER_DEFINITION_KIND = 'raw-agent-command-marker';
+
+interface MarkerContext {
+  key: string;
+  id: string;
+  state?: CommandMarker;
+  start?: { location?: unknown };
+  matches: Array<{ location?: unknown }>;
+}
+
+/**
+ * A Chat-target Definition on the typed `/clear` (`/reset`, `/new`) and `/compact` messages. The
+ * agent answers both with no message of its own (CLI 2.1.318), so the typed line is the anchor.
+ * It never claims the event (`exclusive` unset): DSH still draws the user's message. The node
+ * draws only in our sessions (the renderer checks our store). Group position `turn`, as the
+ * local command node, so the divider is not folded away with the turn's process.
+ */
+/** The marker of a human `user/message` whose only part is a typed command (structural). */
+export function markerOfEvent(event: {
+  type: string;
+  seq: number;
+  time: number;
+  data: unknown;
+}): CommandMarker | undefined {
+  if (event.type !== USER_MESSAGE_EVENT) return undefined;
+  const m = event.data as { source?: { kind?: unknown }; content?: unknown } | undefined;
+  if (m?.source?.kind !== 'user' || !Array.isArray(m.content) || m.content.length !== 1) return undefined;
+  const b = m.content[0] as { type?: unknown; text?: unknown } | undefined;
+  if (b?.type !== 'text' || typeof b.text !== 'string') return undefined;
+  return commandMarkerOf(b.text, event.seq, event.time);
+}
+
+export function commandMarkerDefinition(): Record<string, unknown> {
+  return {
+    kind: COMMAND_MARKER_DEFINITION_KIND,
+    target: 'chat',
+    match: (event: { type: string; seq: number; time: number; data: unknown }) => {
+      return markerOfEvent(event) ? { id: `marker-${event.seq}`, role: 'start' } : null;
+    },
+    start: (_context: unknown, match: { event: { type: string; seq: number; time: number; data: unknown } }) =>
+      markerOfEvent(match.event),
+    update: (context: MarkerContext) => context.state,
+    buildViewNode: (context: MarkerContext) => {
+      if (context.state === undefined) return null;
+      return {
+        key: context.key,
+        kind: COMMAND_MARKER_NODE_KIND,
+        id: context.id,
+        target: 'chat',
+        anchorSeq: context.state.seq,
+        location: context.start?.location ?? context.matches[0]?.location ?? { kind: 'unresolved' },
+        visibility: 'visible',
+        groupTree: LOCAL_COMMAND_GROUP_TREE,
+        data: context.state,
+      };
+    },
+  };
+}
+
+/** The keyed chat renderer of our marker node. */
+export function CommandMarkerNode(props: {
+  node?: { data?: CommandMarker };
+  sessionId?: string;
+  stores?: SessionStores;
+  readers?: UsageReaders;
+}): React.ReactElement | null {
+  const data = props.node?.data;
+  if (!data || !props.sessionId || !props.stores) return null;
+  const reader = data.kind === 'compacted' ? props.readers?.get(props.sessionId) : undefined;
+  return <CommandMarkerView marker={data} store={props.stores.get(props.sessionId)} {...(reader ? { reader } : {})} />;
+}
+
 interface UiConversationService {
   events?: { register(definition: Record<string, unknown>): () => void };
 }
@@ -800,6 +884,20 @@ export function hostActions(ctx: ClientContext): HostActions {
       const s = sidebar();
       if (typeof s?.openResource !== 'function') return false;
       s.openResource(childChatAddress(address), { kind: CHILD_CHAT_TAB_KIND, preferNewPane: true });
+      return true;
+    },
+    async forkSession(sessionId, atSeq) {
+      // DSH's own Branch action (`P/dsh-client-ui-chat/lib/client.js:15514-15528`): an exact
+      // inclusive cut, the title counted up, then the branch opens.
+      const sessions = ctx.get('sessions') as
+        { fork?(o: { sessionId: string; atSeq?: number; increaseTitle?: boolean }): Promise<string> } | undefined;
+      if (typeof sessions?.fork !== 'function') throw new Error('DSH offers no branch action here');
+      return sessions.fork({ sessionId, atSeq, increaseTitle: true });
+    },
+    openSession(sessionId) {
+      const ws = ctx.get('uiWorkspace') as { openSession?(id: unknown): void } | undefined;
+      if (typeof ws?.openSession !== 'function') return false;
+      ws.openSession(sessionId);
       return true;
     },
   };
@@ -935,6 +1033,14 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
         LocalCommandNode as React.ComponentType<never>,
       ),
     );
+    // D70, M7: the /clear divider and the /compact marker on the typed command.
+    scope.effect?.(() => events.register(commandMarkerDefinition()), 'raw-agent: command markers');
+    scope.slots.inject('conversation.chat.node', () =>
+      scope.slots.register(
+        { name: 'conversation.chat.node', key: COMMAND_MARKER_NODE_KIND, inject: () => ({ stores, readers }) },
+        CommandMarkerNode as React.ComponentType<never>,
+      ),
+    );
   });
   // D19: the backends' tool views, drawn only in sessions of their backend (and their children).
   if (options.toolViews && options.toolViews.length > 0) registerToolViews(ctx.slots, options.toolViews, stores, links);
@@ -962,6 +1068,18 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       ContextPill as React.ComponentType<never>,
     ),
   );
+  // M7 (R3.6): the crash or exit banner with Restart, and the fork and recovery notes.
+  ctx.slots.inject(CONTEXT_PILL_SLOT, () =>
+    ctx.slots.register(
+      {
+        name: CONTEXT_PILL_SLOT,
+        id: LIFECYCLE_ENTRY_ID,
+        order: LIFECYCLE_ORDER,
+        inject: (sessionId: string) => ({ store: stores.get(sessionId) }),
+      },
+      LifecycleBanner as React.ComponentType<never>,
+    ),
+  );
   ctx.slots.inject(CONTROLS_SLOT, () =>
     ctx.slots.register(
       {
@@ -973,6 +1091,7 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
           store: stores.get(sessionId),
           api,
           actions,
+          stores,
           // Read at render: the session service may arrive after the controls mount.
           asksInComposer: () => takeover.on,
         }),

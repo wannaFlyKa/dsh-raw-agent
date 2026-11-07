@@ -75,7 +75,9 @@ export type RegisteredRuntime = Pick<
       | 'mcpAction'
       | 'localOutput'
     >
-  >;
+  > &
+  // M7: optional for the same reason.
+  Partial<Pick<SessionRuntime, 'rewindOptions' | 'requestCodeRestore' | 'rewindFiles'>>;
 
 export class SessionRegistry {
   readonly apiVersion = 1;

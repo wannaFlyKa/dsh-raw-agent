@@ -139,7 +139,9 @@ export function commandRowText(r: CommandRowWire, displayName: string): { line: 
           ? `in the / menu; ${displayName} runs this only in its terminal app`
           : r.menu === 'mcp-panel'
             ? 'in the / menu; on its own it opens this MCP panel, with words it goes to the agent'
-            : 'opens the side panel; never sent to the conversation';
+            : r.menu === 'rewind-panel'
+              ? 'in the / menu; it opens the rewind dialog'
+              : 'opens the side panel; never sent to the conversation';
   return { line, where };
 }
 
@@ -247,6 +249,7 @@ export function sourceCandidates(answer: CommandsAnswerWire | undefined, query: 
     if (r.menu === 'taken') notes.push(r.note ?? 'taken by DSH in this session');
     if (r.menu === 'terminal-only') notes.push(`runs only in ${name}'s terminal app`);
     if (r.menu === 'mcp-panel') notes.push('on its own it opens the MCP panel');
+    if (r.menu === 'rewind-panel') notes.push('opens the rewind dialog');
     if (r.aliases && r.aliases.length > 0) notes.push(`also ${r.aliases.map((a) => `/${a}`).join(', ')}`);
     const c: CommandCandidate = { name: r.name };
     const d = [r.description, kind, ...notes].filter(Boolean).join(' · ');

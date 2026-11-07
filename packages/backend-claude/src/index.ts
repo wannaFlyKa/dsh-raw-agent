@@ -66,7 +66,6 @@ export {
   type InteractionAdapterOptions,
 } from './interactions.js';
 export { AskContext, ASK_CONTEXT_LIMIT, mcpServerOfTool, normalizeServerName } from './ask-context.js';
-export { createSpawner, type ClaudeSpawner } from './spawn.js';
 export { claudeConfigFiles, maskClaudeSettings, MASK, type ConfigFilesDeps } from './config-files.js';
 export { readTrustState, repositoryRoot, TRUST_QUESTION, UNTRUSTED_EFFECT, type TrustReadDeps } from './trust.js';
 export { loadSdk, resetSdkForTests, type SdkModule } from './sdk.js';
@@ -118,3 +117,21 @@ export {
   toMcpServerList,
   toSideAnswer,
 } from './commands.js';
+export {
+  checkDropsTurn,
+  dropsTurnRefusal,
+  refusalInText,
+  refusalNote,
+  describeExit,
+  stderrTail,
+  toFileRewindResult,
+  withPreview,
+  DROPS_TURN_REFUSAL_PREFIX,
+  FORK_SCAN_LIMIT_BYTES,
+  type CutCheck,
+  type ProcessExit,
+  type ExitDescription,
+} from './lifecycle.js';
+export { sessionTail } from './session-tail.js';
+export { startOrphanGuard, guardSettings, ORPHAN_GUARD_SCRIPT, type OrphanGuard } from './orphan-guard.js';
+export { createSpawner, STDERR_KEEP_BYTES, type ClaudeSpawner, type SpawnerOptions } from './spawn.js';

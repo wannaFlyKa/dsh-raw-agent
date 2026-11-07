@@ -10,6 +10,11 @@ export * from './agents-model.js';
 export * from './workflow-model.js';
 export * from './usage-model.js';
 export * from './commands-model.js';
+export * from './lifecycle-model.js';
+export { requestRestoreAtStart, type RestoreRetry } from './rewind-actions.js';
+export { RewindPanel, type RewindPanelProps } from './ui/rewind-panel.js';
+export { LifecycleBanner, type LifecycleBannerProps } from './ui/lifecycle-banner.js';
+export { CommandMarkerView, type CommandMarkerProps } from './ui/command-marker.js';
 export { UsageReader, UsageReaders, type UsageReadSnapshot } from './usage-reader.js';
 export {
   ContextPill,
@@ -72,6 +77,7 @@ export {
   POLL_MS,
   CHANNEL_RETRY_MS,
   type SessionSnapshot,
+  type PanelName,
   type TimerApi,
 } from './session-store.js';
 export { AskCard, AskPanel, PreviewView, PREVIEW_LINES, type AskCardProps } from './ui/ask-cards.js';
@@ -128,6 +134,14 @@ export {
   localCommandDefinition,
   LOCAL_COMMAND_GROUP_TREE,
   LocalCommandNode,
+  USER_MESSAGE_EVENT,
+  COMMAND_MARKER_NODE_KIND,
+  COMMAND_MARKER_DEFINITION_KIND,
+  commandMarkerDefinition,
+  markerOfEvent,
+  CommandMarkerNode,
+  LIFECYCLE_ENTRY_ID,
+  LIFECYCLE_ORDER,
   type WorkflowNodeData,
   type AskInteraction,
   type ComposerOwner,
@@ -156,4 +170,9 @@ export function createRawAgentClient(options: MountClientOptions & { name?: stri
     },
   };
 }
-export { agentCommandSource, COMMAND_SOURCE_NAME, type AgentCommandSource } from './port/command-source.js';
+export {
+  agentCommandSource,
+  isRewindName,
+  COMMAND_SOURCE_NAME,
+  type AgentCommandSource,
+} from './port/command-source.js';
