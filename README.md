@@ -22,7 +22,9 @@ See [docs/requirements.md](docs/requirements.md) for the full list.
 ## Install
 
 You need DSH `>=0.2.2-rc.1 <0.3.0-0`, Node.js 24.9 or newer, pnpm (through `corepack enable`), and your own `claude`,
-signed in. Use a profile name of your choice in place of `<profile>` (for example `web`).
+signed in. Put a web profile name in place of `<profile>` (for example `web`, which DSH ships). `dsh plugin` on a
+new profile name makes a profile without the web app. To use a new name, make it from the web template first:
+`dsh --profile <profile> --from-default-profile web --dump-config`.
 
 ### From the GitHub Release (recommended)
 

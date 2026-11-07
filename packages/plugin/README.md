@@ -15,8 +15,9 @@ with your settings, exactly as in the terminal.
 
 ## Install
 
-DSH installs plugins into a profile. Pick the profile you use (for example `web`) and add the tarball from the GitHub
-Release:
+DSH installs plugins into a profile. Pick the web profile you use (for example `web`) and add the tarball from the
+GitHub Release. A new profile name gets no web app; make it from the web template first
+(`dsh --profile <name> --from-default-profile web --dump-config`).
 
 ```sh
 dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.0/dsh-raw-agent-0.1.0.tgz

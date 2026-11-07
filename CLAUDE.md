@@ -182,6 +182,11 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live rewind refusal test:** a `tee` wrapper (`executablePath`) that replaces the `--resume-drops-turn` value with a bogus id once forces the CLI's refusal. Restore `cordis.patch.yml` afterwards.
 - **Live crash test:** Sonnet refuses a foreground `sleep 30` (it offers the background); ask for `python3 -c "import time; time.sleep(40)"` and watch for it under the CLI. Match the test CLI by binary and cwd before `kill -9` (other `claude` processes run on this machine, and a `pgrep -f` can match the driver's own command line).
 - **Re-adding a rebuilt tarball** of the same version (`dsh plugin add <tgz>` again) exits 0 but keeps the old `lib/` (the lockfile's old integrity wins). Run `dsh plugin remove` first, then `add`, and check the installed `lib/` before a live check.
+- **A new profile name from `dsh plugin add`** gets only `@deepseek-ai/dsh-base` (no web app: `dsh --profile <name>`
+  never listens, and our preset waits for `agentPresets`). Make a throwaway profile with
+  `dsh --profile <name> --from-default-profile web --dump-config` first, then `dsh plugin ... add`.
+- **The release URL install** (`dsh plugin add <release .tgz URL>`) was checked live in a fresh web-template profile:
+  with the README `overrides` block, `node_modules` is 6.3 MB (329 MB without) and the installed files equal the asset.
 - **Copying `.dsh-dev` for a parallel test:** its `node_modules/dsh-raw-agent` is a relative `link:` symlink; re-point it to the repo in the copy.
 - **Fresh profile drivers:** a profile with no workspace opens DSH's folder dialog first; before the first message our model picker shows only "Start Claude Code to list models", and the start asks the trust question.
 - **Windows tests:** the code joins paths with the OS separator, so a test file seam must compare with `path.join(...)` (or normalise `\` to `/` for recorded POSIX fixture paths), never a hard-coded `/a/b` string. CI run 1 failed 8 tests on Windows for this reason only.
