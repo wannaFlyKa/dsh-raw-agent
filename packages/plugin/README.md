@@ -134,7 +134,8 @@ routes are DSH routes: they use DSH's own sign-in and trusted-host checks, and n
 ## For plugin authors
 
 Other DSH plugins can restyle this plugin's UI and use its services: Host `rawAgent` and Client `rawAgentClient` (API
-version 1). Sending text to Claude Code without a keypress needs a grant the user creates in **Agent plugin access**. The
+version 1). Sending text to Claude Code without a keypress needs a grant the user creates in **Agent plugin access**. DSH keeps
+the grant (only its hash) in its own storage, so it still works after a DSH restart until the user revokes it. The
 types ship with this package; use them with `import type`:
 
 ```ts

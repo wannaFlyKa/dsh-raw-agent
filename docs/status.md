@@ -17,6 +17,8 @@ Status values:
 - **deferred**: moved out on purpose, with a reason.
 - **unverified**: built, but not checked live.
 
+Count: 40 rows done, 3 partial (R1.3, R6.3, R8.3), none deferred.
+
 The requirement texts and checks are in [requirements.md](requirements.md). Design decisions (D-numbers) are in
 [architecture.md](architecture.md).
 
@@ -29,8 +31,8 @@ The requirement texts and checks are in [requirements.md](requirements.md). Desi
 | R1.3 Never write settings; quick access to the three files | partial | The settings file times were unchanged after every run. The "Settings files" panel lists all three files with masked previews, reveal, copy path, open in DSH preview, open in terminal, and "which file sets each key". | DSH has no text editor, and the plugin must not write. The preview is read-only, so editing goes through the DSH terminal tab and a copied `cd` (D63). |
 | R1.4 UI choices are session only; the default is the user's settings | done | A session with no choice ran the settings model, effort and mode, with no `--model`, `--effort` or `--permission-mode` flag. A model pick went through `setModel` and did not change another session or the DSH profile default. A mode pick changed only its own session. After a fix, the effort picker names the level the CLI reports it applies ("your settings (xhigh; running: medium)"), and it follows a typed `/effort high`. | — |
 | R2.1 System prompt is the preset with no append | done | The transcript's prompt snapshot was identical to a plain `claude -p` from the same folder, with no DSH or plugin text. | Note: a model picked before the first message is applied with `setModel` after the start, so the CLI builds the prompt for the settings model. This matches `claude -p`, not `claude --model <picked>`. |
-| R2.2 Only typed or attached text reaches the model | done | Every user entry in the transcripts equals text typed in the UI, an attachment, or the CLI's own tool results and texts. A search of every test transcript found no plugin text and no wake notice. | Granted plugin messages (R9.2) reach the CLI on the same path as typed text; this is a documented, user-granted trade-off (maintainer Q2). |
-| R2.3 No forced tools, env flags or settings layers | partial | The CLI arguments carry only the SDK's fixed flags and the three setting sources; no `--settings`, model or tools flags. | Two plugin-set env variables restore TUI defaults: question previews in Markdown (D13) and file checkpointing (D16). They wait on maintainer questions Q4 and Q5. |
+| R2.2 Only typed or attached text reaches the model | done | Every user entry in the transcripts equals text typed in the UI, an attachment, or the CLI's own tool results and texts. A search of every test transcript found no plugin text and no wake notice. | Granted plugin messages (R9.2) reach the CLI on the same path as typed text; this is a documented, user-granted trade-off (maintainer Q2: yes). |
+| R2.3 No forced tools, env flags or settings layers | done | The CLI arguments carry only the SDK's fixed flags and the three setting sources; no `--settings`, model or tools flags. | Two plugin-set env variables restore TUI defaults: question previews in Markdown (D13) and file checkpointing (D16). The maintainer accepted both as TUI-default restorations (Q4, Q5). |
 | R2.4 Env passed through; only host session variables stripped | done | With fake host Claude Code variables and the user's own tokens in DSH's env, the CLI got every user variable (including the user's own `DSH_*` tokens and keys) and none of the host variables. | — |
 | R2.5 No extra `claude` processes | done | One `claude` per started session, none before a session starts. No transcripts beyond the sessions' own (no title or probe runs). The only other child is one small orphan-guard watcher per CLI (D75), which is not a `claude` run. | — |
 | R3.1 One process per session; resume after a DSH restart | done | After a DSH restart the next message resumed the same Claude session, and Claude remembered a word from turn 1. | — |
@@ -62,7 +64,7 @@ The requirement texts and checks are in [requirements.md](requirements.md). Desi
 | R8.3 Subscription limits; API key, Bedrock and Vertex cost | partial | Bedrock: cost shown as an estimate at list price, "no plan limits for this account", no fake limit bars. | Only Bedrock auth is available on the test machine. Subscription plan limits are covered by unit tests on recorded frame shapes only; API key and Vertex auth were not tested. |
 | R8.4 DSH's own meters fed correct numbers | done | DSH's token meter and cache-hit % equal the log and transcript sums. TTFT is fed for timed steps; DSH's native context ring is hidden. Two fixes keep DSH's speed figures honest: a step with a decode window under 500 ms gets no timing, and a message whose tool-call input is longer than its text and thinking gets no timing (Bedrock sends tool input in bursts, so such steps read 196-354 tok/s against 80-117 tok/s for text). Live: a text step timed at 125.7 tok/s; a turn with three Bash calls, two Write calls and one more Bash call left all its tool steps untimed; DSH showed 126 tok/s; usage equal to the transcript. | A tool-heavy step also gets no TTFT, because DSH reads TTFT and speed from the same stream. |
 | R9.1 A sample plugin overrides one view | done | With the sample plugin installed, its pill replaced our context pill and updated live, and its button filled our extra-controls slot. | — |
-| R9.2 Documented service API | done | The sample called every client method. Send, steer and side question were refused without a grant, worked with one (logged with a plugin source), and were refused after a revoke. Interrupt stopped a turn in the same CLI process. All of it ran through a reverse proxy. | Grants last for one DSH run: DSH 0.2.2-rc.1 does not save the plugin's config write. |
+| R9.2 Documented service API | done | The sample called every client method. Send, steer and side question were refused without a grant, worked with one (logged with a plugin source), and were refused after a revoke. Interrupt stopped a turn in the same CLI process. All of it ran through a reverse proxy. | Grants are saved in DSH's own storage and still work after a DSH restart (live: same token before and after; a revoke stayed revoked after the next restart). |
 | R10.1 Proxies and trusted hosts; no open routes; no file reads | done | Every plugin route: 401 without DSH's cookie, 403 for an untrusted Host or a cross-site Origin, our answer through a trusted-host alias and through a reverse proxy with `--public-url`. A full browser session ran through the proxy, also behind a path prefix. Caller-named file paths are refused; only the three settings files are served. | — |
 | R10.2 Linux, macOS, Windows | done | The CI matrix (build, lint, typecheck, tests, pack check) passes on Linux, macOS and Windows, and the `dsh-next` job (newest DSH `next` tag) passes. | Live UI checks ran on Linux only; macOS and Windows are covered by CI. |
 | R10.3 Backend interface; the DSH layer does not import the SDK | done | The import check passes; only the Claude backend package imports the SDK, and the bundle loads it lazily. A stub backend runs beside the Claude backend in tests, and (earlier, live) in one DSH profile. | — |
@@ -78,7 +80,7 @@ checked.
 | 1. The user's own binary | The SDK always gets an explicit executable path: the configured path, else `claude` on `PATH`, else `~/.local/bin/claude` (on Windows also `claude.exe` and the npm shim's target). With a path set, the SDK never looks for its bundled CLI. The README gives an optional `overrides` block that keeps the SDK's platform binary out of the install. | Live process list and a `PATH` shim; install contents. Other OS fallbacks: unit tests. |
 | 2. The user's own configuration | The `user`, `project` and `local` setting sources are always loaded. The plugin has no code that writes a file. The settings panel only reads the three files. A permission rule from "always allow" and the trust record are written by the CLI itself, as in the TUI. | Settings file times unchanged after every run; `system/init` equal to `claude -p`. |
 | 3. No prompt injection | The system prompt is the `claude_code` preset with no append. Only typed text and attachments are sent. Deny and plan answers re-use the CLI's own texts (maintainer Q1). Wake notices and our status lines stay in DSH and never reach the model. | Prompt snapshot equal to `claude -p`; transcripts searched for plugin text: none. |
-| 4. No forced behaviour | The start options carry no model, effort, mode, tools or settings layer. A UI choice is session-only and goes through `setModel`, `setPermissionMode` or `applyFlagSettings`. Two TUI-default restorations (D13, D16) are the known exceptions, waiting on Q4 and Q5. | Live: no flags in the CLI arguments; a no-choice session ran the settings model, effort and mode. |
+| 4. No forced behaviour | The start options carry no model, effort, mode, tools or settings layer. A UI choice is session-only and goes through `setModel`, `setPermissionMode` or `applyFlagSettings`. Two TUI-default restorations (D13, D16) are the known exceptions, accepted by the maintainer (Q4, Q5). | Live: no flags in the CLI arguments; a no-choice session ran the settings model, effort and mode. |
 | 5. A clean environment | The env is built from DSH's own env. Only the verified list of host Claude Code session variables is removed; the user's tokens and keys, including `DSH_*` names, pass through. The list is checked against the installed CLI with `pnpm test:cli-constants`. | Live env diff between DSH and the CLI. |
 | 6. Stop only interrupts | Stop calls `interrupt()` (with `perTaskStopAffordance` set at start). The process ends only on an explicit Force stop, or when an exact reset of the session's choices or a main-thread agent pick needs a fresh start; those two refuse while tasks or jobs run. One task is stopped with `stopTask`. | Live: same process before and after Stop; a background agent finished. |
 | 7. Never hold a DSH turn for background work | Background agents, shells and workflows are DSH jobs. The turn ends when the CLI's own turn ends; work the CLI starts later comes as a wake turn. | Live: the composer was free during background agents, shells and workflows. |
@@ -115,7 +117,6 @@ table above says partial.
 
 - **No editor** for settings files: the preview is read-only, and editing goes through the terminal tab (D63). The
   terminal tab opens only in the session folder.
-- **Plugin grants end at a DSH restart**: DSH does not save the plugin's config write.
 - **No "always" outcome** in DSH's approval record; it says "allowed once".
 - **Attached file names** with both a space and a `"` do not reach Claude Code (DSH stores `"` as `_`).
 - **No Branch button on a stopped turn**: a fork right after a Stop goes through our rewind dialog.
@@ -150,18 +151,18 @@ table above says partial.
 - The typed ultracode keyword in DSH (SDK probe only); child thinking text (unit tests only).
 - A natural (not forced) refusal of a one-turn rewind.
 
-## 4. Open maintainer questions
+## 4. Maintainer questions (answered)
 
-These five questions touch the raw contract ([architecture.md](architecture.md) §12.2). The plugin ships with the
-default shown until the maintainer answers.
+These five questions touch the raw contract ([architecture.md](architecture.md) §12.2). The maintainer answered all
+five: yes. The plugin keeps the defaults shown.
 
-| Question | Rules | Default in use |
+| Question | Rules | Answer and default in use |
 |---|---|---|
-| Q1. May the plugin re-send the CLI's own reject texts (version-pinned, tested against the binary) as the deny message, as the TUI does? | 3, 10 | Yes, re-send the CLI's texts (D40, D42). An unknown CLI version falls back to the 2.1.318 texts with a warning; `pnpm test:cli-constants` checks them on upgrade. |
-| Q2. May another plugin ever send text to the model without a user keypress? | 3 | Only with a per-plugin grant the user creates; the default is prefill only (D66). The grant is a consent switch between trusted plugins, not a security boundary. Granted text reaches the CLI as typed text; only the DSH log shows its plugin source. |
-| Q3. Show the TUI's trust question before the first start in an untrusted folder, and pass `workspaceTrust` after the user accepts? | 2, 4, 10 | Yes: the question is shown; accept passes `workspaceTrust` and the CLI writes its own trust record; decline starts no process (D73). |
-| Q4. Turn on file checkpointing by default to match the TUI, honouring `fileCheckpointingEnabled: false` from the user's settings? | 4, 10 | Yes (D16). It adds one SDK env variable. Known gap: admin policy delivered only through OS management profiles or remote managed settings is not read. |
-| Q5. Set question previews to Markdown by default (the SDK turns this into an env variable), to restore the TUI's preview text? | 4, 10 | Yes, unless the user's env already sets the variable (D13). |
+| Q1. May the plugin re-send the CLI's own reject texts (version-pinned, tested against the binary) as the deny message, as the TUI does? | 3, 10 | **Yes.** Re-send the CLI's texts (D40, D42). An unknown CLI version falls back to the 2.1.318 texts with a warning; `pnpm test:cli-constants` checks them on upgrade. |
+| Q2. May another plugin ever send text to the model without a user keypress? | 3 | **Yes**, only with a per-plugin grant the user creates; the default is prefill only (D66). The grant is remembered across DSH restarts, in DSH's own storage (D88). The grant is a consent switch between trusted plugins, not a security boundary. Granted text reaches the CLI as typed text; only the DSH log shows its plugin source. |
+| Q3. Show the TUI's trust question before the first start in an untrusted folder, and pass `workspaceTrust` after the user accepts? | 2, 4, 10 | **Yes.** The question is shown; accept passes `workspaceTrust` and the CLI writes its own trust record; decline starts no process (D73). |
+| Q4. Turn on file checkpointing by default to match the TUI, honouring `fileCheckpointingEnabled: false` from the user's settings? | 4, 10 | **Yes** (D16). It adds one SDK env variable. Known gap: admin policy delivered only through OS management profiles or remote managed settings is not read. |
+| Q5. Set question previews to Markdown by default (the SDK turns this into an env variable), to restore the TUI's preview text? | 4, 10 | **Yes**, unless the user's env already sets the variable (D13). |
 
-One more decision is open but is not one of the five: whether to pass the user's own `showThinkingSummaries` as the
+One more decision is still open, and it is not one of the five: whether to pass the user's own `showThinkingSummaries` as the
 SDK's thinking display, so thinking summaries show as in the TUI (section 3).

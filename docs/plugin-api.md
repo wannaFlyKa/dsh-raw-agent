@@ -209,19 +209,22 @@ To send text to the agent **without a keypress**, a plugin needs a grant:
 Facts about grants:
 
 - **A grant is a consent switch, not a security boundary.** DSH runs every plugin in one process and treats them as trusted collaborators. A hostile plugin could read the profile config or wrap our service. The grant stops a well-behaved plugin from sending text to the model without the user's consent (rule 3).
-- We store only the token's SHA-256 hash, in our Host entry's DSH plugin config (field `grants`). A change of that config applies without restarting our entry, so no agent process or background task ends (D87, checked live: same CLI pid after a create and a revoke). On DSH 0.2.2-rc.1 the loader keeps this change in memory only: it is not written to a profile file, so **grants end when DSH restarts** (checked live). The panel says "kept until DSH restarts". After a restart the user creates the grant again.
+- We store only the token's SHA-256 hash. It lives in DSH's own storage (`ctx.storageDomain`, DSH's json files under the DSH home), so **a grant is remembered across DSH restarts** until the user revokes it (D88, checked live). The panel says "saved: kept after a DSH restart". A create or a revoke never restarts our entry, so no agent process or background task ends (checked live: same CLI pid).
+- Grants belong to the DSH home: every profile of that home that has this plugin sees them.
+- If DSH's storage is missing or cannot open, a grant is kept for this DSH run only, and the panel says "kept until DSH restarts" (D88 fallback).
+- Old grants in our Host entry config (field `grants`) are taken in once, at the first start.
 - A granted message goes into the DSH inbox with `source: { kind: 'raw-agent-plugin', grant: '<grant name>', grantId: '<id>' }` and is written to the session log unchanged. It is **never** `source.kind: 'user'`, which DSH reads as typed by the human. So the log, exports and DSH's title rule can tell plugin text from typed text.
 - A `raw-agent-plugin` message that did not come through our service (a plugin that calls `agent.followup` itself) is dropped like any DSH notice and never reaches the agent.
 - Each admitted message id is used once. A later message that reuses the id (for example one copied from the session log) is dropped. If the user revokes the grant before the agent took the message, the message is dropped too. If DSH refuses the message (`failed`), nothing stays admitted.
 - `askSideQuestion` writes nothing to any log. The question and its answer also show in our side-question panel, so the user sees them.
 - The grant routes (`api/raw-agent/grants…`) use DSH's own cookie authentication. Any page script with that cookie can call them, which is the same trust level as above.
 
-#### 2.5.1 Grants end when DSH restarts: handle it
+#### 2.5.1 A grant can end: handle it
 
-On DSH 0.2.2-rc.1 every grant ends at a DSH restart (above). A token your plugin stored then answers `bad-grant`. Plan for it:
+A grant ends when the user revokes it, or at a DSH restart when DSH's storage was not available (above). A token your plugin stored then answers `bad-grant`. Plan for it:
 
 - Treat `bad-grant` as "the user must create a new grant". It also means "revoked". Do not retry the call in a loop.
-- Tell the user once, in your own UI or log: "dsh-raw-agent access ended (DSH restart or revoke). Create a new grant in **Agent plugin access** and paste the token here."
+- Tell the user once, in your own UI or log: "dsh-raw-agent access ended. Create a new grant in **Agent plugin access** and paste the token here."
 - Keep the token in your plugin's own config (or a field the user fills), so the user can replace it without a reinstall.
 - Where the user is present, fall back to `prefill` (Client), which needs no grant: the user presses Enter.
 - `no-grant` means you passed no token at all.
@@ -253,7 +256,7 @@ try {
   await ctx.rawAgent.send(sessionId, 'Run the tests again, please.', config.rawAgentGrant);
 } catch (e) {
   if (e.name === 'RawAgentServiceError' && e.code === 'bad-grant')
-    ctx.logger.warn('dsh-raw-agent access ended (DSH restart or revoke): create a new grant');
+    ctx.logger.warn('dsh-raw-agent access ended (revoked by the user): create a new grant');
 }
 ```
 

@@ -95,6 +95,12 @@ When the package is on npm, `dsh plugin --profile <profile> add dsh-raw-agent` w
 
 More detail: [packages/plugin/README.md](packages/plugin/README.md).
 
+## Other plugins
+
+Other DSH plugins can send messages to Claude Code only with a grant you create in **Settings > Agent plugin
+access**. DSH keeps the grant (only its hash) in its own storage, so it still works after a DSH restart. Revoke it
+there to stop it.
+
 ## Behind a reverse proxy
 
 `--public-url` alone makes DSH answer 403 on every API route (DSH's own trusted-host check). Start DSH with both
