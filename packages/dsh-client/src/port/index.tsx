@@ -14,6 +14,7 @@ import type { HostActions } from '../ui/actions.js';
 import { AgentsHeader } from '../ui/agents-panel.js';
 import { AskPanel } from '../ui/ask-cards.js';
 import { SessionControls } from '../ui/controls.js';
+import { SideChatTab } from '../ui/side-chat-tab.js';
 import { ContextPill } from '../ui/usage-panel.js';
 import { WakeTriggerCard } from '../ui/wake-card.js';
 import { WorkflowNodeView } from '../ui/workflow-panel.js';
@@ -572,6 +573,78 @@ interface SidebarRight {
   openResourceIn?(sessionId: string, address: string): void;
   openTabIn?(sessionId: string, kind: string): void;
   openResource?(address: string, options?: { kind?: string; preferNewPane?: boolean }): void;
+  /** The session on screen (`ISidebarRight.mounted`). */
+  mounted?: { getSnapshot?(): string | undefined };
+  /** The on-screen session's active tab (`ISidebarRight.active`). */
+  active?(): { id: string; kind: string } | undefined;
+  isExpanded?(): boolean;
+}
+
+// --- 0.1.2 (D89): the side chat tab in DSH's right sidebar ---------------------------------------
+
+/**
+ * Our right-sidebar page type (`ctx.sidebarRightTabs.register`, `P/dsh-client-ui-sidebar-right`
+ * README "Extension seats"; the same public two-stage path `dsh-client-ui-schedule` uses for its
+ * task tab). The id is the key our body registers under in `sidebar.right.pane.tab`.
+ */
+export const SIDE_CHAT_TAB_ID = 'dsh-raw-agent/side-chat';
+export const SIDE_CHAT_TAB_KIND = 'raw-agent-side-chat';
+export const SIDE_CHAT_TAB_SLOT = 'sidebar.right.pane.tab';
+export const SIDE_CHAT_TITLE = 'Side chat';
+
+/** What this port uses of `ctx.sidebarRightTabs` (structural, D65). */
+export interface SidebarRightTabsService {
+  register(definition: {
+    id: string;
+    kind: string;
+    priority?: 'extension' | 'builtin' | 'fallback';
+    keepMounted?: boolean;
+    title(address: string): string;
+  }): () => void;
+}
+
+/**
+ * The page type. No guide entry: the guide is the same in every session, and the side chat
+ * belongs to our sessions only, so it opens from our button and commands. `keepMounted` keeps a
+ * half-typed question when the user looks at another tab or session.
+ */
+export function sideChatTabDefinition(): Parameters<SidebarRightTabsService['register']>[0] {
+  return {
+    id: SIDE_CHAT_TAB_ID,
+    kind: SIDE_CHAT_TAB_KIND,
+    priority: 'extension',
+    keepMounted: true,
+    title: () => SIDE_CHAT_TITLE,
+  };
+}
+
+/** Whether our tab type is registered (set by `mountClient`, read by the host actions). */
+export interface SideChatState {
+  on: boolean;
+}
+
+/**
+ * Open (or reveal) the side chat tab of a session. `quiet`: leave a tab alone that is already
+ * the active one in an open sidebar of the on-screen session (the user is typing in it). A
+ * failed open (a DSH that refuses it) answers false, so the caller shows the inline box.
+ */
+export function openSideChatTab(
+  sidebar: SidebarRight | undefined,
+  state: SideChatState,
+  sessionId: string,
+  options: { quiet?: boolean } = {},
+): boolean {
+  if (!state.on || typeof sidebar?.openTabIn !== 'function') return false;
+  try {
+    if (options.quiet && sidebar.mounted?.getSnapshot?.() === sessionId && sidebar.isExpanded?.() === true) {
+      if (sidebar.active?.()?.kind === SIDE_CHAT_TAB_KIND) return true;
+    }
+    sidebar.openTabIn(sessionId, SIDE_CHAT_TAB_KIND);
+    return true;
+  } catch (error) {
+    console.warn('[raw-agent] could not open the side chat tab', error);
+    return false;
+  }
 }
 
 // --- R6.1: child sessions, DSH's own navigation ---------------------------------------------------
@@ -971,9 +1044,11 @@ async function copyText(text: string): Promise<boolean> {
   }
 }
 
-export function hostActions(ctx: ClientContext): HostActions {
+export function hostActions(ctx: ClientContext, sideChat: SideChatState = { on: false }): HostActions {
   const sidebar = () => ctx.get('sidebarRight') as SidebarRight | undefined;
   return {
+    sideChatInSidebar: () => sideChat.on && typeof sidebar()?.openTabIn === 'function',
+    openSideChat: (sessionId, options) => openSideChatTab(sidebar(), sideChat, sessionId, options),
     openPreview(sessionId, path) {
       const s = sidebar();
       if (typeof s?.openResourceIn !== 'function') return false;
@@ -1076,6 +1151,53 @@ export const SETTINGS_GENERAL_SLOT = 'settings.general.item';
 export const ACCESS_NOTE_ID = 'raw-agent-access-note';
 export const ACCESS_NOTE_ORDER = -19;
 
+/**
+ * Register the side chat tab: the type in `ctx.sidebarRightTabs`, the body in the keyed
+ * `sidebar.right.pane.tab` seat under the type's id. Both live as long as the scope. A registry
+ * that refuses the type leaves `state.on` false, so the inline box stays.
+ */
+export function registerSideChat(
+  scope: ClientContext,
+  registry: unknown,
+  state: SideChatState,
+  inject: { stores: SessionStores; api: RawAgentApi; agentNames: readonly string[] },
+): boolean {
+  const tabs = registry as SidebarRightTabsService | undefined;
+  if (typeof tabs?.register !== 'function') return false;
+  const register = () => {
+    let off: () => void;
+    try {
+      off = tabs.register(sideChatTabDefinition());
+    } catch (error) {
+      console.warn('[raw-agent] could not register the side chat tab; the inline box stays', error);
+      return () => {};
+    }
+    state.on = true;
+    return () => {
+      state.on = false;
+      off();
+    };
+  };
+  if (typeof scope.effect === 'function') scope.effect(register, 'raw-agent: side chat tab type');
+  else register();
+  scope.slots.inject(SIDE_CHAT_TAB_SLOT, () =>
+    scope.slots.register(
+      {
+        name: SIDE_CHAT_TAB_SLOT,
+        key: SIDE_CHAT_TAB_ID,
+        inject: (sessionId?: string) => ({
+          ...(typeof sessionId === 'string' ? { sessionId } : {}),
+          stores: inject.stores,
+          api: inject.api,
+          agentNames: inject.agentNames,
+        }),
+      },
+      SideChatTab as React.ComponentType<never>,
+    ),
+  );
+  return true;
+}
+
 /** Register the session controls. Returns the stores (tests). */
 export function mountClient(ctx: ClientContext, options: MountClientOptions = {}): SessionStores {
   const fetchFn: FetchFn =
@@ -1093,7 +1215,8 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
   }
   const links = new ChildLinks(api);
   const readers = new UsageReaders(stores, api);
-  const actions = hostActions(ctx);
+  const sideChat: SideChatState = { on: false };
+  const actions = hostActions(ctx, sideChat);
   ctx.effect?.(
     () => () => {
       readers.dispose();
@@ -1225,6 +1348,18 @@ export function mountClient(ctx: ClientContext, options: MountClientOptions = {}
       ),
     );
   });
+  // 0.1.2 (D89): the side chat as a right-sidebar tab, through DSH's public tab-type registry.
+  // Without it (an older DSH) the controls keep the inline side-question box.
+  if (typeof ctx.inject === 'function')
+    ctx.inject(['sidebarRightTabs', 'sidebarRight', 'slots'], (scope) =>
+      registerSideChat(scope, scope.sidebarRightTabs ?? scope.get('sidebarRightTabs'), sideChat, {
+        stores,
+        api,
+        agentNames: options.agentNames ?? [],
+      }),
+    );
+  else
+    registerSideChat(ctx, ctx.get('sidebarRightTabs'), sideChat, { stores, api, agentNames: options.agentNames ?? [] });
   // D19: the backends' tool views, drawn only in sessions of their backend (and their children).
   if (options.toolViews && options.toolViews.length > 0) registerToolViews(ctx.slots, options.toolViews, stores, links);
   // R6.1-R6.3: the agents button in our sessions' header, and the child strip in a child session.

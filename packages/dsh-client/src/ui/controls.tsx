@@ -24,7 +24,7 @@ import {
 import type { HostActions } from './actions.js';
 import { AskPanel } from './ask-cards.js';
 import { SettingsPanel } from './settings-panel.js';
-import { mcpButtonLabel } from '../commands-model.js';
+import { latestSide, mcpButtonLabel } from '../commands-model.js';
 import { McpPanel } from './mcp-panel.js';
 import { SidePanel } from './side-panel.js';
 import { exitBanner } from '../lifecycle-model.js';
@@ -191,10 +191,26 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
   // R7.3: the side panel opens by itself for a new question; the button brings it back.
   const [sideShown, setSideShown] = React.useState(false);
   const [sideWanted, setSideWanted] = React.useState(false);
+  const [sideFallback, setSideFallback] = React.useState(false);
   const onSideOpen = React.useCallback((open: boolean) => {
     setSideShown(open);
-    if (!open) setSideWanted(false);
+    if (!open) {
+      setSideWanted(false);
+      setSideFallback(false); // tabbed: the next open tries the sidebar tab again
+    }
   }, []);
+  // 0.1.2 (D89): the side chat is a tab of DSH's right sidebar where DSH has that API. The
+  // inline box stays for older DSH versions, and for a sidebar that could not open the tab.
+  const tabbed = actions.sideChatInSidebar?.() === true;
+  const openSide = React.useCallback(
+    (quiet?: boolean) => {
+      if (tabbed && actions.openSideChat?.(store.sessionId, quiet ? { quiet: true } : {}) === true) return;
+      setSideFallback(true);
+      setSideWanted(true);
+    },
+    [tabbed, actions, store],
+  );
+  const inlineSide = !tabbed || sideFallback;
   const info = snap.info;
   const turn = info?.view.state.turn === true;
   // D25: while a turn runs, and once right after it, take back the steers Stop cancelled.
@@ -233,10 +249,28 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
     if (!done) return;
     prefillSeen.current = done.seq;
     if (done.kind === 'side') {
+      // Tabbed: the tab takes the text from the store (`takeSidePrefill`) when it mounts.
+      if (tabbed && actions.openSideChat?.(store.sessionId) === true) return;
+      if (tabbed) store.takeSidePrefill();
+      setSideFallback(true);
       setSidePrefill({ text: done.text, seq: done.seq });
       setSideWanted(true);
     } else setHeldPrefill(done.kind === 'held' ? done.text : undefined);
-  }, [prefillSeq, inputActions, store]);
+  }, [prefillSeq, inputActions, store, tabbed, actions]);
+  // 0.1.2: in the tab, a new side question (typed `/btw`, or asked by another plugin) opens the
+  // tab, as it opened the inline box. The questions there when the page loaded do not.
+  const latestSideId = snap.status === 'ready' ? (latestSide(info?.view.side)?.id ?? null) : undefined;
+  const sideBaseline = React.useRef<string | null | undefined>(undefined);
+  React.useEffect(() => {
+    if (!tabbed || latestSideId === undefined) return;
+    if (sideBaseline.current === undefined) {
+      sideBaseline.current = latestSideId;
+      return;
+    }
+    if (latestSideId === null || latestSideId === sideBaseline.current) return;
+    sideBaseline.current = latestSideId;
+    openSide(true);
+  }, [tabbed, latestSideId, openSide]);
   // DSH's own permission control does not apply to this agent: hide it while our controls show
   // (only in our sessions; a Standard session renders no controls, so its seat stays).
   // 0.1.1: DSH's `agentPreset` projection says the session is ours before our route does (a new
@@ -341,7 +375,19 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           {mcpButtonLabel(info.view.mcp)}
         </button>
       )}
-      {(info.view.side?.entries.length ?? 0) > 0 && !sideShown && (
+      {api.askSide && tabbed && (
+        <button
+          type="button"
+          className={CHIP_CLASS}
+          data-raw-agent="side-button"
+          title="Open the side chat in the right sidebar (not part of the conversation)"
+          aria-label={`Side chat with ${name} (not part of the conversation)`}
+          onClick={() => openSide()}
+        >
+          Side chat
+        </button>
+      )}
+      {!tabbed && (info.view.side?.entries.length ?? 0) > 0 && !sideShown && (
         <button
           type="button"
           className={CHIP_CLASS}
@@ -352,7 +398,7 @@ export function SessionControls(props: ControlsProps): React.ReactElement | null
           Side questions
         </button>
       )}
-      {api.askSide && (
+      {api.askSide && inlineSide && (
         <SidePanel
           store={store}
           api={api}

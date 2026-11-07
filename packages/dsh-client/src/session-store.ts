@@ -96,6 +96,7 @@ export class SessionControlStore {
   #generation = 0;
   #inflight: Promise<void> | undefined;
   #absentStreak = 0;
+  #sidePrefillTaken = 0;
   readonly #observers = new Set<() => void>();
   #channel: AbortController | undefined;
   #channelTimer: unknown;
@@ -426,6 +427,17 @@ export class SessionControlStore {
   /** R9.2: hand prefill text to the controls (browser state only; nothing is sent). */
   requestPrefill(text: string, target: PrefillTarget): void {
     this.#set({ prefillRequest: { text, target, seq: (this.#snapshot.prefillRequest?.seq ?? 0) + 1 } });
+  }
+
+  /**
+   * 0.1.2: the side chat tab takes side-question prefill text once. A tab that mounts later (or
+   * again) does not take the same text twice. Undefined: no new side-question text.
+   */
+  takeSidePrefill(): { text: string; seq: number } | undefined {
+    const req = this.#snapshot.prefillRequest;
+    if (!req || req.target !== 'side-question' || req.seq <= this.#sidePrefillTaken) return undefined;
+    this.#sidePrefillTaken = req.seq;
+    return { text: req.text, seq: req.seq };
   }
 
   requestPanel(panel: PanelName): void {

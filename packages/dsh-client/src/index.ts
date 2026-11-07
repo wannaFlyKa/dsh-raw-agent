@@ -44,7 +44,8 @@ export {
   type ChildRowProps,
 } from './ui/agents-panel.js';
 export { WakeTriggerCard } from './ui/wake-card.js';
-export { SidePanel, SidePanelBody, SideEntryView, type SidePanelProps } from './ui/side-panel.js';
+export { SidePanel, SidePanelBody, SideEntryView, useSideAsk, type SidePanelProps } from './ui/side-panel.js';
+export { SideChatTab, sideChatElsewhereText, type SideChatTabProps, type SideChatTabInfo } from './ui/side-chat-tab.js';
 export { McpPanel, McpServerRow, CommandList, type McpPanelProps } from './ui/mcp-panel.js';
 export {
   LocalCommandView,
@@ -172,6 +173,15 @@ export {
   SETTINGS_GENERAL_SLOT,
   ACCESS_NOTE_ID,
   ACCESS_NOTE_ORDER,
+  SIDE_CHAT_TAB_ID,
+  SIDE_CHAT_TAB_KIND,
+  SIDE_CHAT_TAB_SLOT,
+  SIDE_CHAT_TITLE,
+  sideChatTabDefinition,
+  openSideChatTab,
+  registerSideChat,
+  type SideChatState,
+  type SidebarRightTabsService,
   type ModePopupSpec,
   type WorkflowNodeData,
   type AskInteraction,

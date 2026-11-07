@@ -1,7 +1,9 @@
-// R7.3, D54: the side-question panel, like the terminal app's `/btw` panel. It floats over the
-// page (a portal), opens by itself for a new side question, shows the answer when it arrives,
-// and closes with × or Esc. Nothing here is ever written to the conversation: the Host keeps the
-// questions in memory only, and this panel only reads and asks through the plugin's own routes.
+// R7.3, D54: the side chat, like the terminal app's `/btw` panel. 0.1.2 (D89): it is a tab of
+// DSH's right sidebar (`SideChatTab`), one per session, that opens by itself for a new side
+// question. On a DSH without that sidebar API the old box floats over the page instead
+// (`SidePanel`, a portal; × or Esc closes it). Nothing here is ever written to the conversation:
+// the Host keeps the questions in memory only, and both views only read and ask through the
+// plugin's own routes.
 
 import * as React from 'react';
 import type { RawAgentApi, SideEntryWire, SideViewWire } from '../api.js';
@@ -35,7 +37,20 @@ const styles = {
     boxShadow: '0 6px 24px rgba(0,0,0,0.18)',
     fontSize: 13,
   },
+  // The tab takes the sidebar's own ground colour (DSH: "a column of the page, not a card").
+  tab: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8,
+    height: '100%',
+    minHeight: 0,
+    padding: 12,
+    boxSizing: 'border-box',
+    color: 'var(--raw-agent-text, var(--dsw-alias-label-primary, CanvasText))',
+    fontSize: 13,
+  },
   list: { display: 'flex', flexDirection: 'column', gap: 10, overflow: 'auto', minHeight: 0 },
+  tabList: { display: 'flex', flexDirection: 'column', gap: 10, overflow: 'auto', minHeight: 0, flex: '1 1 auto' },
   entry: { display: 'flex', flexDirection: 'column', gap: 4, borderTop: `1px solid ${border}`, paddingTop: 8 },
   question: { fontWeight: 600, whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
   status: { fontSize: 12, color: muted },
@@ -54,7 +69,7 @@ export interface SidePanelProps {
   prefill?: { text: string; seq: number };
 }
 
-function useTick(on: boolean): number {
+export function useTick(on: boolean): number {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
     if (!on) return undefined;
@@ -120,10 +135,16 @@ export function SidePanelBody(props: {
   onAsk(question: string): void;
   onCancel(id: string): void;
   onStart(): void;
-  onClose(): void;
+  /** The floating box only (the tab has DSH's own close control). */
+  onClose?(): void;
   /** R9.2: text another plugin put into the box (`rawAgentClient.prefill`); taken when `seq` changes. */
   prefill?: { text: string; seq: number };
+  /** 0.1.2: `tab` is the right-sidebar side chat; `panel` (default) is the old floating box. */
+  variant?: 'panel' | 'tab';
+  /** 0.1.2: the question box, so the tab can focus it when it is opened. */
+  inputRef?: React.Ref<HTMLTextAreaElement>;
 }): React.ReactElement {
+  const tab = props.variant === 'tab';
   const [draft, setDraft] = React.useState('');
   const prefillSeq = props.prefill?.seq;
   const prefillText = props.prefill?.text;
@@ -144,27 +165,14 @@ export function SidePanelBody(props: {
     props.onAsk(q);
     setDraft('');
   };
-  return (
-    <div
-      style={styles.panel}
-      role="dialog"
-      aria-label="Side question"
-      data-raw-agent="side-panel"
-      onKeyDown={(e) => {
-        if (e.key === 'Escape') {
-          e.stopPropagation();
-          props.onClose();
-        }
-      }}
-    >
-      <div style={css.header}>
-        <strong>Side question</strong>
-        <button type="button" style={css.button} aria-label="Close" onClick={props.onClose} data-raw-agent="side-close">
-          ×
-        </button>
-      </div>
+  const parts = (
+    <>
       <span style={styles.status}>{sideNote(props.displayName, props.side?.historySize ?? 0)}</span>
-      <div style={styles.list} ref={listRef}>
+      <div
+        style={tab ? styles.tabList : styles.list}
+        ref={listRef}
+        {...(tab ? { role: 'log', 'aria-label': 'Side questions and answers', 'aria-live': 'polite' } : {})}
+      >
         {entries.length === 0 && (
           <span style={styles.status}>
             Ask something about the conversation
@@ -182,11 +190,18 @@ export function SidePanelBody(props: {
           />
         ))}
       </div>
-      {props.error && <span style={css.error}>{props.error}</span>}
+      {props.error && (
+        <span style={css.error} role="alert" data-raw-agent="side-error">
+          {props.error}
+        </span>
+      )}
       <textarea
+        ref={props.inputRef}
         style={css.textarea}
         value={draft}
-        placeholder={asking ? 'Wait for the answer…' : 'Ask another side question'}
+        placeholder={
+          asking ? 'Wait for the answer…' : entries.length === 0 ? 'Ask a side question' : 'Ask another side question'
+        }
         aria-label="Side question"
         data-raw-agent="side-input"
         onChange={(e) => setDraft(e.currentTarget.value)}
@@ -205,11 +220,85 @@ export function SidePanelBody(props: {
           onClick={submit}
           data-raw-agent="side-ask"
         >
-          Ask
+          {props.busy ? 'Asking…' : 'Ask'}
         </button>
       </span>
+    </>
+  );
+  if (tab)
+    return (
+      <section style={styles.tab} aria-label="Side chat" aria-busy={asking || props.busy} data-raw-agent="side-chat">
+        {parts}
+      </section>
+    );
+  return (
+    <div
+      style={styles.panel}
+      role="dialog"
+      aria-label="Side question"
+      data-raw-agent="side-panel"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          props.onClose?.();
+        }
+      }}
+    >
+      <div style={css.header}>
+        <strong>Side question</strong>
+        <button type="button" style={css.button} aria-label="Close" onClick={props.onClose} data-raw-agent="side-close">
+          ×
+        </button>
+      </div>
+      {parts}
     </div>
   );
+}
+
+/** Ask and cancel side questions of one session (the tab and the floating box share it). */
+export function useSideAsk(
+  store: SessionControlStore,
+  api: RawAgentApi,
+): { busy: boolean; error: string | undefined; ask(question: string): void; cancel(id: string): void } {
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState<string | undefined>();
+  // A new session (the tab follows its own session only, but a test may swap the store) starts clean.
+  React.useEffect(() => {
+    setBusy(false);
+    setError(undefined);
+  }, [store]);
+  const ask = React.useCallback(
+    (question: string) => {
+      if (!api.askSide) {
+        setError('Side questions are not available here.');
+        return;
+      }
+      setBusy(true);
+      setError(undefined);
+      void store.refresh();
+      api.askSide(store.sessionId, question).then(
+        (r) => {
+          setBusy(false);
+          if (!r.ok) setError(r.error ?? 'the question was refused');
+          void store.refresh();
+        },
+        (e: unknown) => {
+          setBusy(false);
+          setError(String((e as Error)?.message ?? e));
+        },
+      );
+      // The Host shows the question as "asking" at once; read it so the view shows it.
+      setTimeout(() => void store.refresh(), 300);
+    },
+    [store, api],
+  );
+  const cancel = React.useCallback(
+    (id: string) => {
+      void api.cancelSide?.(store.sessionId, id).then(() => store.refresh());
+    },
+    [store, api],
+  );
+  return { busy, error, ask, cancel };
 }
 
 /**
@@ -227,8 +316,7 @@ export function SidePanel(
   const baseline = React.useRef<string | null | undefined>(props.initiallyOpen ? null : undefined);
   if (baseline.current === undefined && snap.status === 'ready') baseline.current = latestSide(side)?.id ?? null;
   const [forced, setForced] = React.useState(props.initiallyOpen === true);
-  const [busy, setBusy] = React.useState(false);
-  const [error, setError] = React.useState<string | undefined>();
+  const { busy, error, ask: askNow, cancel } = useSideAsk(store, api);
   const open =
     props.open === true ||
     forced ||
@@ -250,27 +338,8 @@ export function SidePanel(
     onOpenChange?.(false);
   };
   const ask = (question: string) => {
-    if (!api.askSide) return;
-    setBusy(true);
-    setError(undefined);
     setForced(true);
-    void store.refresh();
-    api.askSide(store.sessionId, question).then(
-      (r) => {
-        setBusy(false);
-        if (!r.ok) setError(r.error ?? 'the question was refused');
-        void store.refresh();
-      },
-      (e: unknown) => {
-        setBusy(false);
-        setError(String((e as Error)?.message ?? e));
-      },
-    );
-    // The Host shows the question as "asking" at once; read it so the panel shows it.
-    setTimeout(() => void store.refresh(), 300);
-  };
-  const cancel = (id: string) => {
-    void api.cancelSide?.(store.sessionId, id).then(() => store.refresh());
+    askNow(question);
   };
   return actions.portal(
     <SidePanelBody

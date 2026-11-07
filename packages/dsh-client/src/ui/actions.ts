@@ -47,4 +47,15 @@ export interface HostActions {
   forkSession?(sessionId: string, atSeq: number): Promise<string>;
   /** Open a session in the main view (DSH's own navigation). */
   openSession?(sessionId: string): boolean;
+  /**
+   * 0.1.2: the side chat lives in DSH's right sidebar (our own tab type is registered). False on
+   * a DSH without that sidebar API: the controls then show the old inline side-question box.
+   */
+  sideChatInSidebar?(): boolean;
+  /**
+   * 0.1.2: open (or focus) the side chat tab of a session in DSH's right sidebar. With `quiet`,
+   * a tab that is already the active one in an open sidebar is left alone (no focus move while
+   * the user types in it). False when the sidebar cannot open it: show the inline box instead.
+   */
+  openSideChat?(sessionId: string, options?: { quiet?: boolean }): boolean;
 }
