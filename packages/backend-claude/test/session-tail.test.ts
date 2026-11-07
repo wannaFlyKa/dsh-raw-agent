@@ -18,6 +18,29 @@ const result = (id: string, t: string) => ({ type: 'tool_result', tool_use_id: i
 const base = [user('p1', null, 'hi', { origin: { kind: 'human' } }), asst('a1', 'p1', 'm1', [toolUse('t1')])];
 
 describe('sessionTail (R3.6)', () => {
+  it('skips a task notification the CLI wrote after the wake reply that already took it in (phase 5 fix)', () => {
+    // The shape of a real CLI 2.1.318 transcript: a SubagentHandback message starts the wake turn,
+    // the reply follows, then the CLI writes the formal notification as a transcript-only entry.
+    const t = [
+      ...base,
+      user('r1', 'a1', [result('t1', 'files')]),
+      asst('a2', 'r1', 'm2', [text('done')]),
+      user('h1', 'a2', 'Another Claude session sent a message: report', { origin: { kind: 'peer' } }),
+      asst('w1', 'h1', 'm3', [text('The background subagent finished.')]),
+      line({ type: 'system', subtype: 'stop_hook_summary', uuid: 's1', parentUuid: 'w1' }),
+      user('c1', 's1', '<system-reminder>x</system-reminder>', { isMeta: true, queueTranscriptOnly: true }),
+      user('n1', 'c1', '<task-notification><summary>Agent "x" finished</summary></task-notification>', {
+        origin: { kind: 'task-notification' },
+        queueTranscriptOnly: true,
+      }),
+    ].join('\n');
+    const tail = sessionTail(t, 'w1', 5);
+    expect(tail.found).toBe(true);
+    expect(tail.notes).toEqual([]);
+    expect(tail.prompts).toEqual([]);
+    expect(tail.events).toEqual([]);
+  });
+
   it('maps what lies past the point: the late result, the reply, a wake turn', () => {
     const t = [
       ...base,
@@ -33,7 +56,7 @@ describe('sessionTail (R3.6)', () => {
     const tail = sessionTail(t, 'a1', 5);
     expect(tail.found).toBe(true);
     expect(tail.orphanResults).toBe(1); // t1's call was before the point
-    expect(tail.notes).toEqual(['a background task reported back: sleep done']);
+    expect(tail.notes).toEqual(['a report from a background task (sleep done)']);
     expect(tail.prompts).toEqual([]);
     expect(tail.lastChainId).toBe('a3');
     expect(tail.events.map((e) => e.type)).toEqual([

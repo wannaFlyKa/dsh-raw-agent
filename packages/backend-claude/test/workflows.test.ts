@@ -725,7 +725,7 @@ describe.skipIf(process.platform === 'win32')('session controls for workflows an
     expect(fake.calls.filter((c) => c[0] === 'applyFlagSettings').map((c) => c[1][0])).toEqual([
       { ultracode: true },
       { ultracode: false },
-      { effortLevel: 'low' },
+      { effortLevel: 'low', ultracode: false },
       { effortLevel: null, ultracode: null },
     ]);
     expect(await session.controls.effortState!()).toEqual({
@@ -735,6 +735,8 @@ describe.skipIf(process.platform === 'win32')('session controls for workflows an
       ultracodeAvailable: true,
     });
     expect(effortFlags('ultracode')).toEqual({ ultracode: true });
+    // Phase 5 fix: a level also turns ultracode off, so the same level after Ultracode ends it.
+    expect(effortFlags('low')).toEqual({ effortLevel: 'low', ultracode: false });
     await session.dispose();
     await reader;
   });

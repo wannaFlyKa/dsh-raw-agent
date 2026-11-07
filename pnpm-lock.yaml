@@ -52,7 +52,7 @@ importers:
   packages/backend-claude:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
-        specifier: ^0.3.318
+        specifier: 0.3.318
         version: 0.3.318
       '@dsh-raw-agent/core':
         specifier: workspace:*
@@ -88,7 +88,7 @@ importers:
   packages/plugin:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
-        specifier: ^0.3.318
+        specifier: 0.3.318
         version: 0.3.318
     devDependencies:
       '@dsh-raw-agent/backend-claude':

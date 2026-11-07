@@ -64,10 +64,17 @@ describe('env policy (D17a)', () => {
     expect(buildClaudeEnv({ CLAUDECODE: '1', TRACEPARENT: 'a', TRACESTATE: 'b' }, 'linux').env).toEqual({});
   });
 
-  it('removes DSH_* names that look like secrets', () => {
-    const { env, removed } = buildClaudeEnv({ DSH_API_TOKEN: 'x', DSH_SECRET_THING: 'y', DSH_PORT: '1' }, 'linux');
-    expect(env).toEqual({ DSH_PORT: '1' });
-    expect(removed.every((r) => r.reason === 'dsh-secret')).toBe(true);
+  it("keeps the user's own DSH_* tokens and keys (rule 5)", () => {
+    const src = {
+      DSH_API_TOKEN: 'x',
+      DSH_SECRET_THING: 'y',
+      DSH_DEPLOY_TOKEN: 'z',
+      DSH_MY_API_KEY: 'k',
+      DSH_PORT: '1',
+    };
+    const { env, removed } = buildClaudeEnv(src, 'linux');
+    expect(env).toEqual(src);
+    expect(removed).toEqual([]);
   });
 
   it('is case-insensitive on Windows only', () => {

@@ -101,6 +101,27 @@ describe('view model', () => {
     expect(pending.title).toBe('Applies when Agent starts.');
   });
 
+  it('effort labels name the level the agent reports, not an inference (R1.4, phase 5 fix)', () => {
+    const live = (effort: string) => ({ model: 'live-model', mode: 'default', effort });
+    // No choice: the settings say high, the CLI applies low (a model without high, or a typed /effort).
+    expect(effortSelect(info({}, { live: live('low') }))!.options[0]!.label).toBe(
+      'Effort: your settings (high; running: low)',
+    );
+    expect(effortSelect(info({}, { live: live('high') }))!.options[0]!.label).toBe('Effort: your settings (high)');
+    expect(effortSelect(info({ settings: { sources: {} } }, { live: live('low') }))!.options[0]!.label).toBe(
+      'Effort: your settings (running: low)',
+    );
+    // A chosen and applied level that the CLI no longer runs (a later typed /effort high).
+    const typed = effortSelect(
+      info({}, { live: live('high'), choice: { effort: 'low', applied: { effort: 'low' }, resetPending: false } }),
+    )!;
+    expect(typed.options.find((o) => o.value === 'low')!.label).toBe('Effort: Low (running: high)');
+    const same = effortSelect(
+      info({}, { live: live('low'), choice: { effort: 'low', applied: { effort: 'low' }, resetPending: false } }),
+    )!;
+    expect(same.options.find((o) => o.value === 'low')!.label).toBe('Effort: Low');
+  });
+
   it('marks the mode the settings pick, as model and effort do (M1 verify 2)', () => {
     expect(modeSelect(info()).options).toEqual([
       { value: 'default', label: 'Ask' },

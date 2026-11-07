@@ -13,6 +13,7 @@ import {
 import {
   CONTEXT_ROUTE,
   MAX_PLAUSIBLE_TOKENS_PER_SECOND,
+  MIN_TIMED_DECODE_MS,
   SessionRuntime,
   TurnLog,
   USAGE_ROUTE,
@@ -139,6 +140,19 @@ describe('R8.4: DSH timings are real or absent', () => {
     expect((40 * 1000) / 9).toBeGreaterThan(MAX_PLAUSIBLE_TOKENS_PER_SECOND);
     expect(firstTokenTime(m.stream)).toBeUndefined();
     expect(m.usage.outputTokens).toBe(40); // the token meter still counts it
+  });
+
+  it('drops the timing of a short answer whose decode window cannot be measured (phase 5 fix)', () => {
+    const w = writer();
+    w.log.openStep(9_300);
+    w.log.delta('text', 0, 'Hello there', 10_041);
+    w.log.delta('text', 0, ' friend.', 10_097);
+    w.clock.t = 10_097; // live g5: 20 tokens over 56 ms read as 357 tok/s
+    w.log.commit({ blocks: [{ type: 'text', text: 'Hello there friend.' }], usage: usage(20), binding });
+    const m = w.message();
+    expect(56).toBeLessThan(MIN_TIMED_DECODE_MS);
+    expect(firstTokenTime(m.stream)).toBeUndefined();
+    expect(m.usage.outputTokens).toBe(20);
   });
 
   it('drops the timing when thinking was counted but never streamed', () => {

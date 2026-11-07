@@ -614,6 +614,20 @@ describe('the ultracode entry of the effort picker (D37)', () => {
     expect(sel.options[0]!.label).toBe('Effort: your settings (high, ultracode on)');
   });
 
+  it('a chosen level says when the agent still has ultracode on (R6.5, phase 5 fix)', () => {
+    const level = efforts.find((e) => e.kind !== 'mode')!;
+    const sel = effortSelect(
+      info(
+        {
+          live: { ultracode: { on: true, available: true } },
+          choice: { applied: { effort: level.id }, resetPending: false, agentLocked: false, effort: level.id },
+        },
+        { efforts } as Partial<SessionInfo>,
+      ),
+    )!;
+    expect(sel.options.find((o) => o.value === level.id)!.label).toBe(`Effort: ${level.label} (ultracode on)`);
+  });
+
   it('a backend without a mode entry keeps the plain picker', () => {
     const sel = effortSelect(info({}, { efforts: [{ id: 'high', label: 'High' }] } as Partial<SessionInfo>))!;
     expect(sel.title).toBe('Effort for this session only.');

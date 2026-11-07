@@ -49,6 +49,8 @@ export interface SessionViewWire {
     agent?: string;
     /** D37: the agent's own ultracode state, once the live process reported it. */
     ultracode?: { on: boolean; requested?: boolean; available?: boolean };
+    /** R1.4: the effort level the live process says it applies now. */
+    effort?: string;
   };
   choice: {
     model?: string;

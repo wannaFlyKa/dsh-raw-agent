@@ -66,6 +66,15 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **DSH's `approval/decided` has no "always" outcome.** Record "always" as `allowed-once`; the rule itself is in the CLI's settings write.
 - **The choice route's answer is built before the CLI's `status` frame**, so do not trust its `live.mode`; the picker can lag one poll (4 s) after a mode switch (known, not fixed).
 - **Workspace trust:** in SDK mode without `workspaceTrust` the CLI ignores the project's `permissions` rules (hooks, env and CLAUDE.md still apply). Ask the TUI's trust question first and pass `workspaceTrust` only after the user accepts; the CLI writes its own trust record.
+- **SDK version is pinned exactly** (`0.3.318`, D11). A caret range let packed installs take 0.3.319, which our undeclared-control use (D9) was never checked on. Bump it only with a live re-check.
+- **The user's `DSH_*` variables pass through**, secrets included (rule 5). Do not add a `DSH_*` secret filter back.
+- **Effort picker:** shows the CLI's own `getSettings().applied.effort` (read after each choice and each turn end), never the settings file's level as fact.
+- **Transcript-only entries** (`queueTranscriptOnly: true`, for example the task notification the CLI writes after a wake reply) were already taken in by a turn the session showed; the crash/restart read-back skips them.
+- **DSH speed figures:** a step with a decode window under 500 ms gets no timing (`MIN_TIMED_DECODE_MS`); Bedrock streams in bursts, so short answers read too fast. Tool-call input also comes in bursts, so a tool-heavy step can still read 196-354 tok/s (text: 80-117); not fixed (R8.4 partial).
+- **Thinking in SDK mode:** CLI 2.1.318 sends empty, signed thinking blocks unless a thinking display is set explicitly; it does not read the user's `showThinkingSummaries` outside the TUI. Live thinking text was never seen; do not read its absence as our bug.
+- **Hook notices** (`system/informational`, for example a UserPromptSubmit block) reach only our transient status line; the next notice replaces them, and a blocked prompt is not put back in the composer (known gap).
+- **`/` menu substring match:** Enter takes the first row, so `/bug` becomes `/debug`, `/review` becomes `/code-review`, `/skills` becomes `/reload-skills` (visible; needs a second Enter). Live drivers that type a TUI-only command must expect this.
+- **No title read:** D32 (`sessionTitle`) is not wired, so DSH keeps its own fallback title and `/rename` does not reach it.
 - **SDK import side effect:** SDK 0.3.318 sets `NoDefaultCurrentDirectoryInExePath=1` in `process.env` at import, on every OS. Load the SDK lazily and restore the env (D7).
 - **DSH terminal tab** (`sidebarRight.openTabIn(session, 'terminal')`) opens only in the session folder; it cannot start in another folder.
 - **DSH composer chain order:** DSH tries `conversation.composer` entries in ascending priority. ui-subagent's read-only child composer is at -10, so our child ask composer must sit below it (-20) and match only our own kind.
@@ -79,7 +88,7 @@ Every change must keep all of these true. If a feature seems to need breaking on
 - **Workflow agent end:** the CLI marks an agent done about 60 ms before it writes the agent's last transcript line. Keep reading a settled agent for a short grace period, or text-only agents end empty.
 - **Stopped workflow agents** come as `error` with the CLI's text "Stopped because the workflow was stopped". Show them as stopped, not failed. On a crash (run stop reason `error`), running agents settle as `error`.
 - **Workflow controls:** the SDK can stop only the whole run (`stopTask(runTaskId)`). `stopTask(agentId)` is a silent no-op, and pause, skip and retry are TUI-only. Do not offer them (D48).
-- **Ultracode** is a session toggle, not an effort level: the TUI and our picker send `apply_flag_settings {ultracode: true}` only. A later effort pick (`{effortLevel}`) turns it off. The typed keyword works only on user frames with `origin: {kind: 'human'}`.
+- **Ultracode** is a session toggle, not an effort level: the TUI and our picker send `apply_flag_settings {ultracode: true}` only. A level pick sends `{effortLevel, ultracode: false}` (as the TUI does over the control transport); `{effortLevel}` alone left ultracode on when the level did not change. The typed keyword works only on user frames with `origin: {kind: 'human'}`.
 - **Local command results** (`/compact`, `/clear`, `/context`) come with `num_turns: 0` and empty text. One that answers our input must still end the DSH turn, or every later message queues. They also say `duration_api_ms: 0`, but the next real result is the running total again: do not treat that 0 as a counter restart.
 - **`/clear` new id:** take the conversation id from the next frame's `session_id`, not from `conversation_reset.new_conversation_id`.
 - **Usage panel re-reads:** never key a re-read on a summary's `at` stamp; each route read re-stamps it, which loops the usage control.
@@ -112,6 +121,7 @@ Every change must keep all of these true. If a feature seems to need breaking on
 CLAUDE.md                 this file (single source of truth)
 AGENTS.md                 pointer to CLAUDE.md
 docs/requirements.md      requirement list with acceptance checks and a status column
+docs/status.md            public status summary: per-row status and live evidence, raw-contract rules, TUI gaps, open questions
 docs/architecture.md      design decisions (D-numbers), event mapping, backend interface
 docs/plugin-api.md        public services (rawAgent, rawAgentClient), grants, restyle points (R9.1, R9.2)
 docs/research/            public research notes (no local paths or ids)
@@ -162,7 +172,8 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
 - **Live usage checks:** a wrapper that `tee`s the CLI's stdout (same `executablePath` trick) captures its `result`, `rate_limit_event` and `compact_boundary` frames for comparison with our panel. This machine has only Bedrock auth; subscription limits are unit-tested only.
 - **Live command checks:** set `executablePath` to a `tee` wrapper and compare the CLI's stdin lines with what was typed; a menu open on Enter replaces the line with the picked row (for example `/cost` becomes `/usage`).
 - **Live rewind refusal test:** a `tee` wrapper (`executablePath`) that replaces the `--resume-drops-turn` value with a bogus id once forces the CLI's refusal. Restore `cordis.patch.yml` afterwards.
-- **Live crash test:** match the test CLI by binary and cwd before `kill -9` (other `claude` processes run on this machine, and a `pgrep -f` can match the driver's own command line).
+- **Live crash test:** Sonnet refuses a foreground `sleep 30` (it offers the background); ask for `python3 -c "import time; time.sleep(40)"` and watch for it under the CLI. Match the test CLI by binary and cwd before `kill -9` (other `claude` processes run on this machine, and a `pgrep -f` can match the driver's own command line).
+- **Re-adding a rebuilt tarball** of the same version (`dsh plugin add <tgz>` again) exits 0 but keeps the old `lib/` (the lockfile's old integrity wins). Run `dsh plugin remove` first, then `add`, and check the installed `lib/` before a live check.
 - **Copying `.dsh-dev` for a parallel test:** its `node_modules/dsh-raw-agent` is a relative `link:` symlink; re-point it to the repo in the copy.
 - **Fresh profile drivers:** a profile with no workspace opens DSH's folder dialog first; before the first message our model picker shows only "Start Claude Code to list models", and the start asks the trust question.
 - **Windows tests:** the code joins paths with the OS separator, so a test file seam must compare with `path.join(...)` (or normalise `\` to `/` for recorded POSIX fixture paths), never a hard-coded `/a/b` string. CI run 1 failed 8 tests on Windows for this reason only.

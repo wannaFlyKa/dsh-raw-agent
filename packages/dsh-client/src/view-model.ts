@@ -67,18 +67,24 @@ export function effortSelect(info: SessionInfo): SelectModel | undefined {
   const settingsEffort = info.settings?.effort;
   const ultra = v.live.ultracode;
   const modeEntry = info.efforts.find((e) => e.kind === 'mode');
+  // R1.4: the level the agent itself reports it applies (it can differ from the settings file,
+  // for example a model without that level, or a typed `/effort`). Shown, never inferred.
+  const running = v.live.effort;
+  const modeOn = modeEntry && ultra?.on === true ? `${modeEntry.label.toLowerCase()} on` : undefined;
   // The user's own settings may turn the mode on: name it, so "your settings" is not a surprise.
-  const fromSettings = [
-    settingsEffort,
-    modeEntry && ultra?.on === true && v.choice.effort === undefined
-      ? `${modeEntry.label.toLowerCase()} on`
-      : undefined,
-  ]
+  const settingsLevel =
+    running !== undefined && settingsEffort !== undefined && running !== settingsEffort
+      ? `${settingsEffort}; running: ${running}`
+      : running !== undefined && settingsEffort === undefined
+        ? `running: ${running}`
+        : settingsEffort;
+  const fromSettings = [settingsLevel, v.choice.effort === undefined ? modeOn : undefined]
     .filter((x): x is string => x !== undefined && x !== '')
     .join(', ');
   const options: SelectOption[] = [
     { value: SETTINGS, label: fromSettings ? `Effort: your settings (${fromSettings})` : 'Effort: your settings' },
   ];
+  const applied = v.choice.effort !== undefined && v.choice.applied.effort === v.choice.effort;
   // A model that lists its efforts narrows the levels (D34); otherwise every backend level shows.
   const modelId = v.choice.model ?? v.live.model;
   const supported = info.models.find((m) => m.value === modelId)?.efforts;
@@ -88,7 +94,16 @@ export function effortSelect(info: SessionInfo): SelectModel | undefined {
     const off = isMode
       ? ultra?.available === false && !chosen
       : supported !== undefined && !supported.includes(e.id) && !chosen;
-    const o: SelectOption = { value: e.id, label: isMode ? `${e.label} (any effort)` : `Effort: ${e.label}` };
+    // R1.4, R6.5: a chosen level names what the agent really runs when that differs (a later
+    // typed `/effort`, or the mode still on), as the model picker does.
+    const differs = [
+      chosen && !isMode && applied && running !== undefined && running !== e.id ? `running: ${running}` : undefined,
+      chosen && !isMode && modeOn !== undefined ? modeOn : undefined,
+    ]
+      .filter((x): x is string => x !== undefined)
+      .join(', ');
+    const base = isMode ? `${e.label} (any effort)` : `Effort: ${e.label}`;
+    const o: SelectOption = { value: e.id, label: differs !== '' ? `${base} (${differs})` : base };
     const hint = [
       e.description,
       off && isMode ? `${info.backend.displayName} says it is not available for this session and model.` : undefined,

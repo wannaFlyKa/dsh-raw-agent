@@ -116,8 +116,15 @@ overrides:
 - **The mode picker** can lag up to 4 seconds after you pick a mode on a plan card.
 - **DSH's terminal tab** opens in the session folder only.
 - **Attached file names** that contain both a space and a `"` do not reach Claude Code (DSH stores `"` as `_`).
-- **Live-tested only on Linux with Bedrock auth.** Subscription plan limits, macOS and Windows are covered by tests, not by
-  a live run.
+- **No `!` shell mode.** A line that starts with `!` goes to the model as text (SDK mode has no shell mode), so the model
+  may run Bash for it, with a permission ask in default mode. Use DSH's terminal tab for a direct shell.
+- **`/rename`** renames the Claude Code session, but the DSH session title stays as it was.
+- **A model picked before the first message** is applied with `setModel` right after the start, so Claude Code builds the
+  system prompt for your settings model, not for the picked one (rule: no forced model at start).
+- **Live-tested only on Linux with Bedrock auth.** Subscription plan limits (unit tests only), API key and Vertex auth
+  (not tested), macOS and Windows (CI tests only) have had no live run.
+- **Claude Agent SDK 0.3.318 exactly.** The plugin uses SDK controls that the SDK types do not declare, so the version is
+  pinned to the one the live checks ran on.
 
 ## Privacy
 

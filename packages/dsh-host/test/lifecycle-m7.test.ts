@@ -206,7 +206,7 @@ const recoveredTail: SessionTail = {
     },
   ],
   prompts: [],
-  notes: ['a background task reported back'],
+  notes: ['a report from a background task'],
   orphanResults: 1,
   lastChainId: 'r2',
 };
@@ -333,7 +333,7 @@ describe('R3.6: replies read back from the agent record', () => {
     expect(s.ops).toEqual(['open', 'commit late reply,tool-call', 'result t2', 'close']);
     expect(s.bindings[0]).toMatchObject({ sessionId: 'own', hostSessionId: 'h2', lastChainId: 'a2' });
     expect(s.triggers[0]![1]).toEqual([
-      'it took in a background task reported back',
+      'it took in a report from a background task',
       expect.stringMatching(/^1 tool result came back/),
     ]);
     expect(rt.view().lifecycle?.recovered).toMatchObject({ why: 'restart', steps: 1 });

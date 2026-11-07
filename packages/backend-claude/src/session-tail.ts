@@ -151,10 +151,15 @@ export function sessionTail(
     const text = userText(e);
     if (text.trim() === '' || e.isMeta === true || isReminder(text) || text.startsWith('[Request interrupted'))
       continue;
+    // Phase 5 fix (R3.6): `queueTranscriptOnly` marks an input the CLI writes to the transcript
+    // only, after the turn that already took it in (CLI 2.1.318: a task notification whose report
+    // came as a `SubagentHandback` message is written after the wake reply, as a chain descendant
+    // of it). The session already showed that turn, so it is not something the session lacks.
+    if (e.queueTranscriptOnly === true) continue;
     const origin = isObject(e.origin) ? str(e.origin.kind) : undefined;
     if (origin === 'task-notification' || text.trimStart().startsWith('<task-notification>')) {
       const s = notificationSummary(text);
-      out.notes.push(s ? `a background task reported back: ${s}` : 'a background task reported back');
+      out.notes.push(s ? `a report from a background task (${s})` : 'a report from a background task');
       continue;
     }
     if (origin !== undefined && origin !== 'human') {

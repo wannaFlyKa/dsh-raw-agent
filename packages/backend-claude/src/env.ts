@@ -1,7 +1,8 @@
 // Environment policy (rule 5, D17a, D7).
 //
 // Start from the DSH process env and delete only what belongs to a *host* Claude Code session.
-// Never drop the user's tokens or keys. Re-check the list on every CLI upgrade: the names come
+// Never drop the user's tokens or keys, also not `DSH_*` ones (phase 5 fix: the user may set
+// such a name for their own tools; no shipped DSH code puts its own secret there). Re-check the list on every CLI upgrade: the names come
 // from minified CLI code (raw-baseline §2 "Final list"). Re-verified against CLI 2.1.318 in M1:
 // the child-marker builder (`udt`) still sets exactly CLAUDECODE, CLAUDE_CODE_SESSION_ID,
 // CLAUDE_CODE_CHILD_SESSION, CLAUDE_CODE_SESSION_ATTENDED, CLAUDE_PID, AI_AGENT, CLAUDE_EFFORT and
@@ -47,9 +48,7 @@ export const KEPT_HOST_MARKERS: readonly string[] = Object.freeze([
   'SHELL',
 ]);
 
-const DSH_SECRET = /KEY|PASSWORD|SECRET|TOKEN/i;
-
-export type RemovalReason = 'host-session' | 'host-agent-marker' | 'host-trace' | 'dsh-secret';
+export type RemovalReason = 'host-session' | 'host-agent-marker' | 'host-trace';
 
 export interface ClaudeEnvResult {
   env: Record<string, string>;
@@ -77,7 +76,6 @@ export function buildClaudeEnv(
     if (always.has(n)) reason = 'host-session';
     else if (n === norm('AI_AGENT') && value.startsWith('claude-code')) reason = 'host-agent-marker';
     else if ((n === norm('TRACEPARENT') || n === norm('TRACESTATE')) && hadClaudeCode) reason = 'host-trace';
-    else if (name.toUpperCase().startsWith('DSH_') && DSH_SECRET.test(name)) reason = 'dsh-secret';
     if (reason !== undefined) removed.push({ name, reason });
     else env[name] = value;
   }

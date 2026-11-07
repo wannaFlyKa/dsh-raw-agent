@@ -332,6 +332,11 @@ export interface LiveInfo {
    * and every applied choice. `available: false`: the picker greys out its ultracode entry.
    */
   ultracode?: { on: boolean; requested?: boolean; available?: boolean };
+  /**
+   * R1.4: the effort level the agent says it applies now (Claude: `getSettings().applied.effort`),
+   * read with the ultracode state and again after every turn end, so a typed `/effort` shows.
+   */
+  effort?: string;
 }
 
 /** The session-only choices (D35-D38) and what reached the live process. */
@@ -649,6 +654,8 @@ export class SessionRuntime {
   #appliedEffort: string | undefined;
   /** D37: the last effort state the live process reported (see LiveInfo.ultracode). */
   #ultracode: LiveInfo['ultracode'];
+  /** R1.4: the effort level the live process last reported. */
+  #effort: string | undefined;
   #effortChoice: string | undefined;
   #pendingMode: string | undefined;
   /** The user picked a mode in this session (D38): a new process of this session keeps it. */
@@ -1210,6 +1217,7 @@ export class SessionRuntime {
     if (this.#appliedEffort !== undefined) choice.applied.effort = this.#appliedEffort;
     const v: SessionView = { state: this.state(), live: { ...this.#live }, choice };
     if (this.#ultracode !== undefined) v.live.ultracode = { ...this.#ultracode };
+    if (this.#effort !== undefined) v.live.effort = this.#effort;
     if (this.#models) v.models = this.#models.map((m) => ({ ...m }));
     if (this.#port) v.cwd = this.#port.cwd;
     if (this.#backend) v.backendSessionId = this.#backend.sessionId;
@@ -1748,6 +1756,7 @@ export class SessionRuntime {
     this.#refusedModel = undefined;
     this.#appliedEffort = undefined;
     this.#ultracode = undefined;
+    this.#effort = undefined;
     this.#live = {};
     this.#mainAgent = undefined;
     return `${this.#factory.displayName} starts again with this agent at the next message`;
@@ -1775,6 +1784,7 @@ export class SessionRuntime {
     this.#refusedModel = undefined;
     this.#appliedEffort = undefined;
     this.#ultracode = undefined;
+    this.#effort = undefined;
     this.#live = {};
     this.#resetPending = false;
     return `${this.#factory.displayName} will start again with your settings at the next message`;
@@ -1913,6 +1923,7 @@ export class SessionRuntime {
       this.#refusedModel = undefined;
       this.#appliedEffort = undefined;
       this.#ultracode = undefined;
+      this.#effort = undefined;
       this.#resetPending = false;
       this.#live = {};
       this.#mainAgent = mainAgent;
@@ -1996,6 +2007,8 @@ export class SessionRuntime {
       this.#notify();
       return;
     }
+    // R1.4: a turn (a typed `/effort` included) can change the applied effort; re-read it.
+    if (e.type === 'turn-end') this.#readEffortState(from);
     switch (e.type) {
       case 'workflow-start':
         // Inside a turn it follows the launching call's result in the turn's order (D48).
@@ -2228,6 +2241,7 @@ export class SessionRuntime {
       try {
         await backend.controls.setModel(model);
         this.#appliedModel = model;
+        this.#effort = undefined; // a model can change the applied effort (R1.4)
         this.#refusedModel = undefined;
       } catch (error) {
         this.#refusedModel = model;
@@ -2239,6 +2253,7 @@ export class SessionRuntime {
       try {
         await backend.controls.setEffort(effort);
         this.#appliedEffort = effort;
+        this.#effort = undefined; // stale until the read below answers (R1.4)
       } catch (error) {
         failed('setEffort', error);
       }
@@ -2273,8 +2288,17 @@ export class SessionRuntime {
         if (state.ultracodeRequested !== undefined) next.requested = state.ultracodeRequested;
         if (state.ultracodeAvailable !== undefined) next.available = state.ultracodeAvailable;
         const cur = this.#ultracode;
-        if (cur && cur.on === next.on && cur.requested === next.requested && cur.available === next.available) return;
+        const effort = state.effort;
+        if (
+          cur &&
+          cur.on === next.on &&
+          cur.requested === next.requested &&
+          cur.available === next.available &&
+          effort === this.#effort
+        )
+          return;
         this.#ultracode = next;
+        this.#effort = effort;
         this.#notify();
       },
       (error: unknown) => this.#warn(`effortState failed: ${String((error as Error)?.message ?? error)}`),

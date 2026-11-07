@@ -543,7 +543,7 @@ describe('D28, D29, D70: the start the factory really makes', () => {
     expect(f.made).toHaveLength(2);
     expect(f.made[1]!.seq).toEqual([
       'setModel claude-sonnet-5-5',
-      'applyFlagSettings {"effortLevel":"low"}',
+      'applyFlagSettings {"effortLevel":"low","ultracode":false}',
       'sent in-1',
     ]);
     await session.dispose();

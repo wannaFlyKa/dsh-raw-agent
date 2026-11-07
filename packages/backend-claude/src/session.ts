@@ -90,14 +90,16 @@ export interface ClaudeSessionInit {
 /**
  * D37: the flag settings for an effort id, as the terminal app's `/effort` sets them (CLI
  * 2.1.318 binary; live M4 probe U). `ultracode` is the app's `/effort ultracode`: ultracode on,
- * effort unchanged. A level is `/effort <level>`: only the level; the CLI itself turns ultracode
- * off when the level changes ("· Ultracode off"). `null` (back to my settings) clears both from
- * the session's flag layer.
+ * effort unchanged. A level is `/effort <level>`: the level and `ultracode: false`, as the app
+ * sends it to a CLI it drives over the control transport (CLI 2.1.318 binary, the `/effort`
+ * command's host path). With the level alone the CLI kept ultracode on when the level did not
+ * change (phase 5 g4: Low, Ultracode, Low left ultracode on). `null` (back to my settings) clears
+ * both from the session's flag layer.
  */
 export function effortFlags(effortId: string | null): Record<string, unknown> {
   if (effortId === null) return { effortLevel: null, ultracode: null };
   if (effortId === 'ultracode') return { ultracode: true };
-  return { effortLevel: effortId };
+  return { effortLevel: effortId, ultracode: false };
 }
 
 /**

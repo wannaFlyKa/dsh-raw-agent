@@ -120,6 +120,14 @@ export const UNTIMED_SKEW_MS = 250;
  * ceiling is above any published Claude output speed (**unverified** for future fast modes).
  */
 export const MAX_PLAUSIBLE_TOKENS_PER_SECOND = 500;
+/**
+ * R8.4 (phase 5 fix): a decode window shorter than this cannot give a real speed. The first
+ * chunk already holds several tokens, and the window starts only at that chunk, so a short
+ * answer reads far too fast (live: 20 tokens over 56 ms = 357 tok/s). Such a step keeps its
+ * usage but no timing, so DSH's speed average is fed only measurable steps. 500 ms keeps the
+ * real steps seen live (75 tokens over 754 ms = 99 tok/s) and drops the 56 ms burst.
+ */
+export const MIN_TIMED_DECODE_MS = 500;
 
 export interface CommitInput {
   blocks: DshBlock[];
@@ -324,7 +332,8 @@ export class TurnLog {
   /**
    * R8.4: may this step's live timing reach DSH's TTFT and speed figures? Not when the step was
    * opened late, when its thinking was counted but never streamed (the speed would include the
-   * hidden thinking), or when its output came as a burst faster than any model writes.
+   * hidden thinking), when its decode window is too short to measure, or when its output came as
+   * a burst faster than any model writes.
    */
   #timingHonest(usage: DshUsage | undefined, at: number): boolean {
     if (this.#untimed) return false;
@@ -332,7 +341,7 @@ export class TurnLog {
     if ((usage.reasoningTokens ?? 0) > 0 && !this.#reasoningStreamed) return false;
     const decodeMs = at - this.#firstTokenAt;
     if (usage.outputTokens <= 0) return true;
-    if (decodeMs <= 0) return false;
+    if (decodeMs < MIN_TIMED_DECODE_MS) return false;
     return (usage.outputTokens * 1000) / decodeMs <= MAX_PLAUSIBLE_TOKENS_PER_SECOND;
   }
 

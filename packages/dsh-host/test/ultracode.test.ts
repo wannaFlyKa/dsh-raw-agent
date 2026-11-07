@@ -67,7 +67,7 @@ function setup(state: () => EffortState | Error) {
     warn: (t) => void warnings.push(t),
   };
   const rt = new SessionRuntime(factory, port, { env: {} });
-  return { rt, efforts, reads: () => reads, warnings };
+  return { rt, efforts, reads: () => reads, warnings, q };
 }
 
 describe('ultracode state in the session view (D37)', () => {
@@ -87,6 +87,19 @@ describe('ultracode state in the session view (D37)', () => {
     expect(t.rt.view().live.ultracode).toEqual({ on: true, requested: true, available: true });
     expect(JSON.parse(channelLine(t.rt.view())).live.ultracode).toEqual({ on: true, requested: true, available: true });
     expect(t.reads()).toBeGreaterThanOrEqual(2);
+    await t.rt.dispose();
+  });
+
+  it('shows the effort the agent applies and reads it again after a turn end (R1.4, phase 5 fix)', async () => {
+    let s: EffortState = { effort: 'medium', ultracode: false, ultracodeAvailable: true };
+    const t = setup(() => s);
+    await t.rt.start();
+    await until(() => t.rt.view().live.effort === 'medium');
+    // A typed `/effort high` changes it inside the agent; the next turn end reads it.
+    s = { effort: 'high', ultracode: false, ultracodeAvailable: true };
+    t.q.push({ type: 'turn-end', agent: { kind: 'main' }, outcome: 'completed', pendingInputs: 0 } as BackendEvent);
+    await until(() => t.rt.view().live.effort === 'high');
+    expect(JSON.parse(channelLine(t.rt.view())).live.effort).toBe('high');
     await t.rt.dispose();
   });
 
