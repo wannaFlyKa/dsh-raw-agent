@@ -52,11 +52,11 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
-dsh plugin --profile <profile> add "$PWD/packages/plugin/dist/dsh-raw-agent-0.1.0.tgz"
+dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.0.tgz"
 ```
 
-`pnpm --filter` runs in the package folder, so the tarball lands in `packages/plugin/dist/`. Pass an absolute path to a
-local tarball. Restart DSH after the add.
+pnpm 11 resolves `--pack-destination` from the folder you run it in, so the tarball lands in `dist/` at the repo
+root. Pass an absolute path to a local tarball. Restart DSH after the add.
 
 ### First run
 

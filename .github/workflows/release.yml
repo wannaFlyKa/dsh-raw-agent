@@ -56,13 +56,13 @@ jobs:
       - name: Pack
         run: |
           pnpm --filter dsh-raw-agent pack --pack-destination dist/
-          ls -l "packages/plugin/dist/dsh-raw-agent-${{ steps.version.outputs.version }}.tgz"
+          ls -l "dist/dsh-raw-agent-${{ steps.version.outputs.version }}.tgz"
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          asset="packages/plugin/dist/dsh-raw-agent-${VERSION}.tgz"
+          asset="dist/dsh-raw-agent-${VERSION}.tgz"
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-raw-agent-${VERSION}.tgz"
           {
             echo "## Install"
