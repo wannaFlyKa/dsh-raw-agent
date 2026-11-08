@@ -225,6 +225,11 @@ pnpm test:cli-constants  # check our env lists and reject texts against the inst
   `dsh --profile <name> --from-default-profile web --dump-config` first, then `dsh plugin ... add`.
 - **The release URL install** (`dsh plugin add <release .tgz URL>`) was checked live in a fresh web-template profile:
   with the README `overrides` block, `node_modules` is 6.3 MB (329 MB without) and the installed files equal the asset.
+- **The Discover install** (0.1.3) was checked live in a fresh web-template profile with the published raw index URL:
+  list with title, icon and description, README detail page, Install, **Enable now** (the preset shows without a
+  restart, and after one), `node_modules` 6.3 MB with the `overrides` block, installed files equal the release asset.
+  The profile's `package.json` then holds `"dsh-raw-agent": "github:wannaFlyKa/dsh-raw-agent#<dist commit>"`, and the
+  index URL is saved as `plugin-market.config.indexes` in its `cordis.patch.yml`.
 - **Copying `.dsh-dev` for a parallel test:** its `node_modules/dsh-raw-agent` is a relative `link:` symlink; re-point it to the repo in the copy.
 - **Clean env and Bedrock:** an `env -i` test DSH must keep the user's `AWS_EC2_METADATA_DISABLED` and the PATH entry of their AWS credential helper. Without them the CLI falls back to the instance role (403 on every model) or finds no credentials, and every turn fails.
 - **Fresh profile drivers:** a profile with no workspace opens DSH's folder dialog first; before the first message our model picker shows only "Start Claude Code to list models", and the start asks the trust question.
