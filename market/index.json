@@ -37,6 +37,18 @@
       },
       "versions": [
         {
+          "version": "0.1.3",
+          "publishTimestamp": 1794118034,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/wannaFlyKa/dsh-raw-agent",
+            "commit": "6e0fc167579243bfcd20460818fadae538977011"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+          }
+        },
+        {
           "version": "0.1.2",
           "publishTimestamp": 1794095984,
           "source": {
