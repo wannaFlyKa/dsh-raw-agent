@@ -44,9 +44,18 @@ export const CONTROLS_ENTRY_ID = 'raw-agent-session-controls';
  * (`P/dsh-client-ui-renderer/lib/client.js:1124`, a `display: contents` anchor).
  */
 export const NATIVE_PERMISSION_SLOT = 'conversation.input.permission';
-/** Set on the nearest composer ancestor of our controls; a style rule then hides the seat. */
+/**
+ * DSH's own model seat at the right of the composer row (`P/dsh-client-ui-conversation/lib/client.js:22110`,
+ * rendered from `P/dsh-client-ui-model-selection`).
+ */
+export const NATIVE_MODEL_SLOT = 'conversation.input.model';
+/** The DSH seats hidden in our sessions, in the order they are looked for. */
+export const HIDDEN_NATIVE_SLOTS: readonly string[] = Object.freeze([NATIVE_PERMISSION_SLOT, NATIVE_MODEL_SLOT]);
+/** Set on the nearest composer ancestor of our controls that holds a seat; a style rule then hides the seat. */
 export const SEAT_HIDDEN_ATTR = 'data-raw-agent-hides-seat';
 const SEAT_STYLE_ID = 'raw-agent-hide-native-seat';
+/** One rule for every hidden seat, each only under a marked ancestor. */
+export const SEAT_HIDING_RULE = `${HIDDEN_NATIVE_SLOTS.map((s) => `[${SEAT_HIDDEN_ATTR}] [data-slot="${s}"]`).join(',')}{display:none !important}`;
 /** How far up from our controls the composer row may be. */
 const SEAT_SEARCH_DEPTH = 8;
 
@@ -64,13 +73,16 @@ export interface SeatDocument {
 }
 
 /**
- * Hide DSH's permission seat in this composer only. DSH's seat changes DSH's approval policy,
- * which our agent ignores (D38 r3), so in our sessions it shows a mode that is not applied
- * (M1 verify 2: "Read Only" while Claude wrote files in Auto). The seat is a single DSH slot that
- * cannot be replaced per session (K1), so the nearest ancestor that holds it gets a marker, and
- * one style rule hides the seat under that marker. The undo removes the marker (a Standard
- * session in the same composer shows the seat again). DOM shape **unverified** on DSH versions
- * other than TESTED_DSH_VERSIONS.
+ * Hide DSH's permission and model seats in this composer only. Neither acts on our agent:
+ * - The permission seat changes DSH's approval policy, which our agent ignores (D38 r3), so in
+ *   our sessions it shows a mode that is not applied (M1 verify 2: "Read Only" while Claude wrote
+ *   files in Auto).
+ * - The model seat saves the DSH profile default (`selectModel`, K1) and cannot pick our provider.
+ *   Our model chip is the session's model control (D36).
+ * Both are single DSH slots that cannot be replaced per session (K1). For each seat, the nearest
+ * ancestor of our controls that holds it gets a marker, and one style rule hides the seats under a
+ * marker. The undo removes the markers (a Standard session in the same composer shows the seats
+ * again). DOM shape **unverified** on DSH versions other than TESTED_DSH_VERSIONS.
  */
 export function hideNativeSeat(
   el: unknown,
@@ -79,21 +91,31 @@ export function hideNativeSeat(
   const none = { found: false, undo: () => {} };
   const start = el as SeatElement | null | undefined;
   if (!start || typeof start !== 'object' || !('parentElement' in start)) return none;
-  const selector = `[data-slot="${NATIVE_PERMISSION_SLOT}"]`;
-  let at = start.parentElement;
-  for (let i = 0; at && i < SEAT_SEARCH_DEPTH; i++, at = at.parentElement) {
-    if (!at.querySelector(selector)) continue;
-    if (doc && !doc.getElementById(SEAT_STYLE_ID)) {
+  const hosts: SeatElement[] = [];
+  for (const slot of HIDDEN_NATIVE_SLOTS) {
+    const selector = `[data-slot="${slot}"]`;
+    let at = start.parentElement;
+    for (let i = 0; at && i < SEAT_SEARCH_DEPTH; i++, at = at.parentElement) {
+      if (!at.querySelector(selector)) continue;
+      if (!hosts.includes(at)) hosts.push(at);
+      break;
+    }
+  }
+  if (hosts.length === 0) return none;
+  if (doc) {
+    // A style element left by an older build in the same page gets the current rule.
+    const old = doc.getElementById(SEAT_STYLE_ID) as { textContent: string | null } | null;
+    if (old) {
+      if (old.textContent !== SEAT_HIDING_RULE) old.textContent = SEAT_HIDING_RULE;
+    } else {
       const style = doc.createElement('style');
       style.id = SEAT_STYLE_ID;
-      style.textContent = `[${SEAT_HIDDEN_ATTR}] ${selector}{display:none !important}`;
+      style.textContent = SEAT_HIDING_RULE;
       doc.head?.appendChild(style);
     }
-    const host = at;
-    host.setAttribute(SEAT_HIDDEN_ATTR, '');
-    return { found: true, undo: () => host.removeAttribute(SEAT_HIDDEN_ATTR) };
   }
-  return none;
+  for (const host of hosts) host.setAttribute(SEAT_HIDDEN_ATTR, '');
+  return { found: true, undo: () => hosts.forEach((host) => host.removeAttribute(SEAT_HIDDEN_ATTR)) };
 }
 
 /** The right sidebar's terminal tab kind (`P/dsh-client-ui-sidebar-terminal`). */

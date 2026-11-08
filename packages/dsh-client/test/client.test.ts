@@ -26,6 +26,9 @@ import {
   hideNativeSeat,
   hostActions,
   NATIVE_PERMISSION_SLOT,
+  NATIVE_MODEL_SLOT,
+  HIDDEN_NATIVE_SLOTS,
+  SEAT_HIDING_RULE,
   SEAT_HIDDEN_ATTR,
   statusLine,
   type FetchFn,
@@ -304,46 +307,82 @@ const actions = (log: string[] = []): HostActions => ({
   portal: (n) => n,
 });
 
-describe('native permission seat (M1 verify 2)', () => {
-  /** A tiny element tree: composer > [modes > permission outlet, left outlet > our bar]. */
-  function tree(withSeat: boolean) {
-    const attrs = new Map<string, string>();
-    const composer = {
-      parentElement: null,
-      querySelector: (sel: string) => (withSeat && sel === `[data-slot="${NATIVE_PERMISSION_SLOT}"]` ? {} : null),
-      setAttribute: (n: string, v: string) => void attrs.set(n, v),
-      removeAttribute: (n: string) => void attrs.delete(n),
+describe('native permission and model seats (M1 verify 2)', () => {
+  type Seat = 'permission' | 'model';
+  /**
+   * DSH's composer row (0.2.2-rc.1): row > [tools > [modes > permission outlet, left outlet > our bar],
+   * trailing > model outlet]. So the permission seat is under `tools` and the model seat only under `row`.
+   */
+  function tree(seats: readonly Seat[]) {
+    const marked = new Map<string, Set<string>>();
+    const slotOf: Record<Seat, string> = { permission: NATIVE_PERMISSION_SLOT, model: NATIVE_MODEL_SLOT };
+    const node = (name: string, parentElement: unknown, holds: readonly Seat[]) => {
+      marked.set(name, new Set());
+      return {
+        parentElement: parentElement as never,
+        querySelector: (sel: string) =>
+          holds.some((h) => seats.includes(h) && sel === `[data-slot="${slotOf[h]}"]`) ? {} : null,
+        setAttribute: (n: string) => void marked.get(name)!.add(n),
+        removeAttribute: (n: string) => void marked.get(name)!.delete(n),
+      };
     };
-    const outlet = { parentElement: composer, querySelector: () => null, setAttribute() {}, removeAttribute() {} };
-    const bar = { parentElement: outlet, querySelector: () => null, setAttribute() {}, removeAttribute() {} };
+    const row = node('row', null, ['permission', 'model']);
+    const tools = node('tools', row, ['permission']);
+    const outlet = node('outlet', tools, []);
+    const bar = node('bar', outlet, []);
     const styles: Array<{ id: string; textContent: string | null }> = [];
     const doc = {
       getElementById: (id: string) => styles.find((s) => s.id === id) ?? null,
       createElement: () => ({ id: '', textContent: null as string | null }),
       head: { appendChild: (n: unknown) => styles.push(n as never) },
     };
-    return { attrs, bar, doc, styles };
+    const markedNodes = () => [...marked].filter(([, attrs]) => attrs.has(SEAT_HIDDEN_ATTR)).map(([n]) => n);
+    return { bar, doc, styles, markedNodes };
   }
 
-  it('marks the composer that holds the seat, adds one hiding rule, and undoes the mark', () => {
-    const t = tree(true);
+  it('hides both seats: marks the nearest holder of each, adds one rule, and undoes the marks', () => {
+    expect(HIDDEN_NATIVE_SLOTS).toEqual([NATIVE_PERMISSION_SLOT, NATIVE_MODEL_SLOT]);
+    const t = tree(['permission', 'model']);
     const h = hideNativeSeat(t.bar, t.doc);
     expect(h.found).toBe(true);
-    expect(t.attrs.has(SEAT_HIDDEN_ATTR)).toBe(true);
+    expect(t.markedNodes()).toEqual(['row', 'tools']);
     expect(t.styles).toHaveLength(1);
-    expect(t.styles[0]!.textContent).toBe(
-      `[${SEAT_HIDDEN_ATTR}] [data-slot="${NATIVE_PERMISSION_SLOT}"]{display:none !important}`,
+    expect(t.styles[0]!.textContent).toBe(SEAT_HIDING_RULE);
+    expect(SEAT_HIDING_RULE).toBe(
+      `[${SEAT_HIDDEN_ATTR}] [data-slot="${NATIVE_PERMISSION_SLOT}"],` +
+        `[${SEAT_HIDDEN_ATTR}] [data-slot="${NATIVE_MODEL_SLOT}"]{display:none !important}`,
     );
     hideNativeSeat(t.bar, t.doc).undo();
     expect(t.styles).toHaveLength(1);
     h.undo();
-    expect(t.attrs.has(SEAT_HIDDEN_ATTR)).toBe(false);
+    expect(t.markedNodes()).toEqual([]);
+  });
+
+  it('hides the model seat when DSH shows no permission seat, and the reverse', () => {
+    const modelOnly = tree(['model']);
+    expect(hideNativeSeat(modelOnly.bar, modelOnly.doc).found).toBe(true);
+    expect(modelOnly.markedNodes()).toEqual(['row']);
+    const permissionOnly = tree(['permission']);
+    expect(hideNativeSeat(permissionOnly.bar, permissionOnly.doc).found).toBe(true);
+    expect(permissionOnly.markedNodes()).toEqual(['tools']);
+  });
+
+  it('gives a style element left by an older build the current rule', () => {
+    const t = tree(['permission', 'model']);
+    t.styles.push({
+      id: 'raw-agent-hide-native-seat',
+      textContent: `[${SEAT_HIDDEN_ATTR}] [data-slot="${NATIVE_PERMISSION_SLOT}"]{display:none !important}`,
+    });
+    hideNativeSeat(t.bar, t.doc);
+    expect(t.styles).toHaveLength(1);
+    expect(t.styles[0]!.textContent).toBe(SEAT_HIDING_RULE);
   });
 
   it('does nothing when no seat is found or there is no element', () => {
-    const t = tree(false);
+    const t = tree([]);
     expect(hideNativeSeat(t.bar, t.doc).found).toBe(false);
-    expect(t.attrs.size).toBe(0);
+    expect(t.markedNodes()).toEqual([]);
+    expect(t.styles).toHaveLength(0);
     expect(hideNativeSeat(null, t.doc).found).toBe(false);
     expect(hostActions({ slots: {} as never, get: () => undefined }).hideNativeSeat).toBeTypeOf('function');
   });

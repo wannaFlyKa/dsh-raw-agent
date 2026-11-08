@@ -135,7 +135,8 @@ overrides:
   terminal-app only (the SDK has no control for them).
 - **Agent teams:** you cannot message a teammate from the UI (the CLI has no control for it).
 - **Branch after Stop:** DSH offers no Branch button on a stopped turn. Use **Rewind** in the composer row.
-- **DSH's own model seat and `/model`** change the profile default, not this session. Use the chips in the composer row.
+- **DSH's own model seat** (right side of the composer) is hidden in Claude Code sessions: it changes the DSH profile
+  default, not this session. Use the model chip in the composer row; `/model` opens it too.
 - **DSH's token meter** counts the main thread only. Our context pill and usage panel also count subagents, so the totals
   differ.
 - **`/btw` answers** carry no usage numbers (the CLI sends none), and do not stream.
