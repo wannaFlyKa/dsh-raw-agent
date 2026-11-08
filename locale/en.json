@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Claude Code (raw agent)",
+    "description": "Runs your own, unmodified Claude Code CLI as the agent of a session, with your settings."
+  }
+}

@@ -1,0 +1,22 @@
+# dsh-raw-agent: run your own, unmodified Claude Code as the agent of a DSH session.
+#
+# Two rows (architecture §8, D81):
+# - the Host entry registers one catalog provider per backend factory (D34);
+# - one agent preset per factory. Its single row is our agent entry: the driver, the prepend
+#   guard and the scoped job controller. No Standard row is mounted (persona, tools, tool-jobs,
+#   compaction, plan-mode, ...), so no DSH prompt, tool or notice reaches Claude Code.
+- insert:
+    - id: raw-agent
+      name: 'dsh-raw-agent'
+    - id: preset-raw-agent-claude-code
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: raw-agent-claude-code
+        name: Claude Code
+        description: Your own Claude Code CLI runs every turn, with your settings.
+        order: 5
+        plugins:
+          - id: raw-agent-driver
+            name: 'dsh-raw-agent/agent'
+            config:
+              backend: claude-code
