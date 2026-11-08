@@ -3,6 +3,16 @@
 All notable changes to `dsh-raw-agent`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package follows [Semantic Versioning](https://semver.org/). The plugin service API has its own number (`apiVersion`, now 1).
 
+## 0.1.4 (2026-11-08)
+
+UI polish. No change to what reaches Claude Code.
+
+### Changed
+
+- **DSH's model seat is hidden in Claude Code sessions.** The model control at the right of the composer saved the
+  DSH profile default and could not pick Claude Code's model, so it is now hidden there, as DSH's access seat already
+  was. Use the model chip; `/model` opens it too. Other sessions keep DSH's seat.
+
 ## 0.1.3 (2026-11-08)
 
 Install from DSH's plugin market. No change to the plugin code.

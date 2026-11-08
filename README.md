@@ -4,7 +4,7 @@ A [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh) plugi
 Claude Code CLI** as the agent of a DSH session. DSH gives the interface and its plugin system. Claude Code does the work,
 with your settings, exactly as in the terminal.
 
-> Status: pre-release (0.1.3). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
+> Status: pre-release (0.1.4). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
 > only.
 
 ## Requirements
@@ -39,7 +39,7 @@ Pick the web profile you use (for example `web`) and add the tarball from the Gi
 no web app; make it from the web template first (`dsh --profile <name> --from-default-profile web --dump-config`).
 
 ```sh
-dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.3/dsh-raw-agent-0.1.3.tgz
+dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.4/dsh-raw-agent-0.1.4.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Optional: to skip
@@ -135,7 +135,8 @@ overrides:
   terminal-app only (the SDK has no control for them).
 - **Agent teams:** you cannot message a teammate from the UI (the CLI has no control for it).
 - **Branch after Stop:** DSH offers no Branch button on a stopped turn. Use **Rewind** in the composer row.
-- **DSH's own model seat and `/model`** change the profile default, not this session. Use the chips in the composer row.
+- **DSH's own model seat** (right side of the composer) is hidden in Claude Code sessions: it changes the DSH profile
+  default, not this session. Use the model chip in the composer row; `/model` opens it too.
 - **DSH's token meter** counts the main thread only. Our context pill and usage panel also count subagents, so the totals
   differ.
 - **`/btw` answers** carry no usage numbers (the CLI sends none), and do not stream.
