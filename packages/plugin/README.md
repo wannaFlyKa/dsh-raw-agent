@@ -4,7 +4,7 @@ A [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh) plugi
 Claude Code CLI** as the agent of a DSH session. DSH gives the interface and its plugin system. Claude Code does the work,
 with your settings, exactly as in the terminal.
 
-> Status: pre-release (0.1.3). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
+> Status: pre-release (0.1.4). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
 > only.
 
 ## Requirements
@@ -39,7 +39,7 @@ Pick the web profile you use (for example `web`) and add the tarball from the Gi
 no web app; make it from the web template first (`dsh --profile <name> --from-default-profile web --dump-config`).
 
 ```sh
-dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.3/dsh-raw-agent-0.1.3.tgz
+dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.4/dsh-raw-agent-0.1.4.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Optional: to skip

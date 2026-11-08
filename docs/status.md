@@ -19,6 +19,13 @@ Status values:
 
 Count: 40 rows done, 3 partial (R1.3, R6.3, R8.3), none deferred.
 
+**0.1.4 (model seat), checked live in a throwaway DSH profile (no message sent), light theme:**
+
+- DSH's own model seat at the right of the composer ("Select model") is hidden in Claude Code sessions, as DSH's access
+  seat already was. It saved the DSH profile default and could not pick Claude Code's model; the model chip (and
+  `/model`) is the session's model control. Live: hidden in a new Claude Code session; shown again when the same
+  composer switched to Standard mode; hidden again after a switch back. No page errors.
+
 **0.1.2 (side chat tab), checked live in a throwaway DSH profile (Sonnet session), light and dark theme:**
 
 - `/btw` answers now show in a **Side chat** tab in DSH's right sidebar, registered through DSH's public tab API

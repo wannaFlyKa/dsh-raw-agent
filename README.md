@@ -2,7 +2,7 @@
 
 Run your **own, unmodified Claude Code** inside [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), and use DSH plugins to change how everything looks and behaves.
 
-> **Status: 0.1.3, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
+> **Status: 0.1.4, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
 > 2.1.318). macOS and Windows run in CI only. The package is **not on npm**: install it from DSH's **Discover** tab, from
 > the GitHub Release tarball or from source (below). The full user guide is [packages/plugin/README.md](packages/plugin/README.md).
 
@@ -53,7 +53,7 @@ plugin in **Installed**, then install it again from **Discover**.
 ### From the GitHub Release
 
 ```sh
-dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.3/dsh-raw-agent-0.1.3.tgz
+dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.4/dsh-raw-agent-0.1.4.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Restart DSH
@@ -78,7 +78,7 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
-dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.3.tgz"
+dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.4.tgz"
 ```
 
 pnpm 11 resolves `--pack-destination` from the folder you run it in, so the tarball lands in `dist/` at the repo

@@ -3,7 +3,9 @@
 All notable changes to `dsh-raw-agent`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package follows [Semantic Versioning](https://semver.org/). The plugin service API has its own number (`apiVersion`, now 1).
 
-## Unreleased
+## 0.1.4 (2026-11-08)
+
+UI polish. No change to what reaches Claude Code.
 
 ### Changed
 
