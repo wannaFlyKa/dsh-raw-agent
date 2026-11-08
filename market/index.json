@@ -1,0 +1,54 @@
+{
+  "format": 1,
+  "title": {
+    "en": "dsh-raw-agent",
+    "zh": "dsh-raw-agent"
+  },
+  "description": {
+    "en": "The dsh-raw-agent plugin for DeepSeek Harness. Every version installs from a pinned Git commit; npm is not used.",
+    "zh": "DeepSeek Harness 的 dsh-raw-agent 插件。每个版本都从固定的 Git 提交安装，不使用 npm。"
+  },
+  "plugins": [
+    {
+      "name": "dsh-raw-agent",
+      "title": {
+        "en": "Claude Code (raw agent)",
+        "zh": "Claude Code（原生代理）"
+      },
+      "description": {
+        "en": "Run your own, unmodified Claude Code CLI as the agent of a DSH session, with your own settings, skills, MCP servers and hooks. No hidden prompts and no forced flags.",
+        "zh": "在 DSH 会话中运行你自己的、未经修改的 Claude Code CLI，沿用你自己的设置、技能、MCP 服务器和 hooks。没有隐藏提示，也没有强制参数。"
+      },
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0Ij48cmVjdCB4PSI0IiB5PSI0IiB3aWR0aD0iNTYiIGhlaWdodD0iNTYiIHJ4PSIxNCIgZmlsbD0iI2Q5Nzc1NyIvPjxwYXRoIGQ9Ik0yMCAyMmwxMiAxMC0xMiAxMCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxwYXRoIGQ9Ik0zNCA0NGgxMiIgc3Ryb2tlPSIjZmZmIiBzdHJva2Utd2lkdGg9IjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPjwvc3ZnPgo=",
+      "author": "wannaFlyKa",
+      "homepage": "https://github.com/wannaFlyKa/dsh-raw-agent#readme",
+      "repository": {
+        "url": "https://github.com/wannaFlyKa/dsh-raw-agent",
+        "directory": "packages/plugin"
+      },
+      "metadata": {
+        "keywords": [
+          "dsh",
+          "deepseek-harness",
+          "dsh-plugin",
+          "claude-code",
+          "agent"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.1.2",
+          "publishTimestamp": 1794095984,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/wannaFlyKa/dsh-raw-agent",
+            "commit": "c325a79759937f4a6e5f822ac8c4a71770feb6c4"
+          },
+          "engines": {
+            "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+          }
+        }
+      ]
+    }
+  ]
+}

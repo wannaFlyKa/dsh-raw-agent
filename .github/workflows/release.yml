@@ -1,5 +1,8 @@
-# Release: on a `v*` tag, run the full check and attach the packed plugin to a GitHub Release.
-# npm publishing is planned later; for now users install from the release asset URL.
+# Release: on a `v*` tag, run the full check, attach the packed plugin to a GitHub Release, publish
+# the packed files as a commit on the `dist` branch (tagged `dist-vX.Y.Z`), and add that commit to
+# the DSH plugin market index (market/index.json on main). npm is not used (CLAUDE.md §7).
+# The index commit is pushed with GITHUB_TOKEN, which starts no workflow, and it is a push to main
+# (not a tag), so it cannot start this job again.
 name: Release
 
 on:
@@ -22,6 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The index step adds a commit on top of main.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -57,15 +63,50 @@ jobs:
         run: |
           pnpm --filter dsh-raw-agent pack --pack-destination dist/
           ls -l "dist/dsh-raw-agent-${{ steps.version.outputs.version }}.tgz"
+      - name: Check the market index
+        run: node scripts/market-index.mjs check
+      - name: Publish the dist commit
+        id: dist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          node scripts/publish-dist.mjs "dist/dsh-raw-agent-${VERSION}.tgz" --source "${GITHUB_SHA}" --push
+      - name: Check the dist commit installs with pnpm and equals the tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ steps.dist.outputs.commit }}
+        run: |
+          work="$(mktemp -d)"
+          mkdir "${work}/tgz" "${work}/profile"
+          tar -xzf "dist/dsh-raw-agent-${VERSION}.tgz" -C "${work}/tgz"
+          cd "${work}/profile"
+          echo '{"name":"dist-check","private":true,"packageManager":"pnpm@11.28.10"}' > package.json
+          # The README overrides block (the SDK platform package is never run).
+          printf 'overrides:\n  "@anthropic-ai/claude-agent-sdk>@anthropic-ai/claude-agent-sdk-linux-x64": "-"\n' > pnpm-workspace.yaml
+          COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm add "git+https://github.com/${GITHUB_REPOSITORY}.git#${COMMIT}"
+          diff -r "${work}/tgz/package" node_modules/dsh-raw-agent
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           asset="dist/dsh-raw-agent-${VERSION}.tgz"
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            # A re-run after a later step failed: keep the release, replace its asset.
+            gh release upload "${GITHUB_REF_NAME}" "${asset}" --clobber
+            exit 0
+          fi
           url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/dsh-raw-agent-${VERSION}.tgz"
+          index="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/market/index.json"
           {
             echo "## Install"
+            echo
+            echo "From DSH's **Plugins > Discover** tab: turn on **Custom plugin indexes** (under **Experimental plugins**),"
+            echo "add the index source \`${index}\` and install **Claude Code (raw agent)**."
+            echo
+            echo "Or from this release asset:"
             echo
             echo '```sh'
             echo "dsh plugin --profile <profile> add ${url}"
@@ -79,3 +120,25 @@ jobs:
             --notes-file notes.md \
             --generate-notes \
             --verify-tag
+      - name: Add the version to the market index on main
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          COMMIT: ${{ steps.dist.outputs.commit }}
+        run: |
+          main="$(mktemp -d)/main"
+          for attempt in 1 2 3; do
+            git fetch origin +refs/heads/main:refs/remotes/origin/main
+            rm -rf "${main}"
+            git worktree prune
+            git worktree add --detach "${main}" origin/main
+            # Package version, DSH range and icon come from this tag's checkout.
+            node scripts/market-index.mjs add "${VERSION}" "${COMMIT}" --file "${main}/market/index.json"
+            if git -C "${main}" diff --quiet; then
+              echo "market/index.json already lists ${VERSION} at ${COMMIT}"
+              exit 0
+            fi
+            git -C "${main}" commit -am "Market index: dsh-raw-agent ${VERSION} [skip ci]"
+            if git -C "${main}" push origin HEAD:main; then exit 0; fi
+            echo "main moved; trying again"
+          done
+          exit 1

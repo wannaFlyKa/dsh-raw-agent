@@ -7,3 +7,4 @@ coverage/
 pnpm-lock.yaml
 *.md
 **/test/fixtures/
+/market/index.json
