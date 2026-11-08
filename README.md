@@ -2,9 +2,9 @@
 
 Run your **own, unmodified Claude Code** inside [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh), and use DSH plugins to change how everything looks and behaves.
 
-> **Status: 0.1.2, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
-> 2.1.318). macOS and Windows run in CI only. The package is **not on npm yet**: install it from a packed tarball or from
-> source (below). The full user guide is [packages/plugin/README.md](packages/plugin/README.md).
+> **Status: 0.1.3, pre-release.** It works for daily use on Linux (tested live on DSH 0.2.2-rc.1 with Claude Code
+> 2.1.318). macOS and Windows run in CI only. The package is **not on npm**: install it from DSH's **Discover** tab, from
+> the GitHub Release tarball or from source (below). The full user guide is [packages/plugin/README.md](packages/plugin/README.md).
 
 ## Why
 
@@ -26,10 +26,34 @@ signed in. Put a web profile name in place of `<profile>` (for example `web`, wh
 new profile name makes a profile without the web app. To use a new name, make it from the web template first:
 `dsh --profile <profile> --from-default-profile web --dump-config`.
 
-### From the GitHub Release (recommended)
+### From DSH Discover (recommended)
+
+DSH's plugin market reads plugin indexes that you add. This project publishes its own index; every version in it
+installs from a pinned Git commit of this repository (the `dist` branch). npm is not used.
+
+1. Optional: to skip the large SDK platform package, add the `overrides` block from
+   [packages/plugin/README.md](packages/plugin/README.md#optional-drop-the-sdk-platform-package) to the profile's
+   `pnpm-workspace.yaml` first. It applies to a Discover install too.
+2. In the DSH web UI, open **Plugins**. Under **Experimental plugins**, switch on **Custom plugin indexes**. The page
+   now has the **Installed** and **Discover** tabs.
+3. Open **Discover**, press **Add index source** (later: the index menu, **Manage index sources…**) and add this URL:
+
+   ```text
+   https://raw.githubusercontent.com/wannaFlyKa/dsh-raw-agent/main/market/index.json
+   ```
+
+4. The list shows **Claude Code (raw agent)**. Press **Install**, check the Git repository and commit in the dialog,
+   and press **Install** again. When it says **Installed**, press **Enable now** (or switch the plugin on in the
+   **Installed** tab).
+5. Start a new session and pick the **Claude Code** agent preset.
+
+Discover also shows the newer version when one is out ("Update available"). DSH has no upgrade button yet: remove the
+plugin in **Installed**, then install it again from **Discover**.
+
+### From the GitHub Release
 
 ```sh
-dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.2/dsh-raw-agent-0.1.2.tgz
+dsh plugin --profile <profile> add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.3/dsh-raw-agent-0.1.3.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Restart DSH
@@ -42,8 +66,8 @@ profile's `pnpm-workspace.yaml` before the add.
 To remove the plugin: `dsh plugin --profile <profile> remove dsh-raw-agent`. Removing or upgrading it ends every running
 Claude Code process of that profile, as quitting the terminal app does.
 
-The package is not on npm yet. npm publishing is planned for later; then `dsh plugin --profile <profile> add
-dsh-raw-agent` will do the same.
+The package is not on npm. The Discover index and the release tarball are the two install paths; both install the same
+files.
 
 ### From source
 
@@ -54,7 +78,7 @@ corepack enable
 pnpm install --frozen-lockfile
 pnpm build
 pnpm --filter dsh-raw-agent pack --pack-destination dist/
-dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.2.tgz"
+dsh plugin --profile <profile> add "$PWD/dist/dsh-raw-agent-0.1.3.tgz"
 ```
 
 pnpm 11 resolves `--pack-destination` from the folder you run it in, so the tarball lands in `dist/` at the repo
@@ -83,7 +107,7 @@ root. Pass an absolute path to a local tarball. Restart DSH after the add.
 | Esc Esc opens rewind | No double-Esc key. Use **Rewind** in the composer row (conversation, code, or both). |
 | `/model`, `/permission` | Our chips in the composer row, or `/model` and `/permission` (it lists only Claude Code's modes). The mode chip is grey (default), blue (plan), amber (accept edits, auto, don't ask) or red (bypass). DSH's own model seat changes the DSH profile default, not this session. |
 | Full access (`--dangerously-skip-permissions`) | DSH's file access ("Workspace Write", "Full access") does not apply to Claude Code; it is hidden in Claude Code sessions. Use the `bypassPermissions` mode (turn on the plugin option `allowDangerouslySkipPermissions` first: the `raw-agent` row, `config.options`, in your profile's `cordis.patch.yml`) or `auto`. |
-| `/btw` | Works: the question and answer show in the **Side chat** tab in DSH's right sidebar (0.1.2). The **Side chat** button in the composer row opens it too. Nothing goes into the conversation. |
+| `/btw` | Works: the question and answer show in the **Side chat** tab in DSH's right sidebar. The **Side chat** button in the composer row opens it too. Nothing goes into the conversation. |
 | Background tasks in the footer | DSH jobs. The session stays free while they run. |
 | Subagents inline | DSH child sessions (the **Agents** button in the session header). |
 | Tool calls printed in full | DSH folds them into "Called tools"; open the fold to see the command and its output. |

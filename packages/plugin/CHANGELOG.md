@@ -3,6 +3,21 @@
 All notable changes to `dsh-raw-agent`. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 package follows [Semantic Versioning](https://semver.org/). The plugin service API has its own number (`apiVersion`, now 1).
 
+## 0.1.3 (2026-11-08)
+
+Install from DSH's plugin market. No change to the plugin code.
+
+### Added
+
+- **DSH Discover.** The project publishes a DSH plugin index (format 1) at
+  `https://raw.githubusercontent.com/wannaFlyKa/dsh-raw-agent/main/market/index.json`. Turn on **Custom plugin indexes**
+  in **Plugins**, add that URL in **Discover**, and install **Claude Code (raw agent)** from there. npm is not used:
+  each version installs from a pinned commit on the repository's `dist` branch, which holds exactly the files of that
+  version's release tarball. The README `overrides` block applies to this install too.
+- **Release job.** Each `v*` tag now also publishes the packed files as a `dist` commit (tagged `dist-vX.Y.Z`), checks
+  that `pnpm add` of that commit gives the tarball's files, and adds the version to the index on `main`. The index is
+  validated with DSH's own `parseMarketIndex` in the tests and in the release job.
+
 ## 0.1.2 (2026-11-07)
 
 The side chat moves into DSH's right sidebar. No change to what reaches Claude Code.

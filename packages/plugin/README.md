@@ -4,7 +4,7 @@ A [DeepSeek Harness (DSH)](https://www.npmjs.com/package/@deepseek-ai/dsh) plugi
 Claude Code CLI** as the agent of a DSH session. DSH gives the interface and its plugin system. Claude Code does the work,
 with your settings, exactly as in the terminal.
 
-> Status: pre-release (0.1.2). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
+> Status: pre-release (0.1.3). Tested on DSH 0.2.2-rc.1 and Claude Code 2.1.318 on Linux. macOS and Windows run in CI
 > only.
 
 ## Requirements
@@ -15,23 +15,42 @@ with your settings, exactly as in the terminal.
 
 ## Install
 
-DSH installs plugins into a profile. Pick the web profile you use (for example `web`) and add the tarball from the
-GitHub Release. A new profile name gets no web app; make it from the web template first
-(`dsh --profile <name> --from-default-profile web --dump-config`).
+DSH installs plugins into a profile. The package is not on npm; there are two install paths, and both install the same
+files.
+
+### From DSH Discover
+
+This project publishes a DSH plugin index. Each version in it installs from a pinned Git commit of the
+[project repository](https://github.com/wannaFlyKa/dsh-raw-agent) (the `dist` branch).
+
+1. In the DSH web UI, open **Plugins** and, under **Experimental plugins**, switch on **Custom plugin indexes**.
+2. Open the new **Discover** tab, press **Add index source** and add
+   `https://raw.githubusercontent.com/wannaFlyKa/dsh-raw-agent/main/market/index.json`.
+3. Pick **Claude Code (raw agent)**, press **Install** and confirm. Then press **Enable now** (or switch the plugin on
+   in the **Installed** tab).
+
+The `overrides` block in
+[Optional: drop the SDK platform package](https://github.com/wannaFlyKa/dsh-raw-agent/tree/main/packages/plugin#optional-drop-the-sdk-platform-package)
+applies to this install too: add it to the profile first.
+
+### From the GitHub Release
+
+Pick the web profile you use (for example `web`) and add the tarball from the GitHub Release. A new profile name gets
+no web app; make it from the web template first (`dsh --profile <name> --from-default-profile web --dump-config`).
 
 ```sh
-dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.2/dsh-raw-agent-0.1.2.tgz
+dsh plugin --profile web add https://github.com/wannaFlyKa/dsh-raw-agent/releases/download/v0.1.3/dsh-raw-agent-0.1.3.tgz
 ```
 
 `dsh plugin` passes its arguments to `pnpm add` in the profile folder, and pnpm accepts a tarball URL. Optional: to skip
 the large SDK platform package, add the `overrides` block from
-[Optional: drop the SDK platform package](#optional-drop-the-sdk-platform-package) to the profile first.
+[Optional: drop the SDK platform package](https://github.com/wannaFlyKa/dsh-raw-agent/tree/main/packages/plugin#optional-drop-the-sdk-platform-package)
+to the profile first. Restart DSH after the add.
 
-The package is not on npm yet; npm publishing is planned for later. To build from source, see the
-[project README](https://github.com/wannaFlyKa/dsh-raw-agent#from-source). It also has the first-run steps (folder
-dialog, starting Claude Code from the model picker, the trust question).
+To build from source, see the [project README](https://github.com/wannaFlyKa/dsh-raw-agent#from-source). It also has
+the first-run steps (folder dialog, starting Claude Code from the model picker, the trust question).
 
-Restart DSH, start a new session, and pick the **Claude Code** agent preset. To remove the plugin:
+Start a new session and pick the **Claude Code** agent preset. To remove the plugin (or remove it in **Installed**):
 
 ```sh
 dsh plugin --profile web remove dsh-raw-agent
