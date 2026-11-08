@@ -50,7 +50,8 @@ export function distManifestProblems(manifest) {
 }
 
 function git(args, opts = {}) {
-  return execFileSync('git', args, { cwd: root, encoding: 'utf8', ...opts }).trim();
+  // With `stdio: 'inherit'` there is no output to return (null).
+  return (execFileSync('git', args, { cwd: root, encoding: 'utf8', ...opts }) ?? '').trim();
 }
 
 function tryGit(args, opts = {}) {
